@@ -4982,13 +4982,21 @@ function netJoin(code){
   code=(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);
   if(code.length!==6){ netStatus('Enter the 6-character code your friend gave you.',1); return; }
   if(typeof Peer==='undefined'){ netStatus('Multiplayer library did not load &mdash; check your connection.',1); return; }
-  if(NET.peer){ try{ NET.peer.destroy(); }catch(e){} NET.peer=null; NET.conns=[]; NET.hostConn=null; }
-  NET.mode='off';
+  if(code===NET.code&&NET.mode==='host'){ netStatus('That is your own room code.',1); return; }
   netStatus('Connecting to <b>'+code+'</b>&hellip;');
-  NET.peer=new Peer({debug:0});
-  NET.peer.on('open',()=>{
-    const c=NET.peer.connect('deadaisle-'+code,{reliable:false});
+
+  const dial=()=>{
+    /* One Peer can host its own room AND dial someone else's, so reuse it.
+       Destroying and immediately recreating the peer - which is what this
+       used to do - left the new one's signalling wedged: the offer reached
+       the host but its RTCPeerConnection never left 'stable'. */
+    for(const c of NET.conns){ try{ c.close(); }catch(e){} }
+    NET.conns=[];
+    const c=NET.peer.connect('deadaisle-'+code);
+    if(!c){ netStatus('Could not open a connection.',1); return; }
+    let opened=false;
     c.on('open',()=>{
+      opened=true;
       NET.mode='client'; NET.hostConn=c; NET.code=code; NET.ready=true;
       netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id});
       netStatus('Joined room <b>'+code+'</b>. Waiting for the host to start.');
@@ -4996,13 +5004,20 @@ function netJoin(code){
       if(btn){ btn.disabled=true; btn.textContent='WAITING'; }
     });
     c.on('data',d=>netOnData(c,d));
-    c.on('close',()=>{ netStatus('Host disconnected.',1); netReset(); });
-    c.on('error',()=>{ netStatus('Lost the connection to the host.',1); });
-  });
-  NET.peer.on('error',e=>{
-    const m=String(e&&e.type||e);
-    netStatus(m==='peer-unavailable'?'No room with that code is open.':'Connection error: '+m,1);
-  });
+    c.on('close',()=>{ if(NET.mode==='client'){ netStatus('Host disconnected.',1); netReset(); } });
+    c.on('error',()=>netStatus('Lost the connection to the host.',1));
+    setTimeout(()=>{ if(!opened) netStatus('No answer from room <b>'+code+'</b>. Check the code and that the host still has the tab open.',1); }, 12000);
+  };
+
+  if(NET.peer && !NET.peer.destroyed && !NET.peer.disconnected && NET.peer.id) dial();
+  else {
+    NET.peer=new Peer({debug:0});
+    NET.peer.on('open',dial);
+    NET.peer.on('error',e=>{
+      const m=String(e&&e.type||e);
+      netStatus(m==='peer-unavailable'?'No room with that code is open.':'Connection error: '+m,1);
+    });
+  }
 }
 function netReset(){
   for(const id of Object.keys(NET.players)) netDropPlayer(id);
@@ -5141,6 +5156,7 @@ function netTick(dt,now){
 }
 window.netHost=netHost; window.netJoin=netJoin; window.netReset=netReset;
 window.__netTick=netTick;
+window.__net=NET;
 
 /* ===================== LOBBY =====================
    A staged shot in the TOPS lot: up to four operators on lit pads with the
@@ -5254,7 +5270,10 @@ window.lobbyShow=lobbyShow;
   const play=document.getElementById('btn-play');
   play&&play.addEventListener('click',()=>{
     if(NET.mode==='client')return;                 /* the host starts the run */
-    if(NET.mode==='host'&&NET.conns.length){ NET.started=true; netSend({t:'start'}); }
+    /* Mark the run started even with an empty room: the 'hello' handler
+       replays a start to anyone who joins afterwards, so a friend who is
+       still connecting when you press PLAY drops straight into the run. */
+    if(NET.mode==='host'){ NET.started=true; if(NET.conns.length) netSend({t:'start'}); }
     startGame();
   });
   const tabS=document.getElementById('tab-settings');
