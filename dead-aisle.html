@@ -4156,8 +4156,12 @@ function zombiesUpdate(dt,now){
       continue;
     }
     if(lotIsIdle(z))continue;
-    // steer toward player
-    const dx=player.pos.x-rp.x, dz=player.pos.z-rp.z;
+    /* Steer toward the NEAREST player, not always the host. Targeting
+       player.pos unconditionally meant every hostile beelined past a client
+       to reach the host, and a client could never be touched. */
+    const tgt=netNearestTarget(rp);
+    z.netTgt=tgt.id;
+    const dx=tgt.x-rp.x, dz=tgt.z-rp.z;
     const dist=Math.hypot(dx,dz);
     const dir=V3(dx/dist,0,dz/dist);
     const faceYaw=Math.atan2(dx,dz);
@@ -4201,9 +4205,13 @@ function zombiesUpdate(dt,now){
           z.attackCd=1.05;
           z.attacking=.35;
           setTimeout(()=>{
-            if(z.state!=='chase'||!player.alive)return;
+            if(z.state!=='chase')return;
+            const t=netTargetById(z.netTgt);
+            if(!t)return;
             /* horizontal only - rp sits on the floor, player.pos is the eye */
-            if(Math.hypot(rp.x-player.pos.x, rp.z-player.pos.z)<1.6){ damagePlayer(18,rp); Audio.bite(); }
+            if(Math.hypot(rp.x-t.x, rp.z-t.z)>=1.6)return;
+            if(t.id==='@me'){ if(player.alive){ damagePlayer(18,rp); Audio.bite(); } }
+            else netHurtRemote(t.id,18);
           },260);
           if(now>=(z.voiceCd||0) && HV.at(z.voice,rp,now,1)) z.voiceCd=now+rand(5,9);
           else Audio.scream(rp);
@@ -5071,7 +5079,8 @@ const NET={
   name:'', id:'',
   players:{},                   /* id -> {name,x,y,z,yaw,hp,firing,dead,obj,mixer,t} */
   lastSend:0, lastSnap:0,
-  SEND_HZ:20, SNAP_HZ:14,
+  SEND_HZ:20, SNAP_HZ:18,
+  carT:null,                    /* the host's authoritative car state */
   ready:false, started:false,
 };
 try{ NET.name=(localStorage.getItem('deadaisle.name')||'').slice(0,12); }catch(e){}
@@ -5102,17 +5111,33 @@ function netAvatarFor(pl){
     const clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
     if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
   }
-  /* a name tag so you can tell who is who down an aisle */
-  const cv=document.createElement('canvas'); cv.width=256; cv.height=64;
-  const g=cv.getContext('2d');
-  g.fillStyle='rgba(0,0,0,.55)'; g.fillRect(0,0,256,64);
-  g.font='700 30px Arial'; g.textAlign='center'; g.textBaseline='middle';
-  g.fillStyle='#f6d434'; g.fillText((pl.name||'?').slice(0,12),128,34);
-  const tex=new THREE.CanvasTexture(cv); tex.colorSpace=THREE.SRGBColorSpace;
-  const tag=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,depthTest:false,transparent:true}));
-  tag.scale.set(1.1,.28,1); tag.position.y=2.05; tag.renderOrder=999;
-  a.add(tag); pl.tag=tag;
+  netTagFor(pl);
   return a;
+}
+/* Floating username. Rebuilt whenever the name changes - the tag used to be
+   baked once at avatar creation, so anyone whose name arrived after their
+   first snapshot was labelled '?' forever. */
+function netTagFor(pl){
+  if(!pl.obj)return;
+  pl.tagDirty=false;
+  const nm=(pl.name||'PLAYER').slice(0,12).toUpperCase();
+  const cv=document.createElement('canvas'); cv.width=512; cv.height=128;
+  const g=cv.getContext('2d');
+  g.clearRect(0,0,512,128);
+  g.font='800 60px "Helvetica Neue", Arial, sans-serif';
+  g.textAlign='center'; g.textBaseline='middle';
+  /* outline, so the name stays readable against a lit shelf or the sky */
+  g.lineWidth=12; g.strokeStyle='rgba(0,0,0,.85)'; g.strokeText(nm,256,68);
+  g.fillStyle='#f6d434'; g.fillText(nm,256,68);
+  if(pl.tag){ pl.obj.remove(pl.tag); pl.tag.material.map&&pl.tag.material.map.dispose(); pl.tag.material.dispose(); }
+  const tex=new THREE.CanvasTexture(cv); tex.colorSpace=THREE.SRGBColorSpace;
+  const tag=new THREE.Sprite(new THREE.SpriteMaterial({
+    map:tex, depthTest:false, depthWrite:false, transparent:true, sizeAttenuation:true }));
+  tag.scale.set(1.7,.42,1);
+  tag.position.y=2.15;
+  tag.renderOrder=999;
+  tag.layers.set(0);
+  pl.obj.add(tag); pl.tag=tag;
 }
 function netDropPlayer(id){
   const pl=NET.players[id]; if(!pl)return;
@@ -5184,7 +5209,11 @@ function netJoin(code){
     c.on('data',d=>netOnData(c,d));
     c.on('close',()=>{ if(NET.mode==='client'){ netStatus('Host disconnected.',1); netReset(); } });
     c.on('error',()=>netStatus('Lost the connection to the host.',1));
-    setTimeout(()=>{ if(!opened) netStatus('No answer from room <b>'+code+'</b>. Check the code and that the host still has the tab open.',1); }, 12000);
+    /* two nudges rather than one hard failure: a first connection over a
+       slow link can take a while, and calling it dead at 12 s scared people
+       off rooms that were about to open */
+    setTimeout(()=>{ if(!opened) netStatus('Still connecting to <b>'+code+'</b>&hellip; this can take a few seconds.'); }, 6000);
+    setTimeout(()=>{ if(!opened) netStatus('No answer from room <b>'+code+'</b>. Check the code, and that the host still has the tab open.',1); }, 25000);
   };
 
   if(NET.peer && !NET.peer.destroyed && !NET.peer.disconnected && NET.peer.id) dial();
@@ -5243,6 +5272,11 @@ function netOnData(c,raw){
       if(document.pointerLockElement!==document.body) netGrab();
       break;
     }
+    case 'hurt': {                                /* a hostile reached me */
+      if(NET.mode!=='client')break;
+      if(player.alive){ damagePlayer(d.dmg||18, V3(player.pos.x,1,player.pos.z-1)); Audio.bite(); }
+      break;
+    }
     case 'bump': {                                /* the driver hit me */
       if(NET.mode!=='client')break;
       player.vel.x += d.d[0]*d.s*.55;
@@ -5255,6 +5289,32 @@ function netOnData(c,raw){
     case 'snap': netApplySnap(d); break;
   }
 }
+/* ---- who a hostile should be going for ---- */
+function netNearestTarget(rp){
+  let bx=player.pos.x, bz=player.pos.z, bid='@me';
+  let bd=player.alive?((bx-rp.x)**2+(bz-rp.z)**2):Infinity;
+  if(NET.mode==='host'){
+    for(const id of Object.keys(NET.players)){
+      const pl=NET.players[id];
+      if(!pl||pl.dead||pl.x===undefined)continue;
+      const d=((+pl.x)-rp.x)**2+((+pl.z)-rp.z)**2;
+      if(d<bd){ bd=d; bx=+pl.x; bz=+pl.z; bid=id; }
+    }
+  }
+  if(!isFinite(bd)){ bx=player.pos.x; bz=player.pos.z; bid='@me'; }
+  return {x:bx,z:bz,id:bid};
+}
+function netTargetById(id){
+  if(!id||id==='@me') return player.alive?{x:player.pos.x,z:player.pos.z,id:'@me'}:null;
+  const pl=NET.players[id];
+  if(!pl||pl.dead||pl.x===undefined)return null;
+  return {x:+pl.x,z:+pl.z,id};
+}
+function netHurtRemote(id,dmg){
+  const c=NET.conns.find(x=>x.peer===id);
+  if(c) netSendTo(c,{t:'hurt',dmg});
+}
+
 /* ---- world sync ---- */
 const NET_ST={idle:0,chase:1,dead:2,lotidle:3,flee:4};
 const NET_STR=['idle','chase','dead','lotidle','chase'];
@@ -5278,7 +5338,8 @@ function netBuildSnap(){
   ps.push(['@host',NET.name,+player.pos.x.toFixed(2),+player.pos.y.toFixed(2),
            +player.pos.z.toFixed(2),+player.yaw.toFixed(2),Math.round(player.hp),player.alive?0:1]);
   const car=townCar?[+townCar.position.x.toFixed(2), +townCar.position.z.toFixed(2),
-                     +townCar.rotation.y.toFixed(3), +carSpeed.toFixed(2), carParked?1:0]:null;
+                     +townCar.rotation.y.toFixed(3), +carSpeed.toFixed(2), carParked?1:0,
+                     +carSteerVal.toFixed(3)]:null;
   return {t:'snap', z:zs, p:ps, c:car,
           m:[mission.insideLeft|0, threatCount()|0, phase, mission.round|0]};
 }
@@ -5286,12 +5347,17 @@ function netApplySnap(d){
   if(NET.mode!=='client')return;
   /* hostiles: the host owns them, we just place and animate what it sends */
   const seen=new Set();
+  const tNow=performance.now()/1000;
   for(const e of d.z){
     const z=zombies[e[0]]; if(!z)continue;
     seen.add(e[0]);
-    z.netTarget=z.netTarget||V3();
-    z.netTarget.set(e[1],e[2],e[3]);
-    z.netYaw=e[4]; z.hp=e[6];
+    /* keep the previous sample so we can interpolate BETWEEN snapshots
+       instead of chasing whatever arrived last - chasing the latest is what
+       makes everything rubber-band */
+    z.netP0=z.netP1||{x:e[1],y:e[2],z:e[3],yaw:e[4]};
+    z.netP1={x:e[1],y:e[2],z:e[3],yaw:e[4]};
+    z.netT0=z.netT1||tNow; z.netT1=tNow;
+    z.hp=e[6];
     const st=NET_STR[e[5]]||'idle';
     if(z.state!==st){ z.state=st; if(st==='dead'){ z.deadT=0; z.cd=null; } }
     z.root.visible=(st!=='idle');
@@ -5305,21 +5371,36 @@ function netApplySnap(d){
     if(id===NET.peer?.id)continue;
     live.add(id);
     const pl=NET.players[id]=NET.players[id]||{};
-    pl.name=e[1]; pl.x=e[2]; pl.y=e[3]; pl.z=e[4]; pl.yaw=e[5]; pl.hp=e[6]; pl.dead=!!e[7];
+    if(pl.name!==e[1]){ pl.name=e[1]; pl.tagDirty=true; }
+    pl.p0=pl.p1||{x:e[2],y:e[3],z:e[4],yaw:e[5]};
+    pl.p1={x:e[2],y:e[3],z:e[4],yaw:e[5]};
+    pl.t0=(pl.t1===undefined?tNow:pl.t1); pl.t1=tNow;
+    pl.x=e[2]; pl.y=e[3]; pl.z=e[4]; pl.yaw=e[5]; pl.hp=e[6]; pl.dead=!!e[7];
     netAvatarFor(pl);
   }
   for(const id of Object.keys(NET.players)) if(!live.has(id)) netDropPlayer(id);
-  /* One car for the whole party: the host drives it, everyone else rides. */
+  /* One car for the whole party: the host drives it, everyone else rides.
+     Do NOT snap it here. The passenger's camera is bolted to the cabin, so
+     writing the transform 18 times a second teleported their whole view.
+     Record the target and let netRenderTick dead-reckon toward it. */
   if(d.c&&townCar){
-    townCar.position.set(d.c[0],0,d.c[1]);
-    townCar.rotation.y=d.c[2];
+    NET.carT={x:d.c[0], z:d.c[1], ry:d.c[2], speed:d.c[3], parked:!!d.c[4]};
     carSpeed=d.c[3];
-    carParked=!!d.c[4];
-    for(const w of (townCar.userData.wheels||[])) w.rotation.x-=carSpeed*(1/NET.SNAP_HZ)/(townCar.userData.wheelR||.34)*(townCar.userData.wheelSpin||1);
+    carSteerVal=d.c[5]||0;        /* or the passenger's front wheels never turn */
+    carParked=NET.carT.parked;
+    if(!NET.carSeen){ NET.carSeen=true; townCar.position.set(d.c[0],0,d.c[1]); townCar.rotation.y=d.c[2]; }
   }
   if(d.m){
     mission.insideLeft=d.m[0];
     if(d.m[3]) mission.round=d.m[3];
+    /* missionUpdate is host-only, so a client's HUD would otherwise sit at
+       zero threats and round 1 for the whole match */
+    const tc=d.m[1]|0;
+    setThreatCount&&setThreatCount(tc);
+    const wn=document.getElementById('wave-num');
+    if(wn&&(phase==='outside'||phase==='inside')) wn.textContent=String(tc).padStart(2,'0');
+    const rc=document.getElementById('round-chip');
+    if(rc) rc.textContent='ROUND '+(mission.round|0);
     if(d.m[2]&&d.m[2]!==phase) netFollowPhase(d.m[2]);
   }
 }
@@ -5344,24 +5425,66 @@ function netFollowPhase(p){
 }
 
 /* place remote bodies and drive the hostiles a client does not simulate */
+/* Render one snapshot-interval in the past and interpolate between the two
+   samples that straddle that instant. Chasing the newest sample instead is
+   what produced the rubber-banding. */
+function netLerpAngle(a,b,t){
+  let d=b-a; while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
+  return a+d*t;
+}
+function netAlpha(t0,t1,now){
+  const span=(t1-t0);
+  if(!(span>1e-4)) return 1;
+  return clamp((now-(1/NET.SNAP_HZ)-t0)/span, 0, 1.25);   /* a little extrapolation */
+}
 function netRenderTick(dt){
+  const now=performance.now()/1000;
   for(const id of Object.keys(NET.players)){
     const pl=NET.players[id]; const o=pl.obj; if(!o)continue;
     o.visible=!pl.dead;
-    const k=clamp(dt*12,0,1);
-    o.position.lerp(_netV.set(+pl.x||0,(+pl.y||1.7)-1.7,+pl.z||0),k);
-    let dy=((+pl.yaw||0)+Math.PI)-o.rotation.y;
-    while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
-    o.rotation.y+=dy*k;
+    if(pl.tagDirty) netTagFor(pl);
+    if(pl.p0&&pl.p1){
+      const a=netAlpha(pl.t0,pl.t1,now);
+      const x=pl.p0.x+(pl.p1.x-pl.p0.x)*a;
+      const y=pl.p0.y+(pl.p1.y-pl.p0.y)*a;
+      const z=pl.p0.z+(pl.p1.z-pl.p0.z)*a;
+      _netV.set(x,y-1.7,z);
+      /* a big jump means a teleport (phase change, respawn) - do not glide */
+      o.position.distanceToSquared(_netV)>36 ? o.position.copy(_netV)
+                                             : o.position.lerp(_netV,clamp(dt*22,0,1));
+      o.rotation.y=netLerpAngle(o.rotation.y, netLerpAngle(pl.p0.yaw,pl.p1.yaw,a)+Math.PI, clamp(dt*16,0,1));
+    }
     if(pl.mixer)pl.mixer.update(dt);
   }
   if(NET.mode!=='client')return;
+
+  /* the shared car: integrate from the reported speed, then ease onto the
+     authoritative transform, so it moves every frame instead of 18 a second */
+  if(NET.carT&&townCar){
+    const t=NET.carT;
+    const fx=-Math.sin(townCar.rotation.y), fz=-Math.cos(townCar.rotation.y);
+    townCar.position.x+=fx*t.speed*dt;
+    townCar.position.z+=fz*t.speed*dt;
+    const ex=t.x-townCar.position.x, ez=t.z-townCar.position.z;
+    if(ex*ex+ez*ez>25){ townCar.position.set(t.x,0,t.z); townCar.rotation.y=t.ry; }
+    else {
+      const k=clamp(dt*3.5,0,1);
+      townCar.position.x+=ex*k; townCar.position.z+=ez*k;
+      townCar.rotation.y=netLerpAngle(townCar.rotation.y,t.ry,clamp(dt*7,0,1));
+    }
+    const wr=townCar.userData.wheelR||.34, wsg=townCar.userData.wheelSpin||1;
+    for(const w of (townCar.userData.wheels||[])) w.rotation.x-=wsg*t.speed*dt/wr;
+    for(const w of (townCar.userData.steers||[])) w.rotation.y=carSteerVal;
+  }
+
   for(const z of zombies){
-    if(!z.root.visible||!z.netTarget)continue;
-    z.root.position.lerp(z.netTarget,clamp(dt*14,0,1));
-    let dy=z.netYaw-z.root.rotation.y;
-    while(dy>Math.PI)dy-=Math.PI*2; while(dy<-Math.PI)dy+=Math.PI*2;
-    z.root.rotation.y+=dy*clamp(dt*10,0,1);
+    if(!z.root.visible||!z.netP1)continue;
+    const a=netAlpha(z.netT0,z.netT1,now);
+    const p0=z.netP0,p1=z.netP1;
+    _netV.set(p0.x+(p1.x-p0.x)*a, p0.y+(p1.y-p0.y)*a, p0.z+(p1.z-p0.z)*a);
+    z.root.position.distanceToSquared(_netV)>49 ? z.root.position.copy(_netV)
+                                                : z.root.position.lerp(_netV,clamp(dt*24,0,1));
+    z.root.rotation.y=netLerpAngle(z.root.rotation.y, netLerpAngle(p0.yaw,p1.yaw,a), clamp(dt*14,0,1));
     if(z.mixer){
       if(typeof hostilePlay==='function')
         hostilePlay(z, z.state==='dead'?'death':(z.state==='chase'?'run':'idle'), .2);
@@ -6947,6 +7070,10 @@ function resetRun(){
   for(let i=shells.length-1;i>=0;i--){scene.remove(shells[i].m);} shells.length=0;
   camera.rotation.z=0;
   Steps.stop();
+  NET.carSeen=false; NET.carT=null;      /* snap, do not glide, into the new run */
+  for(const id of Object.keys(NET.players)){
+    const pl=NET.players[id]; pl.p0=null; pl.p1=null; pl.t0=undefined; pl.t1=undefined;
+  }
   /* dmgFlash is always exactly 1 after a death and only decays in
      playerUpdate, which does not run during the drive - so without this the
      red vignette stayed pinned through the whole of run 2's opening. */
