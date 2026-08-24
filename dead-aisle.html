@@ -1087,10 +1087,20 @@ for(const wx of [-16,-8,0,8,16]){
      the doorway lets light in now, and the quad lies flat so it can never be
      caught edge-on from eye height. */
   if(wx===0){
-    const shaft=new THREE.Mesh(new THREE.PlaneGeometry(4.6,7.5),
-      new THREE.MeshBasicMaterial({color:0x5a6f95,transparent:true,opacity:.10,
+    /* Soft-edged, or a flat additive quad reads as a beige rug with hard
+       corners painted on the floorboards. */
+    const poolCv=document.createElement('canvas'); poolCv.width=poolCv.height=128;
+    { const g=poolCv.getContext('2d');
+      const gr=g.createRadialGradient(64,64,4,64,64,62);
+      gr.addColorStop(0,'rgba(255,255,255,1)');
+      gr.addColorStop(.45,'rgba(255,255,255,.55)');
+      gr.addColorStop(1,'rgba(255,255,255,0)');
+      g.fillStyle=gr; g.fillRect(0,0,128,128); }
+    const poolTex=new THREE.CanvasTexture(poolCv);
+    const shaft=new THREE.Mesh(new THREE.PlaneGeometry(5.4,5.8),
+      new THREE.MeshBasicMaterial({color:0x5a6f95,map:poolTex,transparent:true,opacity:.16,
         blending:THREE.AdditiveBlending,depthWrite:false}));
-    shaft.position.set(0,.02,11.6); shaft.rotation.x=-Math.PI/2; shaft.renderOrder=-1;
+    shaft.position.set(0,.02,11.7); shaft.rotation.x=-Math.PI/2; shaft.renderOrder=-1;
     scene.add(shaft);
     shaftMats.push(shaft.material);
   }
@@ -1190,6 +1200,35 @@ const SHELF_TIERS=[.38,.95,1.52];
 /* the gondola's front face is 0.75 from the row spine and the shelf plate
    is ~0.45 deep, so stock has to sit back from that or it pokes through */
 const SHELF_FACE_Z=.46;
+/* the wall run: 2.62 x 2.10 x 0.44 industrial units, open face on local +Z */
+const WALL_UNITS=[];
+const WALL_TIERS=[.30,.78,1.26,1.74];
+let WALL_FACE_Z=.10;
+window.__wallFace=v=>{ WALL_FACE_Z=v; };
+let SHELF_ITEMS=null;
+function stockWallUnits(){
+  if(!SHELF_ITEMS||!SHELF_ITEMS.length||!WALL_UNITS.length)return;
+  let n=0;
+  for(const u of WALL_UNITS){
+    if(u.userData.stocked)continue;
+    u.userData.stocked=true;
+    for(const ty of WALL_TIERS){
+      if(Math.random()<.10)continue;                 /* the odd bare shelf */
+      let x=-1.05;
+      while(x<1.0){
+        const src=SHELF_ITEMS[(Math.random()*SHELF_ITEMS.length)|0];
+        const it=src.clone(true);
+        it.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; o.frustumCulled=true; } });
+        it.scale.setScalar((src.userData.shelfScale||1)*rand(1.4,2.1));
+        it.position.set(x, ty, WALL_FACE_Z+rand(-.03,.03));
+        it.rotation.y=rand(0,Math.PI*2);
+        u.add(it); n++;
+        x+=rand(.24,.42);
+      }
+    }
+  }
+  console.info('wall shelving stocked:',n,'items across',WALL_UNITS.length,'units');
+}
 
 /* ===================== SHELF STOCK =====================
    Swap a share of the coloured product blocks for real food models, so the
@@ -1261,6 +1300,8 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
       child.visible=false;
     }
   }
+  SHELF_ITEMS=items;
+  stockWallUnits();
   console.info('shelf stock:',swapped,'food items from',items.length,'types');
 }, undefined, ()=>console.info('assets/food.glb not reachable - block products stay'));
 }
@@ -1348,7 +1389,7 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
   place('cashier',   18.9,  -5.5, -Math.PI/2);
   place('case_b',     18.5,   6.0, -Math.PI/2);
   place('case_b',    -18.5,   6.0,  Math.PI/2);
-  place('shelf_tall', 16.0, -13.6, Math.PI);
+  place('shelf_tall', 20.6, -8.0, -Math.PI/2);   /* was inside the back-wall run */
   /* the industrial shelving + cashier desk pack */
   new GLTFLoader().load('assets/storeprops.glb', (g2)=>{
     const lib2={}; for(const o of g2.scene.children.slice()) lib2[o.name]=o;
@@ -1361,9 +1402,13 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
       return c;
     };
     /* back wall run of industrial shelving */
-    for(let x=-19; x<=19; x+=2.75) put2('shelf0', x, -14.0, 0);
+    for(let x=-19; x<=19; x+=2.75){ const u=put2('shelf0', x, -14.0, 0); if(u)WALL_UNITS.push(u); }
     /* side walls */
-    for(let z=-11; z<=6; z+=2.75){ put2('shelf0', -21.2, z, Math.PI/2); put2('shelf0', 21.2, z, -Math.PI/2); }
+    for(let z=-11; z<=6; z+=2.75){
+      const a=put2('shelf0', -21.2, z, Math.PI/2);  if(a)WALL_UNITS.push(a);
+      const b2=put2('shelf0',  21.2, z, -Math.PI/2); if(b2)WALL_UNITS.push(b2);
+    }
+    stockWallUnits();          /* no-op if food.glb has not landed yet */
     /* checkout line - retire the primitive counters first so the lanes are
        not three interpenetrating desks deep */
     if(lib2['desk0']){
@@ -1402,15 +1447,37 @@ const fzTex=new THREE.CanvasTexture(fzCv); fzTex.colorSpace=THREE.SRGBColorSpace
 const fz=new THREE.Mesh(new THREE.PlaneGeometry(41,2.1), new THREE.MeshBasicMaterial({map:fzTex}));
 fz.position.set(0,1.5,-14.05); scene.add(fz);
 
-/* debris: scattered paper / boxes / carts */
+/* debris: scattered paper / boxes / carts.
+   Placed by rejection sampling - dropping them at pure random buried boxes
+   inside the shelf rows and the checkout, where they clip through and can
+   never be reached. */
 const debrisMats=[new THREE.MeshStandardMaterial({color:0xb9b4a4,roughness:.95}), new THREE.MeshStandardMaterial({color:0x6d5638,roughness:.9})];
+function floorFree(x,z,pad){
+  pad=pad||0;
+  for(const rz of [-8.2,-2.9,2.9,8.2])
+    if(Math.abs(x)<8.4+pad && Math.abs(z-rz)<1.05+pad) return false;   /* shelf rows */
+  for(const cx of [-13,-4.5,4.5,13])
+    if(Math.abs(x-cx)<2.2+pad && Math.abs(z-11.6)<1.3+pad) return false; /* checkout */
+  if(Math.abs(x)>20.2-pad) return false;                                /* wall shelving */
+  if(z<-13.2+pad) return false;                                         /* back wall run */
+  return true;
+}
+function floorSpot(minX,maxX,minZ,maxZ,pad){
+  for(let k=0;k<40;k++){
+    const x=rand(minX,maxX), z=rand(minZ,maxZ);
+    if(floorFree(x,z,pad)) return [x,z];
+  }
+  return null;
+}
 for(let i=0;i<46;i++){
+  const sp=floorSpot(-20,20,-13,14,.15); if(!sp)continue;
   const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.15,.5),rand(.02,.08),rand(.15,.4)), debrisMats[rint(0,1)]);
-  d.position.set(rand(-20,20),.03,rand(-13,14)); d.rotation.y=rand(0,6.3); scene.add(d);
+  d.position.set(sp[0],.03,sp[1]); d.rotation.y=rand(0,6.3); scene.add(d);
 }
 for(let i=0;i<8;i++){
+  const sp=floorSpot(-19,19,-13,13,.5); if(!sp)continue;
   const bx=new THREE.Mesh(new THREE.BoxGeometry(rand(.5,.9),rand(.4,.7),rand(.5,.8)), debrisMats[1]);
-  bx.position.set(rand(-19,19),.3,rand(-13,13)); bx.rotation.y=rand(0,6.3); scene.add(bx);
+  bx.position.set(sp[0],.3,sp[1]); bx.rotation.y=rand(0,6.3); scene.add(bx);
 }
 /* shopping carts tipped */
 function cart(x,z,rot){
@@ -1418,10 +1485,16 @@ function cart(x,z,rot){
   const bas=new THREE.Mesh(new THREE.BoxGeometry(1.0,.5,.7), new THREE.MeshStandardMaterial({color:0x8f9598,metalness:.8,roughness:.35,wireframe:true}));
   bas.position.y=.25; g.add(bas);
   const hd=new THREE.Mesh(new THREE.BoxGeometry(.9,.06,.06),MAT.metal); hd.position.set(0,.55,-.4); g.add(hd);
-  g.position.set(x,.15,z); g.rotation.set(rot?Math.PI/2*.9:rand(-.1,.1), rand(0,6.3), rot?.4:0);
+  /* A cart tipped 81 degrees about X swings its body out sideways, so at
+     y=0.15 the tipped ones sat 0.35 m into the floor. Upright ones are fine
+     where they are. */
+  g.position.set(x, rot?.52:.15, z);
+  g.rotation.set(rot?Math.PI/2*.9:rand(-.1,.1), rand(0,6.3), rot?.4:0);
   scene.add(g);
 }
-cart(-18,6,true); cart(17,-11,false); cart(6,13.4,false); cart(-9,-12,true); cart(19,2,false);
+/* (-18,6) put a cart inside the west deli case, and (19,2) inside the east
+   one - both moved into open floor */
+cart(-15.2,4.4,true); cart(17,-11,false); cart(6,13.4,false); cart(-9,-12,true); cart(15.4,1.2,false);
 
 /* signage */
 const signCv=document.createElement('canvas'); signCv.width=512; signCv.height=128;
@@ -4253,11 +4326,20 @@ function spawnThrowable(type,x,z,y){
   const m=src.clone(true);
   m.scale.setScalar(d.scale);
   m.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=false; } });
-  m.position.set(x, y===undefined?0:y, z);
+  m.position.set(x, 0, z);
   m.rotation.y=rand(0,Math.PI*2);
   scene.add(m);
+  /* The cart's model origin is at its centre, not its base, so dropping it at
+     y=0 buried it 0.7 m in the tarmac. Measure once and sit it on the ground. */
+  let restY = y;
+  if(restY===undefined){
+    m.updateWorldMatrix(true,true);
+    const bx=new THREE.Box3().setFromObject(m);
+    restY = isFinite(bx.min.y) ? -bx.min.y : 0;
+  }
+  m.position.y=restY;
   const t={type,mesh:m,def:d,state:'ground',vel:V3(),spin:V3(),life:0,
-           home:{x, y:(y===undefined?0:y), z}};
+           home:{x, y:restY, z}, restY};
   THROWABLES.push(t);
   return t;
 }
@@ -4395,8 +4477,9 @@ function throwablesUpdate(dt,now){
       q.x=clamp(q.x, ZBOUNDS.minX+r, ZBOUNDS.maxX-r);
       q.z=clamp(q.z, ZBOUNDS.minZ+r, ZBOUNDS.maxZ-r);
     }
-    if(t.mesh.position.y<=0.02){
-      t.mesh.position.y=0.02;
+    const restY=(t.restY||0)+0.02;   /* the cart rests on its wheels, not its origin */
+    if(t.mesh.position.y<=restY){
+      t.mesh.position.y=restY;
       if(t.def.burst && t.life>.12){
         bloodBurst(t.mesh.position.clone().setY(.15), V3(0,1,0), 8);
         t.state='gone'; scene.remove(t.mesh); continue;
@@ -4406,6 +4489,7 @@ function throwablesUpdate(dt,now){
       if(Math.abs(t.vel.y)<1.2 && t.vel.lengthSq()<1.6){
         t.state='ground'; t.vel.set(0,0,0);
         t.mesh.rotation.x=0; t.mesh.rotation.z=0;
+        t.mesh.position.y=restY;
       }
     }
     if(t.life>14){ t.state='ground'; t.vel.set(0,0,0); }
@@ -7045,7 +7129,8 @@ window.__game={player, zombies, scene, camera, renderer, zombiesUpdate, spawnZom
   LIGHT_DAY, LIGHT_NIGHT, tubeLights,
   vmGroupRef:()=>vmGroup, gunRef:()=>gun, survivors, colliders, weapon,
   keysRef:()=>keys, pausedRef:()=>({playing,paused,locked}),
-  mission, roundScale, carDrive, townCarRef:()=>townCar, carSpeedRef:v=>{ if(v!==undefined)carSpeed=v; return carSpeed; }};
+  mission, roundScale, carDrive, townCarRef:()=>townCar, carSpeedRef:v=>{ if(v!==undefined)carSpeed=v; return carSpeed; },
+  THREE};
 
 /* attract/screenshot mode: file:///...#shot */
 if(location.hash.includes('shot')){
