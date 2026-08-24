@@ -1,0 +1,6 @@
+# build output - regenerate with ./build.sh
+dist/
+
+.DS_Store
+node_modules/
+*.log
