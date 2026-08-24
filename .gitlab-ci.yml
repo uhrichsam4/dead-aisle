@@ -1,0 +1,13 @@
+# Publish the built game to GitLab Pages on every push to the default branch.
+# build.sh writes dist/; Pages serves whatever lands in public/.
+pages:
+  stage: deploy
+  image: alpine:latest
+  script:
+    - sh build.sh
+    - mv dist public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
