@@ -1346,28 +1346,68 @@ const WALL_TIERS=[.30,.78,1.26,1.74];
 let WALL_FACE_Z=.10;
 window.__wallFace=v=>{ WALL_FACE_Z=v; };
 let SHELF_ITEMS=null;
+
+/* ---- shelf stock instancing ----
+   The stock used to be one cloned object per item: ~440 in the gondola rows
+   plus ~590 across the wall units, each its own draw call for a thing a few
+   centimetres across. They are all copies of 24 source objects, so batch them
+   by source into InstancedMesh instead - same pixels, ~24 calls instead of
+   ~1030. Instances are parented to the row/unit they sit on, so the existing
+   distance culling still applies to them. */
+const _instTmp=new THREE.Matrix4(), _instInv=new THREE.Matrix4(), _instLocal=new THREE.Matrix4();
+function instanceStock(src, mats, parent){
+  if(!src||!mats.length)return 0;
+  src.updateWorldMatrix(true,true);
+  _instInv.copy(src.matrixWorld).invert();
+  let made=0;
+  src.traverse(m=>{
+    if(!m.isMesh||!m.geometry)return;
+    /* a source may be a Group of sub-meshes; each keeps its offset from the
+       source root so the instanced copy is assembled the same way */
+    _instLocal.multiplyMatrices(_instInv, m.matrixWorld);
+    const im=new THREE.InstancedMesh(m.geometry, m.material, mats.length);
+    for(let i=0;i<mats.length;i++){
+      _instTmp.multiplyMatrices(mats[i], _instLocal);
+      im.setMatrixAt(i, _instTmp);
+    }
+    im.instanceMatrix.needsUpdate=true;
+    im.castShadow=false; im.receiveShadow=true; im.frustumCulled=true;
+    parent.add(im); made++;
+  });
+  return made;
+}
+/* position + Y rotation + uniform scale -> matrix, the only transform stock uses */
+const _instQ=new THREE.Quaternion(), _instE=new THREE.Euler(), _instV=new THREE.Vector3();
+function stockMatrix(x,y,z,ry,sc){
+  _instE.set(0,ry,0); _instQ.setFromEuler(_instE); _instV.set(sc,sc,sc);
+  return new THREE.Matrix4().compose(new THREE.Vector3(x,y,z), _instQ, _instV);
+}
+
 function stockWallUnits(){
   if(!SHELF_ITEMS||!SHELF_ITEMS.length||!WALL_UNITS.length)return;
-  let n=0;
+  let n=0, batches=0;
   for(const u of WALL_UNITS){
     if(u.userData.stocked)continue;
     u.userData.stocked=true;
+    const uMats=new Map();
     for(const ty of WALL_TIERS){
       if(Math.random()<.10)continue;                 /* the odd bare shelf */
       let x=-1.05;
       while(x<1.0){
-        const src=SHELF_ITEMS[(Math.random()*SHELF_ITEMS.length)|0];
-        const it=src.clone(true);
-        it.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; o.frustumCulled=true; } });
-        it.scale.setScalar((src.userData.shelfScale||1)*rand(1.4,2.1));
-        it.position.set(x, ty, WALL_FACE_Z+rand(-.03,.03));
-        it.rotation.y=rand(0,Math.PI*2);
-        u.add(it); n++;
+        const si=(Math.random()*SHELF_ITEMS.length)|0;
+        const src=SHELF_ITEMS[si];
+        let bucket=uMats.get(si);
+        if(!bucket){ bucket=[]; uMats.set(si,bucket); }
+        bucket.push(stockMatrix(x, ty, WALL_FACE_Z+rand(-.03,.03),
+          rand(0,Math.PI*2), (src.userData.shelfScale||1)*rand(1.4,2.1)));
+        n++;
         x+=rand(.24,.42);
       }
     }
+    for(const [si,mats] of uMats) batches+=instanceStock(SHELF_ITEMS[si], mats, u);
   }
-  console.info('wall shelving stocked:',n,'items across',WALL_UNITS.length,'units');
+  console.info('wall shelving stocked:',n,'items across',WALL_UNITS.length,
+               'units in',batches,'instanced batches');
 }
 
 /* ===================== SHELF STOCK =====================
@@ -1407,8 +1447,9 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
   const base=gltf.scene.children.filter(o=>o.isMesh||o.children.length);
   const items=base.concat(shelfExtras);
   if(!items.length)return;
-  let swapped=0;
+  let swapped=0, batches=0;
   for(const row of shelfRows){
+    const rowMats=new Map();               /* source index -> instance matrices */
     for(const child of row.children.slice()){
       if(!child.userData||!child.userData.product)continue;
       if(Math.random()>.5) continue;                /* leave some as boxes */
@@ -1416,12 +1457,9 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
          used to be - fill the slot with a small cluster instead */
       const n=2+((Math.random()*3)|0);
       for(let k=0;k<n;k++){
-        const src=items[(Math.random()*items.length)|0];
-        const it=src.clone(true);
-        /* ~440 clones: casting a shadow from each one doubled the shadow pass
-           for objects a few cm across. They still receive. */
-        it.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; o.frustumCulled=true; } });
-        it.scale.setScalar((src.userData.shelfScale||1)*rand(1.5,2.3));
+        const si=(Math.random()*items.length)|0;
+        const src=items[si];
+        const sc=(src.userData.shelfScale||1)*rand(1.5,2.3);
         /* Sit them on the GONDOLA's tiers. The heights baked into
            userData.product.y (0.59/1.34/2.09) belong to the block planks that
            props.glb hides, and the top tier floated 0.47 m above the 2.17 m
@@ -1429,20 +1467,23 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
            the shelf faces, which point outward at dz +/-0.30. */
         const tier=SHELF_TIERS[clamp(Math.round((child.userData.product.y-.59)/.75),0,SHELF_TIERS.length-1)];
         const face=child.position.z>=0?1:-1;
-        it.position.set(
+        let bucket=rowMats.get(si);
+        if(!bucket){ bucket=[]; rowMats.set(si,bucket); }
+        bucket.push(stockMatrix(
           child.position.x+(k-(n-1)/2)*rand(.13,.2),
           tier,
-          face*(SHELF_FACE_Z+rand(-.05,.05)));
-        it.rotation.y=rand(0,Math.PI*2);
-        row.add(it);
+          face*(SHELF_FACE_Z+rand(-.05,.05)),
+          rand(0,Math.PI*2), sc));
         swapped++;
       }
       child.visible=false;
     }
+    for(const [si,mats] of rowMats) batches+=instanceStock(items[si], mats, row);
   }
   SHELF_ITEMS=items;
   stockWallUnits();
-  console.info('shelf stock:',swapped,'food items from',items.length,'types');
+  console.info('shelf stock:',swapped,'food items from',items.length,
+               'types in',batches,'instanced batches');
 }, undefined, ()=>console.info('assets/food.glb not reachable - block products stay'));
 }
 
