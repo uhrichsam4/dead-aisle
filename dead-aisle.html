@@ -964,12 +964,12 @@ const worldHits = []; // solid meshes bullets should stop on
 /* --- breakables --- */
 const DEBRIS=[];
 const BREAK_KINDS={
-  glass:    {hp:14,  kind:'glass',    col:0xbcd6e2, chips:16, snd:'dry'},
-  wood:     {hp:60,  kind:'wood',     col:0x7a5a38, chips:12, snd:'step'},
-  plaster:  {hp:110, kind:'concrete', col:0xb9b3a4, chips:14, snd:'step'},
-  crate:    {hp:45,  kind:'wood',     col:0x8a6a42, chips:12, snd:'step'},
-  pottery:  {hp:18,  kind:'concrete', col:0xc0a184, chips:14, snd:'dry'},
-  metal:    {hp:170, kind:'metal',    col:0x9aa0a4, chips:10, snd:'dry'},
+  glass:    {hp:14,  kind:'glass',    col:0xbcd6e2, chips:16, snd:'glassBreak'},
+  wood:     {hp:60,  kind:'wood',     col:0x7a5a38, chips:12, snd:'woodBreak'},
+  plaster:  {hp:110, kind:'concrete', col:0xb9b3a4, chips:14, snd:'rubbleBreak'},
+  crate:    {hp:45,  kind:'wood',     col:0x8a6a42, chips:12, snd:'woodBreak'},
+  pottery:  {hp:18,  kind:'concrete', col:0xc0a184, chips:14, snd:'rubbleBreak'},
+  metal:    {hp:170, kind:'metal',    col:0x9aa0a4, chips:10, snd:'rubbleBreak'},
 };
 function makeBreakable(mesh, kindName, hpScale){
   const d=BREAK_KINDS[kindName]; if(!mesh||!d)return mesh;
@@ -1652,7 +1652,7 @@ function setActPark(){
   PARK_SPOT.minX=P.minX; PARK_SPOT.maxX=P.maxX; PARK_SPOT.minZ=P.minZ; PARK_SPOT.maxZ=P.maxZ;
 }
 let carSpeed=0, carParked=false;
-let townCar=null, carSteerVal=0, carBrakeT=0;
+let townCar=null, carSteerVal=0, carBrakeT=0, carSkid=0;
 let carCamYaw=null, carCamRoll=0, carCamPos=V3(), carAccelS=0, carPrevSpd=0;
 /* driver-seat rig, local to the car. y is eye height above the car origin;
    the hood top sits at y=.905, so raising y pushes the hood DOWN the frame. */
@@ -1874,11 +1874,16 @@ function buildMosque(){
   const wood =new THREE.MeshStandardMaterial({color:0x5c3a24, roughness:.85});
   const trim =new THREE.MeshStandardMaterial({color:0x4a4136, roughness:.8});
 
+  /* collide: true = a real wall. 'solid' = stops bullets but no collider,
+     for anything below waist height - the movement code only tests x/z and
+     ignores collider height, so a 0.9 m trough would otherwise be an
+     invisible full-height wall across the room. */
   const box=(w,h,d,x,y,z,m,collide)=>{
     const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
     b.position.set(x,y,z); b.castShadow=true; b.receiveShadow=true; G.add(b);
-    if(collide){ colliders.push({minX:X+x-w/2,maxX:X+x+w/2,minZ:z-d/2,maxZ:z+d/2,h:y+h/2});
-                 worldHits.push(b); }
+    if(collide==='solid'){ worldHits.push(b); }
+    else if(collide){ colliders.push({minX:X+x-w/2,maxX:X+x+w/2,minZ:z-d/2,maxZ:z+d/2,h:y+h/2});
+                      worldHits.push(b); }
     return b;
   };
   /* a pointed arch drawn as a fan of voussoirs */
@@ -1975,20 +1980,20 @@ function buildMosque(){
     gl.position.set(sx*.86,3.4,sz); G.add(gl);
   }
   /* west chamber: wudu wash trough with taps */
-  box(9,.9,1.1, -13,.45,1.9, stone, true);
+  box(9,.9,1.1, -13,.45,1.9, stone, 'solid');
   for(let i=0;i<8;i++) box(.1,.5,.1, -17+i*1.1, 1.2, 1.9, gold, false);
   box(9,.12,1.1, -13,.96,1.9, teal, false);
   /* east chamber: bookcases + reading desks */
   box(.6,3.2,4.0, 24.0,1.6,3.0, wood, true);
   box(.6,3.2,4.0, 24.0,1.6,7.0, wood, true);
-  for(const dz of [2.6,5.4]) box(2.2,.1,1.0, 20.5,.78,dz, wood, true);
+  for(const dz of [2.6,5.4]) box(2.2,.1,1.0, 20.5,.78,dz, wood, 'solid');
   /* corner stores: shelving and stacked mats */
   for(const sy of [1.0,1.7,2.4]){
     box(4.6,.12,.9, -22.25,sy,1.8, wood, false);
     box(4.6,.12,.9,  22.25,sy,1.8, wood, false);
   }
-  box(1.2,.6,.8, -20.6,.3,4.0, carpet, false);
-  box(1.2,.6,.8,  20.6,.3,4.0, carpet, false);
+  box(1.2,.6,.8, -20.6,.3,4.0, carpet, 'solid');
+  box(1.2,.6,.8,  20.6,.3,4.0, carpet, 'solid');
 
   /* lighting per space, or the new rooms are pitch black */
   const vestLight=new THREE.PointLight(0xffdca8, 20, 34, 2); vestLight.position.set(X,7,11); scene.add(vestLight);
@@ -2006,7 +2011,7 @@ function buildMosque(){
   niche.position.set(0,3,-14.6); G.add(niche);
   arch(0,-14.55,1.9,.85,6,gold,'z');
   /* minbar: the stepped pulpit, always to the RIGHT of the mihrab */
-  for(let i=0;i<6;i++) box(1.9,.42,.9, 3.9,.21+i*.42, -13.6+i*.9, wood, i===0);
+  for(let i=0;i<6;i++) box(1.9,.42,.9, 3.9,.21+i*.42, -13.6+i*.9, wood, i===0?'solid':false);
   box(.2,3.2,.2, 3.0,1.6,-13.4, wood, false);
   box(.2,3.2,.2, 4.8,1.6,-13.4, wood, false);
   box(2.1,.16,.16, 3.9,3.2,-13.4, gold, false);
@@ -2028,7 +2033,9 @@ function buildMosque(){
     worldHits.push(col);
   }
   /* hanging lamps down the hall */
-  for(const lx of [-16,-8,0,8,16]) for(const lz of [-11,-3,7]){
+  /* prayer hall only - the old z=7 row hung above the new corridor and
+     chamber ceilings, stranded inside a sealed void */
+  for(const lx of [-16,-8,0,8,16]) for(const lz of [-12,-7,-2]){
     const ch=new THREE.Mesh(new THREE.CylinderGeometry(.03,.03,3.4,5), trim);
     ch.position.set(lx,10.4,lz); G.add(ch);
     const lp=new THREE.Mesh(new THREE.SphereGeometry(.36,12,8), new THREE.MeshBasicMaterial({color:0xffe2ab}));
@@ -2931,6 +2938,17 @@ function carDrive(dt,keys){
       shake=Math.max(shake,.4);
     }
   }
+
+  /* engine note tracks speed, and the tyres scrub when you brake hard or
+     corner fast - the drive used to be silent apart from the radio */
+  try{
+    Audio.engineStart();
+    Audio.engineSet(clamp(Math.abs(carSpeed)/11,0,1), (thr||rev)?1:.35);
+    const slide=clamp((Math.abs(carSteerVal)*Math.abs(carSpeed))/4.2,0,1)
+              + ((rev&&carSpeed>3)?clamp(carSpeed/9,0,1):0);
+    carSkid=clamp(slide,0,1);
+    Audio.skidSet(carSkid);
+  }catch(e){}
 
   const braking=(rev&&carSpeed>.4)||(thr&&carSpeed<-.4);
   carBrakeT=lerp(carBrakeT,braking?1:0,clamp(dt*14,0,1));
@@ -3984,7 +4002,11 @@ function shatter(mesh, dir){
       s:V3(rand(-9,9),rand(-9,9),rand(-9,9)), t:rand(2.6,4.4)});
   }
   retireMesh(mesh);
-  try{ Audio[d.snd]&&Audio[d.snd](); }catch(e){}
+  try{
+    const dist=Math.hypot(c.x-player.pos.x, c.z-player.pos.z);
+    const v=clamp(1-dist/26,0,1);
+    if(v>.03) Audio[d.snd]&&Audio[d.snd](v);
+  }catch(e){}
   shake=Math.max(shake,.16);
 }
 function debrisUpdate(dt){
@@ -4010,6 +4032,73 @@ function worldHit(h, dir, dmg){
   const b=brk.userData.brk;
   b.hp-=dmg;
   if(b.hp<=0) shatter(brk, dir);
+}
+
+/* ---- tyre smoke + skid marks ----
+   Laid under the rear wheels while the tyres are scrubbing, so hard cornering
+   and heavy braking leave something behind instead of nothing. */
+const SKIDS=[], SKID_MAX=220, SMOKE=[];
+let skidGeo=null, skidMat=null, smokeMat=null;
+function skidInit(){
+  if(skidGeo)return;
+  skidGeo=new THREE.PlaneGeometry(1,1);
+  const cv=document.createElement('canvas'); cv.width=cv.height=32;
+  const g=cv.getContext('2d');
+  const gr=g.createLinearGradient(0,0,32,0);
+  gr.addColorStop(0,'rgba(0,0,0,0)'); gr.addColorStop(.5,'rgba(0,0,0,.85)'); gr.addColorStop(1,'rgba(0,0,0,0)');
+  g.fillStyle=gr; g.fillRect(0,0,32,32);
+  const t=new THREE.CanvasTexture(cv);
+  skidMat=new THREE.MeshBasicMaterial({map:t,transparent:true,opacity:.5,depthWrite:false,
+    polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2});
+  const cv2=document.createElement('canvas'); cv2.width=cv2.height=64;
+  const g2=cv2.getContext('2d');
+  const r2=g2.createRadialGradient(32,32,2,32,32,31);
+  r2.addColorStop(0,'rgba(210,205,196,.75)'); r2.addColorStop(1,'rgba(210,205,196,0)');
+  g2.fillStyle=r2; g2.fillRect(0,0,64,64);
+  smokeMat=new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv2),transparent:true,
+    depthWrite:false,opacity:.5});
+}
+function skidMark(x,z,yaw){
+  skidInit();
+  const m=new THREE.Mesh(skidGeo,skidMat);
+  m.rotation.x=-Math.PI/2; m.rotation.z=-yaw;
+  m.position.set(x,.03,z);
+  m.scale.set(.34,1.5,1);
+  scene.add(m); SKIDS.push(m);
+  while(SKIDS.length>SKID_MAX){ scene.remove(SKIDS.shift()); }
+}
+function tyreSmoke(x,z){
+  skidInit();
+  const sp=new THREE.Sprite(smokeMat.clone());
+  sp.position.set(x+rand(-.3,.3),.25,z+rand(-.3,.3));
+  sp.scale.setScalar(rand(.6,1.1));
+  scene.add(sp);
+  SMOKE.push({sp, t:rand(.9,1.6), v:V3(rand(-.5,.5),rand(.7,1.5),rand(-.5,.5))});
+}
+function smokeUpdate(dt){
+  for(let i=SMOKE.length-1;i>=0;i--){
+    const p=SMOKE[i]; p.t-=dt;
+    p.sp.position.addScaledVector(p.v,dt);
+    p.sp.scale.multiplyScalar(1+dt*1.2);
+    p.sp.material.opacity=Math.max(0,p.t*.34);
+    if(p.t<=0){ scene.remove(p.sp); p.sp.material.dispose(); SMOKE.splice(i,1); }
+  }
+}
+let _skidT=0;
+function skidFX(dt){
+  if(!townCar||carSkid<.22){ return; }
+  _skidT-=dt;
+  if(_skidT>0)return;
+  _skidT=.035;
+  const yaw=townCar.rotation.y;
+  const rx=Math.cos(yaw), rz=-Math.sin(yaw);
+  const bx=Math.sin(yaw)*1.6, bz=Math.cos(yaw)*1.6;   /* behind the axle */
+  for(const side of [-1,1]){
+    const x=townCar.position.x+rx*side*.86+bx;
+    const z=townCar.position.z+rz*side*.86+bz;
+    skidMark(x,z,yaw);
+    if(carSkid>.5 && Math.random()<.5) tyreSmoke(x,z);
+  }
 }
 
 /* impact sparks */
@@ -5700,7 +5789,106 @@ const Audio=(()=>{
     return muted;
   }
   function setVolume(v){ vol0=clamp(v,0,1); if(master&&!muted)master.gain.value=vol0; }
-  return {shot,dry,reload,groan,scream,flesh,killGroan,hurt,bite,step,waveSting,clearSting,deathSting,toggleMute,ensure,setVolume};
+
+  /* ---- sounds the game was missing entirely ----
+     Kenney's downloads are JS-gated and Freesound's API needs a key, so these
+     are synthesised the same way every other sound in this module is. Nothing
+     above is modified; these are purely additive. */
+
+  /* engine: two detuned saws through a lowpass that tracks revs, plus a
+     breath of intake noise. One persistent voice, started on demand. */
+  let eng=null;
+  function engineStart(){
+    if(!ensure()||eng)return;
+    const g=ctx.createGain(); g.gain.value=0; g.connect(master);
+    const lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=320; lp.Q.value=6;
+    lp.connect(g);
+    const o1=ctx.createOscillator(); o1.type='sawtooth'; o1.frequency.value=48;
+    const o2=ctx.createOscillator(); o2.type='sawtooth'; o2.frequency.value=48*1.51;
+    const og=ctx.createGain(); og.gain.value=.5;
+    o1.connect(og); o2.connect(og); og.connect(lp);
+    const n=ctx.createBufferSource(); n.buffer=noiseBuf(2); n.loop=true;
+    const nf=ctx.createBiquadFilter(); nf.type='bandpass'; nf.frequency.value=680; nf.Q.value=.7;
+    const ng=ctx.createGain(); ng.gain.value=.10;
+    n.connect(nf).connect(ng).connect(g);
+    o1.start(); o2.start(); n.start();
+    eng={g,lp,o1,o2,ng};
+  }
+  function engineSet(rpm01, load){
+    if(!eng)return;
+    const t=ctx.currentTime, r=clamp(rpm01,0,1);
+    const f=42+r*126;
+    eng.o1.frequency.setTargetAtTime(f, t, .08);
+    eng.o2.frequency.setTargetAtTime(f*1.51, t, .08);
+    eng.lp.frequency.setTargetAtTime(300+r*1500, t, .10);
+    eng.g.gain.setTargetAtTime(muted?0:(.05+r*.14)*(.7+.3*clamp(load,0,1)), t, .12);
+    eng.ng.gain.setTargetAtTime(.05+r*.13, t, .12);
+  }
+  function engineStop(){
+    if(!eng)return;
+    const t=ctx.currentTime;
+    eng.g.gain.setTargetAtTime(0,t,.15);
+    const e=eng; eng=null;
+    setTimeout(()=>{ try{ e.o1.stop(); e.o2.stop(); }catch(x){} }, 500);
+  }
+
+  /* glass: a bright noise crack then a scatter of high shards */
+  function glassBreak(vol){
+    if(!ensure())return;
+    const t=ctx.currentTime, V=clamp(vol===undefined?1:vol,0,1);
+    const n=ctx.createBufferSource(); n.buffer=noiseBuf(.3);
+    const hp=ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=2600;
+    const g=ctx.createGain(); env(g,t,.002,.16*V,.16);
+    n.connect(hp).connect(g).connect(master); n.start(t); n.stop(t+.35);
+    for(let i=0;i<7;i++){
+      const o=ctx.createOscillator(); o.type='triangle';
+      const st=t+.02+Math.random()*.20;
+      o.frequency.setValueAtTime(2600+Math.random()*3600, st);
+      o.frequency.exponentialRampToValueAtTime(1100+Math.random()*900, st+.14);
+      const gg=ctx.createGain(); env(gg,st,.001,.05*V,.13);
+      o.connect(gg).connect(master); o.start(st); o.stop(st+.2);
+    }
+  }
+  /* wood: a low body thud under a dry splintering crackle */
+  function woodBreak(vol){
+    if(!ensure())return;
+    const t=ctx.currentTime, V=clamp(vol===undefined?1:vol,0,1);
+    const o=ctx.createOscillator(); o.type='sine';
+    o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(52,t+.18);
+    const g=ctx.createGain(); env(g,t,.004,.30*V,.20);
+    o.connect(g).connect(master); o.start(t); o.stop(t+.28);
+    const n=ctx.createBufferSource(); n.buffer=noiseBuf(.3);
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1500; bp.Q.value=.8;
+    const g2=ctx.createGain(); env(g2,t,.003,.20*V,.22);
+    n.connect(bp).connect(g2).connect(master); n.start(t); n.stop(t+.3);
+  }
+  /* masonry / pottery: duller, grittier */
+  function rubbleBreak(vol){
+    if(!ensure())return;
+    const t=ctx.currentTime, V=clamp(vol===undefined?1:vol,0,1);
+    const n=ctx.createBufferSource(); n.buffer=noiseBuf(.4);
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=520; bp.Q.value=.6;
+    const g=ctx.createGain(); env(g,t,.004,.28*V,.30);
+    n.connect(bp).connect(g).connect(master); n.start(t); n.stop(t+.42);
+  }
+  /* tyre scrub, held while the wheels are sliding */
+  let skidV=null;
+  function skidSet(amount){
+    if(!ensure())return;
+    const a=clamp(amount,0,1), t=ctx.currentTime;
+    if(a<=.01){ if(skidV){ skidV.g.gain.setTargetAtTime(0,t,.08); } return; }
+    if(!skidV){
+      const n=ctx.createBufferSource(); n.buffer=noiseBuf(2); n.loop=true;
+      const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1250; bp.Q.value=1.6;
+      const g=ctx.createGain(); g.gain.value=0;
+      n.connect(bp).connect(g).connect(master); n.start();
+      skidV={n,bp,g};
+    }
+    skidV.g.gain.setTargetAtTime(muted?0:a*.16, t, .05);
+    skidV.bp.frequency.setTargetAtTime(950+a*900, t, .08);
+  }
+  return {shot,dry,reload,groan,scream,flesh,killGroan,hurt,bite,step,waveSting,clearSting,deathSting,toggleMute,ensure,setVolume,
+          engineStart,engineSet,engineStop,glassBreak,woodBreak,rubbleBreak,skidSet};
 })();
 window.__toggleMute=Audio.toggleMute;
 /* ===================== NETWORK (P2P CO-OP) =====================
@@ -7744,6 +7932,11 @@ function resetRun(){
   for(let i=shells.length-1;i>=0;i--){scene.remove(shells[i].m);} shells.length=0;
   camera.rotation.z=0;
   Steps.stop();
+  for(const m of SKIDS) scene.remove(m); SKIDS.length=0;
+  for(const p of SMOKE){ scene.remove(p.sp); } SMOKE.length=0;
+  for(const p of DEBRIS){ scene.remove(p.m); } DEBRIS.length=0;
+  for(const h of HOLES) scene.remove(h); HOLES.length=0;
+  try{ Audio.engineStop(); Audio.skidSet(0); }catch(e){}
   NET.carSeen=false; NET.carT=null;      /* snap, do not glide, into the new run */
   for(const id of Object.keys(NET.players)){
     const pl=NET.players[id]; pl.p0=null; pl.p1=null; pl.t0=undefined; pl.t1=undefined;
@@ -7815,6 +8008,7 @@ function loop(){
         if(NET.mode!=='client') carDrive(dt, phase==='drive'?keys:{});   /* coast, don't drive off mid-cutscene */
         carCamera(dt);
       }else{
+        try{ Audio.engineStop(); Audio.skidSet(0); }catch(e){}
         playerUpdate(dt);
         vmUpdate(dt,now);      /* tick the mixer first so the rifle can ride */
         gunUpdate(dt,now);     /* the hand pose this frame, not last frame's */
@@ -7835,7 +8029,7 @@ function loop(){
     survivorsUpdate&&survivorsUpdate(dt,now);
     survivorsHUD&&survivorsHUD();
     bloodUpdate(dt); poolsUpdate(dt); shellsUpdate(dt); sparksUpdate(dt); tracersUpdate(dt);
-    debrisUpdate(dt);
+    debrisUpdate(dt); smokeUpdate(dt); skidFX(dt);
     groanTimer-=dt;
     if(groanTimer<=0){ groanTimer=rand(2.5,6);
       const alive=zombies.filter(z=>z.state==='chase');
@@ -7933,6 +8127,7 @@ window.__game={player, zombies, scene, camera, renderer, zombiesUpdate, spawnZom
   vmGroupRef:()=>vmGroup, gunRef:()=>gun, survivors, colliders, weapon,
   keysRef:()=>keys, pausedRef:()=>({playing,paused,locked}),
   mission, roundScale, carDrive, townCarRef:()=>townCar, carSpeedRef:v=>{ if(v!==undefined)carSpeed=v; return carSpeed; },
+  carSkidRef:()=>carSkid, skidFX, skidsRef:()=>SKIDS, smokeRef:()=>SMOKE,
   THREE};
 
 /* attract/screenshot mode: file:///...#shot */
