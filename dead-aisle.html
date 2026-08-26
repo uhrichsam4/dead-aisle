@@ -114,8 +114,8 @@
   #loadbar i { position:absolute; left:0; bottom:0; height:2px; width:0%; background:#f6d434;
                transition:width .25s ease-out; }
   #loadbar.done { opacity:0; pointer-events:none; }
-  #lobby-skins { position:absolute; left:50%; transform:translateX(-50%); bottom:24px;
-                 width:min(680px,86vw); text-align:center; }
+  #lobby-skins { position:absolute; left:50%; transform:translateX(-50%); bottom:128px;
+                 width:min(760px,88vw); text-align:center; }
   #lobby-skins h3 { margin:0 0 7px; font:700 10px/1 ui-monospace,monospace;
                     letter-spacing:.22em; color:#8b8b80; }
   #skin-row { display:flex; gap:7px; justify-content:center; flex-wrap:wrap; }
@@ -160,7 +160,7 @@
   .slot.filled { border-color:rgba(246,212,52,.45); }
   .slot.filled .dot { background:linear-gradient(135deg,#c8352b,#6a1a14); color:#fff; }
   .slot.filled .nm { color:#d6d3c6; }
-  #lobby-hint { position:absolute; left:50%; transform:translateX(-50%); bottom:132px;
+  #lobby-hint { position:absolute; left:50%; transform:translateX(-50%); bottom:224px;
     color:#6f7565; font-size:10px; letter-spacing:3px; }
   /* a client's run starts from a network message, not a click, and browsers
      refuse pointer lock without a user gesture - so ask for one */
@@ -7205,17 +7205,18 @@ function netSendTo(c,obj){ try{ if(c.open)c.send(JSON.stringify(obj)); }catch(e)
 
 function netAvatarFor(pl){
   if(pl.obj||!vmModel)return pl.obj;
-  const a=lobbyAvatar(); if(!a)return null;
-  skinApply(a, skinIndexOf(pl.skin||'operator'));
+  const made=skinMake(skinIndexOf(pl.skin||'operator')) || skinMake(0);
+  const a=made&&made.obj; if(!a)return null;
   scene.add(a);
   pl.obj=a;
   pl.mixer=new THREE.AnimationMixer(a);
-  const names=Object.keys(vmActions);
-  const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
-  if(idle&&vmMixer){
-    const clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
-    if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
+  let clip=skinIdleClip(made.clips);
+  if(!clip&&vmMixer){
+    const names=Object.keys(vmActions);
+    const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
+    clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
   }
+  if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
   netTagFor(pl);
   return a;
 }
@@ -7356,7 +7357,9 @@ function netOnData(c,raw){
     case 'skin': {                                /* someone changed outfit */
       const pl=NET.players[c.peer];
       if(pl){ pl.skin=d.s;
-              if(pl.obj) skinApply(pl.obj, skinIndexOf(d.s)); }
+              /* may swap the rig, not just the colours - rebuild */
+              if(pl.obj){ pl.obj.removeFromParent(); pl.obj=null; pl.mixer=null; pl.act=null;
+                          netAvatarFor(pl); } }
       break;
     }
     case 'in': {                                  /* client -> host: my state */
@@ -7699,7 +7702,23 @@ const SKINS=[
   {id:'coastal',  name:'COASTAL',  pal:['#e6e2d6','#2f6f78','#9a9384'], skin:'#c98f60', chip:'#2f6f78'},
   {id:'ember',    name:'EMBER',    pal:['#3a1d16','#8a3a1e','#c4652c'], skin:'#b3805a', chip:'#8a3a1e'},
   {id:'arctic',   name:'ARCTIC',   pal:['#eceef0','#b9c3cc','#6f7d88'], skin:'#f2cfa8', chip:'#b9c3cc'},
+  /* A supplied model rather than a palette. It arrived unrigged;
+     scratchpad/rig2.py fits it to the hostile skeleton's real body (1.84 m,
+     1.94 m arm span) and binds with bone heat, so it carries that rig's own
+     idle/run clips. See SKIN_MODELS below. */
+  {id:'suit', name:'SUIT', glb:'assets/skin_suit.glb', chip:'#2b3038'},
 ];
+/* loaded prototypes for model skins, keyed by id */
+const SKIN_MODELS={};
+SKINS.filter(s=>s.glb).forEach(sk=>{
+  gltfLoad(sk.glb,(g)=>{
+    const proto=g.scene;
+    proto.traverse(o=>{ if(o.isMesh||o.isSkinnedMesh){
+      o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+    SKIN_MODELS[sk.id]={proto, clips:g.animations||[]};
+    console.info('skin model ready:', sk.id, (g.animations||[]).map(c=>c.name).join(','));
+  }, undefined, ()=>console.info(sk.glb+' not reachable - skin unavailable'));
+});
 let SKIN_I=0;
 try{ const v=localStorage.getItem('deadaisle.skin');
      if(v!=null){ const k=SKINS.findIndex(s=>s.id===v); if(k>=0) SKIN_I=k; } }catch(e){}
@@ -7767,12 +7786,70 @@ function skinSelect(i){
   try{ localStorage.setItem('deadaisle.skin', SKINS[SKIN_I].id); }catch(e){}
   const row=document.getElementById('skin-row');
   if(row) [...row.children].forEach((c,k)=>c.classList.toggle('on', k===SKIN_I));
-  /* repaint your own doll on the first pad so the choice is visible */
-  if(window.LOBBY&&LOBBY.dolls&&LOBBY.dolls[0]) skinApply(LOBBY.dolls[0], SKIN_I);
+  /* A palette change can just repaint, but switching to or from a model skin
+     swaps the whole rig, so pad 0 has to be rebuilt in that case. */
+  const cur=LOBBY.dolls&&LOBBY.dolls[0];
+  if(cur){
+    const wasModel=!!SKINS[skinIndexOf(cur.userData.skin||'operator')].glb;
+    const isModel=!!SKINS[SKIN_I].glb;
+    if(!wasModel&&!isModel){ skinApply(cur, SKIN_I); }
+    else{
+      const made=skinMake(SKIN_I);
+      if(made&&made.obj){
+        const parent=cur.parent;
+        made.obj.position.copy(cur.position);
+        made.obj.rotation.copy(cur.rotation);
+        parent&&parent.add(made.obj);
+        cur.removeFromParent();
+        LOBBY.dolls[0]=made.obj;
+        const slot=LOBBY.avatars.find(a=>a.i===0);
+        if(slot){
+          const k=LOBBY.mixers.indexOf(slot.mixer);
+          if(k>=0) LOBBY.mixers.splice(k,1);
+          slot.obj=made.obj;
+          const mx=new THREE.AnimationMixer(made.obj);
+          let clip=skinIdleClip(made.clips);
+          if(!clip&&vmMixer){
+            const names=Object.keys(vmActions);
+            const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
+            clip=vmMixer._actions.map(a=>a._clip).find(c=>c.name===idle);
+          }
+          if(clip) mx.clipAction(clip).play();
+          slot.mixer=mx; LOBBY.mixers.push(mx);
+        }
+      }
+    }
+  }
   /* and tell the party, so they see it too */
   try{ if(NET.mode==='host'||NET.mode==='client') netSend({t:'skin', s:SKINS[SKIN_I].id}); }catch(e){}
 }
 function skinIndexOf(id){ const k=SKINS.findIndex(s=>s.id===id); return k<0?0:k; }
+/* Build the avatar mesh for a skin. Model skins clone their own rig and hand
+   back their own clips; palette skins are a recoloured operator, and a null
+   clip list means "use the operator's vmActions". Returns null if the model
+   has not landed yet, so callers fall back to the operator. */
+function skinMake(idx){
+  const sk=SKINS[((idx|0)%SKINS.length+SKINS.length)%SKINS.length];
+  if(sk.glb){
+    const M=SKIN_MODELS[sk.id];
+    if(!M||!M.proto) return null;
+    const a=skeletonClone(M.proto);
+    a.traverse(o=>{ o.visible=true; o.layers.set(0);
+      if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+    a.userData.skin=sk.id;
+    return {obj:a, clips:M.clips};
+  }
+  if(!vmModel) return null;
+  const a=lobbyAvatar();
+  if(!a) return null;
+  skinApply(a, idx);
+  return {obj:a, clips:null};
+}
+/* pick an idle-ish clip out of whatever the skin brought with it */
+function skinIdleClip(clips){
+  if(!clips||!clips.length) return null;
+  return clips.find(c=>/idle/i.test(c.name)) || clips.find(c=>/aim/i.test(c.name)) || clips[0];
+}
 /* the markup is above this script, so the row can be built immediately */
 skinBuildUI();
 
