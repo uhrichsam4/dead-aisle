@@ -4671,8 +4671,25 @@ gltfLoad('assets/guns.glb', (gltf)=>{
   for(const w of WEAPONS){
     const src=gltf.scene.children.find(o=>o.name===w.id);
     if(!src)continue;
-    src.traverse(o=>{ if(o.isMesh){ o.frustumCulled=false; o.castShadow=false; o.receiveShadow=false;
-      if(o.material&&o.material.map) o.material.map.anisotropy=4; } });
+    src.traverse(o=>{ if(!o.isMesh)return;
+      o.frustumCulled=false; o.castShadow=false; o.receiveShadow=false;
+      /* The scene environment is a sky PMREM at .55 intensity. Submeshes that
+         ship metalness=1 over a white albedo - the optic housing and lens -
+         are then lit almost entirely by reflected sky and render as a
+         blown-out white blob right in the middle of the sight picture. The
+         viewmodel sits under its own camera and does not need environment
+         reflection at that strength. */
+      const mats=[].concat(o.material);
+      o.material=mats.map(m=>{
+        if(!m)return m;
+        const c=m.clone();
+        c.envMapIntensity=.15;
+        if(c.metalness!==undefined && c.metalness>.85) c.metalness=.65;
+        if(c.map) c.map.anisotropy=4;
+        return c;
+      });
+      if(o.material.length===1) o.material=o.material[0];
+    });
     src.scale.setScalar(AK_FIT.scale);
     src.position.set(AK_FIT.x,AK_FIT.y,AK_FIT.z);
     src.rotation.set(AK_FIT.rx,AK_FIT.ry,AK_FIT.rz);
@@ -6215,6 +6232,16 @@ function throwablesReset(){
     t.mesh.traverse(o=>o.layers.set(0));
     t.mesh.visible=true;
     if(mission.act===2){
+      /* Only the axe belongs here. Re-homing everything put shopping carts
+         and watermelons in the middle of the prayer hall, which reads as a
+         bug rather than set dressing - but the axe is the secondary weapon
+         and has to be obtainable, so it moves and the rest stays parked. */
+      if(t.type!=='axe'){
+        t.mesh.visible=false; t.state='ground';
+        t.mesh.position.set(t.home.x,-50,t.home.z);
+        t.vel.set(0,0,0); t.spin.set(0,0,0); t.life=0;
+        continue;
+      }
       const sp=THROW_SPOTS2[ti2++%THROW_SPOTS2.length];
       t.mesh.position.set(ACT_OFF+sp[0], t.home.y, sp[1]);
     }else{
@@ -6670,7 +6697,6 @@ function setAct(n){
   console.info('ACT',n,'offset',ACT_OFF);
 }
 window.__setAct=setAct;
-window.__act2=()=>actTwoBegin();
 window.__act2=()=>actTwoBegin();
 
 function actTwoBegin(){
