@@ -572,6 +572,14 @@ function settingsSave(){ try{ localStorage.setItem('deadaisle.settings',JSON.str
 function settingsApply(){
   try{
     renderer.shadowMap.enabled=!!SETTINGS.shadows;
+    /* let the render-quality slider drive shadow resolution too */
+    try{
+      const want = SETTINGS.res>=150 ? 4096 : SETTINGS.res>=90 ? 2048 : 1024;
+      if(moon.shadow.mapSize.x!==want){
+        moon.shadow.mapSize.set(want,want);
+        if(moon.shadow.map){ moon.shadow.map.dispose(); moon.shadow.map=null; }
+      }
+    }catch(e){}
     /* >100% is supersampling: render above the display's pixel count and let
        the browser downsample. Hard-capped at 4x so a slider drag cannot ask
        for a buffer the GPU refuses to allocate. */
@@ -912,7 +920,10 @@ moon.position.set(-14, 18, -8);
 /* one shadow-casting key light. The target rides the player so a modest
    shadow volume covers wherever you actually are. */
 moon.castShadow = true;
-moon.shadow.mapSize.set(1024,1024);
+/* 2048 at the same 34 m frustum halves the texel size, which is what kills
+   the staircase edges on the storefront and the minarets. Costs one extra
+   shadow-map pass' worth of fill, not draw calls. */
+moon.shadow.mapSize.set(2048,2048);
 moon.shadow.camera.near = 1;
 moon.shadow.camera.far = 90;
 moon.shadow.camera.left = -17; moon.shadow.camera.right = 17;
@@ -2133,6 +2144,119 @@ function buildMosque(){
   yardLight.position.set(X,6,24); scene.add(yardLight);
   console.info('Al-Salaam mosque built at x='+X);
 }
+
+/* ===================== CC0 PROP PACKS (Poly Haven) =====================
+   Four themed GLBs, each a bag of named props. Placement normalises every
+   prop to a target real-world height first - the source models are authored
+   at wildly different scales - then optionally makes it breakable and gives
+   it a collider sized from its own bounds. */
+const PH_PACKS={};
+function phPlace(pack, name, x, z, opts){
+  const lib=PH_PACKS[pack]; if(!lib)return null;
+  const src=lib[name]; if(!src)return null;
+  const o=src.clone(true);
+  o.updateWorldMatrix(true,true);
+  const b=new THREE.Box3().setFromObject(o);
+  const h=Math.max(.001, b.max.y-b.min.y);
+  const sc=(opts&&opts.h) ? (opts.h/h) : 1;
+  o.scale.setScalar(sc);
+  o.position.set(x, (opts&&opts.y)||0, z);
+  o.rotation.y=(opts&&opts.ry!==undefined)?opts.ry:rand(0,Math.PI*2);
+  o.traverse(m=>{ if(m.isMesh){ m.castShadow=true; m.receiveShadow=true; m.frustumCulled=true; } });
+  scene.add(o);
+  o.updateWorldMatrix(true,true);
+  const wb=new THREE.Box3().setFromObject(o);
+  if(opts&&opts.solid){
+    o.traverse(m=>{ if(m.isMesh) worldHits.push(m); });
+    if(opts.collide!==false && (wb.max.y-wb.min.y)>1.0){
+      colliders.push({minX:wb.min.x+.1,maxX:wb.max.x-.1,minZ:wb.min.z+.1,maxZ:wb.max.z-.1,
+                      h:Math.max(.6,wb.max.y)});
+    }
+  }
+  if(opts&&opts.brk) makeBreakable(o, opts.brk, opts.brkScale||1);
+  return o;
+}
+function phLoad(pack, url, then){
+  new GLTFLoader().load(url,(g)=>{
+    const lib={};
+    for(const c of g.scene.children.slice()) if(c.name) lib[c.name]=c;
+    PH_PACKS[pack]=lib;
+    try{ then&&then(lib); }catch(e){ console.warn('prop placement failed',pack,e); }
+    console.info('prop pack',pack,Object.keys(lib).length);
+  }, undefined, ()=>console.info(url+' not reachable'));
+}
+
+/* ---- mosque interior dressing ---- */
+phLoad('mosque','assets/ph_mosque.glb',(lib)=>{
+  const X=MOSQUE_X;
+  const pick=(re)=>Object.keys(lib).filter(k=>re.test(k));
+  const chand=pick(/Chandelier/i), lant=pick(/Lantern|diya/i);
+  const vases=pick(/vase|pot|goblet|ceramic/i), shelf=pick(/Shelf|Cabinet|Commode/i);
+  const books=pick(/book|binder/i);
+  /* chandeliers down the prayer hall */
+  chand.forEach((n,i)=>{ for(const cz of [-12,-6]) phPlace('mosque',n, X+(i-1)*13, cz, {h:1.6,y:7.2}); });
+  /* lanterns along the corridor and the vestibule */
+  lant.forEach((n,i)=>{ for(const [lx,lz] of [[-3.1,3.0],[3.1,3.0],[-3.1,6.8],[3.1,6.8]])
+    phPlace('mosque',n, X+lx, lz, {h:.5,y:1.15,solid:true,brk:'pottery'}); });
+  /* brass on the wudu trough, and pots along the west chamber */
+  vases.slice(0,6).forEach((n,i)=>
+    phPlace('mosque',n, X-17+i*1.9, 3.1, {h:.42,solid:true,brk:'pottery'}));
+  /* madrasa shelving and books */
+  /* keep clear of the corner-store door at (22.2, 5.0): shelving lines the
+     madrasa's own outer wall, north of it */
+  shelf.slice(0,3).forEach((n,i)=>
+    phPlace('mosque',n, X+8.0+i*3.4, 7.6, {h:2.1,ry:Math.PI,solid:true}));
+  books.slice(0,4).forEach((n,i)=>
+    phPlace('mosque',n, X+9.0+i*2.6, 7.0, {h:.28,y:.84,solid:true,brk:'crate',brkScale:.5}));
+  /* corner stores: crates and pots */
+  vases.slice(0,4).forEach((n,i)=>{
+    phPlace('mosque',n, X-22.2+rand(-.8,.8), 2.2+rand(-.8,.8), {h:.4,solid:true,brk:'pottery'});
+    phPlace('mosque',n, X+22.2+rand(-.8,.8), 2.2+rand(-.8,.8), {h:.4,solid:true,brk:'pottery'});
+  });
+});
+
+/* ---- supermarket dressing ---- */
+phLoad('store','assets/ph_store.glb',(lib)=>{
+  const pick=(re)=>Object.keys(lib).filter(k=>re.test(k));
+  const reg=pick(/CashRegister/i), barrel=pick(/Barrel|barrel/i);
+  const boxes=pick(/box|Box|crate|Cheese/i), bottles=pick(/bottle|cleaner|tin|can_/i);
+  reg.slice(0,1).forEach(n=>{ for(const cx of [-13,-4.5,4.5,13])
+    phPlace('store',n, cx-1.1, 11.9, {h:.34,y:1.06,ry:Math.PI,solid:true,brk:'crate'}); });
+  barrel.slice(0,3).forEach((n,i)=>
+    phPlace('store',n, -20.5+i*1.6, -12.5, {h:.9,solid:true,brk:'crate',brkScale:1.6}));
+  boxes.slice(0,5).forEach((n,i)=>
+    phPlace('store',n, 12+i*1.7, -12.2, {h:.42,solid:true,brk:'crate'}));
+  bottles.slice(0,8).forEach((n,i)=>
+    phPlace('store',n, -6+i*1.7, 6.0, {h:.26,y:.98,solid:true,brk:'glass',brkScale:.8}));
+});
+
+/* ---- street dressing ---- */
+phLoad('street','assets/ph_street.glb',(lib)=>{
+  const pick=(re)=>Object.keys(lib).filter(k=>re.test(k));
+  const barrier=pick(/road_barrier|barrier/i), hydrant=pick(/hydrant/i);
+  const aircon=pick(/aircon/i), tv=pick(/Television|Camera|Megaphone/i);
+  for(let i=0;i<10;i++){
+    const x=-620+i*120;
+    if(barrier.length) phPlace('street',barrier[i%barrier.length], x, 41.0, {h:.9,ry:0,solid:true,brk:'crate',brkScale:2});
+    if(hydrant.length) phPlace('street',hydrant[i%hydrant.length], x+22, 41.6, {h:.85,solid:true});
+  }
+  aircon.slice(0,2).forEach((n,i)=> phPlace('street',n, -60+i*140, 47.0, {h:.9,y:6.5}));
+  tv.slice(0,3).forEach((n,i)=> phPlace('street',n, -14+i*9, 41.5, {h:.5,solid:true,brk:'glass'}));
+});
+
+/* ---- furniture: madrasa reading room + store back office ---- */
+phLoad('furn','assets/ph_furn.glb',(lib)=>{
+  const X=MOSQUE_X;
+  const pick=(re)=>Object.keys(lib).filter(k=>re.test(k));
+  const chairs=pick(/Chair|Stool|stool/i), tables=pick(/Table|Desk|table/i);
+  /* reading room sits in the open half of the madrasa, x 6..17 */
+  chairs.slice(0,4).forEach((n,i)=>
+    phPlace('furn',n, X+7.5+(i%2)*2.2, 2.6+Math.floor(i/2)*2.6, {h:.95,solid:true,brk:'wood',brkScale:.5}));
+  tables.slice(0,2).forEach((n,i)=>
+    phPlace('furn',n, X+13.5, 2.8+i*3.0, {h:.76,solid:true,brk:'wood'}));
+  chairs.slice(0,3).forEach((n,i)=>
+    phPlace('furn',n, -18+i*1.9, -11.0, {h:.95,solid:true,brk:'wood',brkScale:.5}));
+});
 
 /* ===================== STREET / FACADES =====================
    Real building facades line the road, with lamp posts, benches and street
