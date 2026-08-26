@@ -114,6 +114,20 @@
   #loadbar i { position:absolute; left:0; bottom:0; height:2px; width:0%; background:#f6d434;
                transition:width .25s ease-out; }
   #loadbar.done { opacity:0; pointer-events:none; }
+  #lobby-skins { position:absolute; left:50%; transform:translateX(-50%); bottom:24px;
+                 width:min(680px,86vw); text-align:center; }
+  #lobby-skins h3 { margin:0 0 7px; font:700 10px/1 ui-monospace,monospace;
+                    letter-spacing:.22em; color:#8b8b80; }
+  #skin-row { display:flex; gap:7px; justify-content:center; flex-wrap:wrap; }
+  .skin-card { display:flex; flex-direction:column; align-items:center; gap:5px;
+    width:74px; padding:7px 4px 6px; cursor:pointer;
+    background:rgba(16,18,20,.72); border:1px solid #2c3036; border-radius:7px;
+    color:#8b8b80; font:700 9px/1 ui-monospace,monospace; letter-spacing:.08em;
+    transition:border-color .15s, transform .15s, color .15s; }
+  .skin-card i { width:30px; height:30px; border-radius:50%; display:block;
+                 box-shadow:inset 0 -6px 10px rgba(0,0,0,.45); }
+  .skin-card:hover { border-color:#4a5058; transform:translateY(-2px); color:#cfcfc4; }
+  .skin-card.on { border-color:#f6d434; color:#f6d434; }
 
   #lobby-party { position:absolute; right:26px; bottom:30px; width:308px;
     background:rgba(9,12,17,.85); border:1px solid rgba(255,255,255,.10); border-radius:10px; padding:14px 16px; }
@@ -462,6 +476,8 @@
     <button id="btn-play">PLAY</button>
     <div id="loadbar"><span id="loadbar-txt">LOADING WORLD</span><i id="loadbar-fill"></i></div>
   </div>
+
+  <div id="lobby-skins"><h3>OUTFIT</h3></div>
 
   <div id="lobby-party">
     <h3>PARTY</h3>
@@ -7190,6 +7206,7 @@ function netSendTo(c,obj){ try{ if(c.open)c.send(JSON.stringify(obj)); }catch(e)
 function netAvatarFor(pl){
   if(pl.obj||!vmModel)return pl.obj;
   const a=lobbyAvatar(); if(!a)return null;
+  skinApply(a, skinIndexOf(pl.skin||'operator'));
   scene.add(a);
   pl.obj=a;
   pl.mixer=new THREE.AnimationMixer(a);
@@ -7255,7 +7272,7 @@ function netHost(){
   NET.peer.on('connection',c=>{
     c.on('open',()=>{
       NET.conns.push(c);
-      netSendTo(c,{t:'hello',name:NET.name,id:NET.id});
+      netSendTo(c,{t:'hello',name:NET.name,id:NET.id,skin:SKINS[SKIN_I].id});
       netStatus('<b>'+NET.conns.length+'</b> player(s) joined room '+NET.code+'.');
     });
     c.on('data',d=>netOnData(c,d));
@@ -7289,7 +7306,7 @@ function netJoin(code){
     c.on('open',()=>{
       opened=true;
       NET.mode='client'; NET.hostConn=c; NET.code=code; NET.ready=true;
-      netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id});
+      netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id,skin:SKINS[SKIN_I].id});
       netStatus('Joined room <b>'+code+'</b>. Waiting for the host to start.');
       const btn=document.getElementById('btn-play');
       if(btn){ btn.disabled=true; btn.textContent='WAITING'; }
@@ -7330,9 +7347,16 @@ function netOnData(c,raw){
       const id=c.peer;
       NET.players[id]=NET.players[id]||{x:0,y:0,z:0,yaw:0,hp:100};
       NET.players[id].name=(d.name||'PLAYER').slice(0,12);
+      if(d.skin) NET.players[id].skin=d.skin;
       netAvatarFor(NET.players[id]);
       netSyncLobby();
       if(NET.mode==='host'&&NET.started) netSendTo(c,{t:'start'});
+      break;
+    }
+    case 'skin': {                                /* someone changed outfit */
+      const pl=NET.players[c.peer];
+      if(pl){ pl.skin=d.s;
+              if(pl.obj) skinApply(pl.obj, skinIndexOf(d.s)); }
       break;
     }
     case 'in': {                                  /* client -> host: my state */
@@ -7653,6 +7677,105 @@ const LOBBY={
   camPos:V3(2.1,1.5,26.6), camLook:V3(-.35,1.05,20.6),
   slots:[{name:'',you:true},{name:''},{name:''},{name:''}],
 };
+
+/* ===================== PLAYER SKINS =====================
+   Every character model supplied so far arrives unrigged - no skeleton, no
+   animations - so none of them can be an avatar: they would slide around the
+   map frozen in a T-pose. The operator rig is the only skinned humanoid in
+   the build, so a "skin" here is a palette applied to a clone of it. It
+   animates correctly, costs no extra draw calls, and a rigged model dropped
+   in later becomes just another entry in this list.
+
+   The operator GLB ships its materials unnamed, so they cannot be addressed
+   as "jacket" or "boots". Instead they are ranked by luminance and painted in
+   that order, with the skin-tone material picked out by hue so a recolour
+   never paints someone's face green. */
+const SKINS=[
+  {id:'operator', name:'OPERATOR', pal:['#23262a','#3f444a','#6b5b43'], skin:'#ffd9a0', chip:'#3f444a'},
+  {id:'ranger',   name:'RANGER',   pal:['#1b2a18','#3c5233','#7d7a4a'], skin:'#e8b98a', chip:'#3c5233'},
+  {id:'medic',    name:'MEDIC',    pal:['#d9dbd8','#b5322c','#8f9295'], skin:'#f0c49a', chip:'#b5322c'},
+  {id:'nightfall',name:'NIGHTFALL',pal:['#14161b','#242a35','#3d4756'], skin:'#d9a97e', chip:'#242a35'},
+  {id:'hazard',   name:'HAZARD',   pal:['#c9922a','#2c2a26','#8a6a2a'], skin:'#e6bd93', chip:'#c9922a'},
+  {id:'coastal',  name:'COASTAL',  pal:['#e6e2d6','#2f6f78','#9a9384'], skin:'#c98f60', chip:'#2f6f78'},
+  {id:'ember',    name:'EMBER',    pal:['#3a1d16','#8a3a1e','#c4652c'], skin:'#b3805a', chip:'#8a3a1e'},
+  {id:'arctic',   name:'ARCTIC',   pal:['#eceef0','#b9c3cc','#6f7d88'], skin:'#f2cfa8', chip:'#b9c3cc'},
+];
+let SKIN_I=0;
+try{ const v=localStorage.getItem('deadaisle.skin');
+     if(v!=null){ const k=SKINS.findIndex(s=>s.id===v); if(k>=0) SKIN_I=k; } }catch(e){}
+
+/* is this material the character's own skin rather than clothing? */
+function skinIsFlesh(c){
+  const hsl={}; c.getHSL(hsl);
+  return hsl.l>.42 && hsl.s>.12 && hsl.s<.72 && (hsl.h<.13 || hsl.h>.94);
+}
+/* Paint a cloned avatar. Materials are shared across clones, so each one gets
+   its own copies - without that, changing one player's skin would repaint
+   everybody, including the lobby dolls standing next to them. */
+function skinApply(root, idx){
+  const sk=SKINS[((idx|0)%SKINS.length+SKINS.length)%SKINS.length];
+  const uniq=new Map();                       /* original material -> clone */
+  const order=[];
+  root.traverse(o=>{
+    if(!o.isMesh&&!o.isSkinnedMesh)return;
+    const ms=[].concat(o.material);
+    ms.forEach(m=>{ if(m&&!uniq.has(m)){ uniq.set(m,null); order.push(m); } });
+  });
+  /* rank the clothing materials dark -> light so the palette lands
+     consistently whatever order the GLB happens to list them in */
+  const lum=(m)=>{ const c=m.color||new THREE.Color(0x808080);
+                   return .2126*c.r+.7152*c.g+.0722*c.b; };
+  const cloth=order.filter(m=>!(m.color&&skinIsFlesh(m.color))).sort((a,b)=>lum(a)-lum(b));
+  const pal=sk.pal.map(h=>new THREE.Color(h));
+  const fleshC=new THREE.Color(sk.skin);
+  cloth.forEach((m,i)=>{
+    const c=m.clone();
+    c.color.copy(pal[Math.min(pal.length-1, Math.floor(i*pal.length/Math.max(1,cloth.length)))]);
+    uniq.set(m,c);
+  });
+  order.forEach(m=>{
+    if(uniq.get(m))return;
+    const c=m.clone(); c.color.copy(fleshC); uniq.set(m,c);
+  });
+  root.traverse(o=>{
+    if(!o.isMesh&&!o.isSkinnedMesh)return;
+    if(Array.isArray(o.material)) o.material=o.material.map(m=>uniq.get(m)||m);
+    else o.material=uniq.get(o.material)||o.material;
+  });
+  root.userData.skin=sk.id;
+  return sk;
+}
+
+/* ---- lobby picker ---- */
+function skinBuildUI(){
+  const host=document.getElementById('lobby-skins');
+  if(!host||host.dataset.built)return;
+  host.dataset.built='1';
+  const row=document.createElement('div'); row.id='skin-row';
+  SKINS.forEach((s,i)=>{
+    const b=document.createElement('button');
+    b.className='skin-card'+(i===SKIN_I?' on':'');
+    b.dataset.i=i;
+    b.innerHTML='<i style="background:'+s.chip+'"></i><span>'+s.name+'</span>';
+    b.addEventListener('click',()=>skinSelect(i));
+    row.appendChild(b);
+  });
+  host.appendChild(row);
+}
+function skinSelect(i){
+  SKIN_I=((i|0)%SKINS.length+SKINS.length)%SKINS.length;
+  try{ localStorage.setItem('deadaisle.skin', SKINS[SKIN_I].id); }catch(e){}
+  const row=document.getElementById('skin-row');
+  if(row) [...row.children].forEach((c,k)=>c.classList.toggle('on', k===SKIN_I));
+  /* repaint your own doll on the first pad so the choice is visible */
+  if(window.LOBBY&&LOBBY.dolls&&LOBBY.dolls[0]) skinApply(LOBBY.dolls[0], SKIN_I);
+  /* and tell the party, so they see it too */
+  try{ if(NET.mode==='host'||NET.mode==='client') netSend({t:'skin', s:SKINS[SKIN_I].id}); }catch(e){}
+}
+function skinIndexOf(id){ const k=SKINS.findIndex(s=>s.id===id); return k<0?0:k; }
+/* the markup is above this script, so the row can be built immediately */
+skinBuildUI();
+
 function lobbyAvatar(){
   if(!vmModel)return null;
   const a=skeletonClone(vmModel);
@@ -7664,6 +7787,7 @@ function lobbyAvatar(){
   return a;
 }
 function lobbyBuild(){
+  skinBuildUI();                 /* independent of vmModel - do it first */
   if(LOBBY.built||!vmModel)return;
   LOBBY.built=true;
   const g=new THREE.Group(); scene.add(g); LOBBY.group=g;
@@ -7693,6 +7817,10 @@ function lobbyBuild(){
       }
       LOBBY.mixers.push(mx);
       LOBBY.avatars.push({obj:av,ring,pad,i});
+      (LOBBY.dolls=LOBBY.dolls||[]).push(av);
+      /* pad 0 is you; the rest are stand-ins, given different outfits so the
+         line-up does not read as four clones */
+      skinApply(av, i===0 ? SKIN_I : (i*3)%SKINS.length);
     }
   }
   lobbySlotsRender();
@@ -7705,6 +7833,7 @@ function lobbyStageApply(){
   camera.fov=52; camera.updateProjectionMatrix();
 }
 function lobbyTick(dt){
+  window.LOBBY=LOBBY;            /* module-scoped otherwise; probes need it */
   document.body.classList.add('in-lobby');
   if(!LOBBY.built){ lobbyBuild(); return; }
   LOBBY.group.visible=true;
@@ -7733,6 +7862,7 @@ function lobbySlotsRender(){
 }
 function lobbyShow(){
   menuEl.classList.remove('hidden');
+  skinBuildUI();
   lobbyBuild(); lobbyStageApply();
   if(LOBBY.group) LOBBY.group.visible=true;
 }
