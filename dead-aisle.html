@@ -540,6 +540,28 @@ renderer.toneMappingExposure = 1.05;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x030403);
 scene.fog = new THREE.FogExp2(0x050705, 0.042);
+/* Evening-sky HDRI (AmbientCG EveningSkyHDRI046B, tonemapped and cut to 2K).
+   It replaces the flat colour backdrop and, through PMREM, becomes the
+   environment light - which is what finally makes the car paint and the
+   chrome read as metal instead of flat grey. */
+let skyTex=null, skyEnv=null;
+const SKY_INTENSITY={day:1.0, night:.12};
+new THREE.TextureLoader().load('assets/tex/sky.jpg',(t)=>{
+  t.mapping=THREE.EquirectangularReflectionMapping;
+  t.colorSpace=THREE.SRGBColorSpace;
+  skyTex=t;
+  scene.background=t;
+  scene.backgroundIntensity=1;
+  try{
+    const pm=new THREE.PMREMGenerator(renderer);
+    pm.compileEquirectangularShader();
+    skyEnv=pm.fromEquirectangular(t).texture;
+    scene.environment=skyEnv;
+    scene.environmentIntensity=.55;
+    pm.dispose();
+  }catch(e){ console.warn('PMREM failed',e); }
+  console.info('sky + environment ready');
+}, undefined, ()=>console.info('assets/tex/sky.jpg not reachable - flat backdrop stays'));
 
 /* Player settings. Defined up here because the render and input paths read
    them every frame; persisted per-browser in localStorage. */
@@ -964,6 +986,18 @@ function retireMesh(m){
 }
 /* zombies roam the union of every phase box; only the PLAYER clamp shrinks
    when we go inside, so keep a separate immutable box for actors. */
+/* Act 1 is the TOPS supermarket around x=0. Act 2 is the Al-Salaam mosque
+   900 m west; the road has to physically reach it. Declared up here because
+   PARK_ACT2 and the world planes both read them during module evaluation. */
+const WORLD_X0=-1030, WORLD_X1=170;
+const WORLD_CX=(WORLD_X0+WORLD_X1)/2;
+const MOSQUE_X=-900;
+
+/* ACT 1 is TOPS at x=0; ACT 2 is the mosque 900 m west. Rather than
+   duplicate every bound, spawn table and nav clamp, the whole act is shifted
+   along x by ACT_OFF and the tables stay in local coordinates. */
+let ACT_OFF=0;
+function actOff(){ return ACT_OFF; }
 const ZBOUNDS={minX:-23,maxX:23,minZ:-14,maxZ:30.5};
 /* ===================== SURFACE TEXTURES =====================
    Loaded async and patched onto the existing materials, so the game still
@@ -996,12 +1030,24 @@ function relevel(tex,{gain=1,lift=0}={}){
   tex.image=cv; tex.needsUpdate=true;
 }
 const TEX={
-  road : surfaceTex('assets/tex/road.jpg', 54, 2),    /* plane is 270 x 8  */
-  lot  : surfaceTex('assets/tex/road.jpg', 10, 3),    /* lot is 48 x 15    */
-  grass: surfaceTex('assets/tex/grass.jpg', 96, 16),  /* plane is 270 x 46 */
-  floor: surfaceTex('assets/tex/floor.jpg', 22, 15),  /* hall is 44 x 30   */
-  floorN:surfaceTex('assets/tex/floor_n.jpg', 22, 15, false),
-  floorR:surfaceTex('assets/tex/floor_r.jpg', 22, 15, false),
+  /* AmbientCG scanned sets: Road008A, Ground110, Grass005, Tiles141.
+     Colour maps are sRGB; normal and roughness must stay linear. */
+  road : surfaceTex('assets/tex/road2_c.jpg', 54, 2),    /* plane is 270 x 8  */
+  roadN: surfaceTex('assets/tex/road2_n.jpg', 54, 2, false),
+  roadR: surfaceTex('assets/tex/road2_r.jpg', 54, 2, false),
+  /* the lot is asphalt like the road, just at a tighter repeat - Ground110's
+     gravel read as a rubble field under the parked car */
+  lot  : surfaceTex('assets/tex/road2_c.jpg', 14, 5),    /* lot is 48 x 15    */
+  lotN : surfaceTex('assets/tex/road2_n.jpg', 14, 5, false),
+  lotR : surfaceTex('assets/tex/road2_r.jpg', 14, 5, false),
+  dirt : surfaceTex('assets/tex/ground2_c.jpg', 30, 10),
+  dirtN: surfaceTex('assets/tex/ground2_n.jpg', 30, 10, false),
+  grass: surfaceTex('assets/tex/grass2_c.jpg', 96, 16),  /* plane is 270 x 46 */
+  grassN:surfaceTex('assets/tex/grass2_n.jpg', 96, 16, false),
+  /* a supermarket has a tiled floor, not floorboards */
+  floor: surfaceTex('assets/tex/tiles2_c.jpg', 20, 14),  /* hall is 44 x 30   */
+  floorN:surfaceTex('assets/tex/tiles2_n.jpg', 20, 14, false),
+  floorR:surfaceTex('assets/tex/tiles2_r.jpg', 20, 14, false),
   wall  :surfaceTex('assets/tex/wall.jpg',   14, 2, true, {gain:1.5,lift:30}),
   wallN :surfaceTex('assets/tex/wall_n.jpg', 14, 2, false),
   brick :surfaceTex('assets/tex/brick.jpg',  16, 3, true, {gain:1.5,lift:34}),
@@ -1032,7 +1078,7 @@ const MAT = {
   for(let k=0;k<300;k++){ g.fillRect(Math.random()*256, Math.random()*256, Math.random()*22, Math.random()*5); }
   const f=new THREE.Mesh(new THREE.PlaneGeometry(44,30), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR,
-    color:0xb4b1a8, roughness:.85 }));
+    color:0x8d8b86, roughness:.72, metalness:.04 }));
   f.rotation.x=-Math.PI/2; f.receiveShadow=true; scene.add(f);
 })();
 
@@ -1543,7 +1589,7 @@ moon.color.copy(LIGHT_DAY.sunC); moon.intensity=LIGHT_DAY.sunI;
 const blue=new THREE.PointLight(0x5a7fae,12,20,1.8); blue.position.set(0,3,-13); scene.add(blue);
 const green=new THREE.PointLight(0x6a8a5a,9,13,1.8); green.position.set(-17,3,8); scene.add(green);
 const exitGlow=new THREE.PointLight(0x44ff66,2.2,5.5); exitGlow.position.set(0,3.9,14); scene.add(exitGlow);
-scene.background.copy(LIGHT_DAY.bg);
+if(scene.background&&scene.background.isColor) scene.background.copy(LIGHT_DAY.bg);
 scene.fog.color.copy(LIGHT_DAY.fog);
 scene.fog.density=LIGHT_DAY.fogD;
 
@@ -1555,7 +1601,11 @@ function lightApply(dt){
   const day=(phase==='inside')?0:1;
   lightMix+= (day-lightMix)*clamp(dt*.55,0,1);
   const m=lightMix;
-  scene.background.lerpColors(LIGHT_NIGHT.bg,LIGHT_DAY.bg,m);
+  /* once the HDRI has loaded the background is a texture, not a colour -
+     dim it instead of trying to lerp it */
+  if(scene.background&&scene.background.isColor) scene.background.lerpColors(LIGHT_NIGHT.bg,LIGHT_DAY.bg,m);
+  else { scene.backgroundIntensity=lerp(SKY_INTENSITY.night,SKY_INTENSITY.day,m);
+         scene.environmentIntensity=lerp(.12,.55,m); }
   scene.fog.color.lerpColors(LIGHT_NIGHT.fog,LIGHT_DAY.fog,m);
   scene.fog.density=lerp(LIGHT_NIGHT.fogD,LIGHT_DAY.fogD,m);
   ambRef.intensity=lerp(LIGHT_NIGHT.ambI,LIGHT_DAY.ambI,m);
@@ -1575,6 +1625,12 @@ const blobTex=(()=>{ const cv=document.createElement('canvas'); cv.width=cv.heig
 
 /* ---- state ---- */
 const PARK_SPOT={minX:6,maxX:10,minZ:17.5,maxZ:20.5};
+const PARK_ACT1={minX:6,maxX:10,minZ:17.5,maxZ:20.5};
+const PARK_ACT2={minX:MOSQUE_X+10,maxX:MOSQUE_X+15,minZ:33.5,maxZ:36.5};
+function setActPark(){
+  const P=(mission.act===2)?PARK_ACT2:PARK_ACT1;
+  PARK_SPOT.minX=P.minX; PARK_SPOT.maxX=P.maxX; PARK_SPOT.minZ=P.minZ; PARK_SPOT.maxZ=P.maxZ;
+}
 let carSpeed=0, carParked=false;
 let townCar=null, carSteerVal=0, carBrakeT=0;
 let carCamYaw=null, carCamRoll=0, carCamPos=V3(), carAccelS=0, carPrevSpd=0;
@@ -1591,9 +1647,12 @@ let autoParking=false;
 
 /* ---- shared town assets ---- */
 const townMats={
-  ground:new THREE.MeshStandardMaterial({color:0x7d8a6b,roughness:1,map:TEX.grass}),
-  lot:   new THREE.MeshStandardMaterial({color:0x6e7075,roughness:.95,map:TEX.lot}),
-  road:  new THREE.MeshStandardMaterial({color:0x9a9a9a,roughness:.94,map:TEX.road}),
+  ground:new THREE.MeshStandardMaterial({color:0x9aa88a,roughness:1,map:TEX.grass,
+           normalMap:TEX.grassN, normalScale:new THREE.Vector2(.7,.7)}),
+  lot:   new THREE.MeshStandardMaterial({color:0x9a9a96,roughness:.95,map:TEX.lot,
+           normalMap:TEX.lotN, roughnessMap:TEX.lotR, normalScale:new THREE.Vector2(.8,.8)}),
+  road:  new THREE.MeshStandardMaterial({color:0xb0b0b0,roughness:.94,map:TEX.road,
+           normalMap:TEX.roadN, roughnessMap:TEX.roadR, normalScale:new THREE.Vector2(.9,.9)}),
   walk:  new THREE.MeshStandardMaterial({color:0x4b4d47,roughness:.94}),
   paint: new THREE.MeshBasicMaterial({color:0xb4b1a4}),
   paintY:new THREE.MeshBasicMaterial({color:0xa8862c}),
@@ -1618,8 +1677,11 @@ function facadeMat(color,w,h){
 
 /* ---- world ---- */
 function buildTown(){
-  const ground=new THREE.Mesh(new THREE.PlaneGeometry(270,46),townMats.ground);
-  ground.rotation.x=-Math.PI/2; ground.position.set(0,0,37.5); ground.receiveShadow=true; scene.add(ground);
+  /* The map used to stop at x=+/-135. Act 2 is a mosque ~900 m west, so the
+     ground and road now run from x=-1030 to +170 - about a 90 second drive
+     at the car's top speed. */
+  const ground=new THREE.Mesh(new THREE.PlaneGeometry(1240,46),townMats.ground);
+  ground.rotation.x=-Math.PI/2; ground.position.set(WORLD_CX,0,37.5); ground.receiveShadow=true; scene.add(ground);
 
   const lot=new THREE.Mesh(new THREE.PlaneGeometry(48,15),townMats.lot);
   lot.rotation.x=-Math.PI/2; lot.position.set(0,.01,22.5);
@@ -1632,9 +1694,9 @@ function buildTown(){
   const head=new THREE.Mesh(townHeadGeo,townMats.paint);
   head.position.set(0,.04,20.5); scene.add(head);
 
-  const road=new THREE.Mesh(new THREE.PlaneGeometry(270,8),townMats.road);
-  road.receiveShadow=true; road.rotation.x=-Math.PI/2; road.position.set(0,.012,36); scene.add(road);
-  for(let x=-126;x<=126;x+=6){
+  const road=new THREE.Mesh(new THREE.PlaneGeometry(1240,8),townMats.road);
+  road.receiveShadow=true; road.rotation.x=-Math.PI/2; road.position.set(WORLD_CX,.012,36); scene.add(road);
+  for(let x=WORLD_X0+6;x<=WORLD_X1-6;x+=6){
     const dash=new THREE.Mesh(townDashGeo,townMats.paintY);
     dash.position.set(x,.045,36); scene.add(dash);
   }
@@ -1763,6 +1825,200 @@ function buildTown(){
     const mount=new THREE.Mesh(new THREE.BoxGeometry(.25,.25,.6),MAT.metalD);
     mount.position.set(mx,5.2,15.38); scene.add(mount);
   }
+}
+
+/* ===================== AL-SALAAM MOSQUE (ACT 2) =====================
+   Laid out the way a mosque actually is, not as a reskinned supermarket:
+     - you come off the road through a gate into the SAHN (courtyard),
+       which is ringed by a RIWAQ arcade and has an ablution fountain
+     - the PRAYER HALL beyond is WIDE and shallow, because worshippers line
+       up in rows facing the qibla, not in aisles
+     - the QIBLA wall carries the MIHRAB niche dead centre with the MINBAR
+       (stepped pulpit) to its right
+     - the DOME sits over the bay in front of the mihrab, not over the middle
+     - the MINARETS stand at the outer courtyard corners
+   Local origin is the centre of the prayer hall; +z is back toward the road. */
+const M_HALL={minX:-25, maxX:25, minZ:-16, maxZ:13};   /* prayer hall interior */
+const M_YARD={minX:-26, maxX:26, minZ:14, maxZ:32};    /* sahn */
+function buildMosque(){
+  const X=MOSQUE_X;
+  const G=new THREE.Group(); G.position.x=X; scene.add(G);
+  window.__mosque=G;
+
+  const sand =new THREE.MeshStandardMaterial({color:0xd8c9a8, roughness:.92, map:TEX.wall, normalMap:TEX.wallN});
+  const stone=new THREE.MeshStandardMaterial({color:0xc4b593, roughness:.95});
+  const teal =new THREE.MeshStandardMaterial({color:0x2f7d78, roughness:.42, metalness:.35});
+  const gold =new THREE.MeshStandardMaterial({color:0xc9a227, roughness:.3,  metalness:.8});
+  const carpet=new THREE.MeshStandardMaterial({color:0x7a2f2a, roughness:.98});
+  const carpet2=new THREE.MeshStandardMaterial({color:0x8d3a33, roughness:.98});
+  const wood =new THREE.MeshStandardMaterial({color:0x5c3a24, roughness:.85});
+  const trim =new THREE.MeshStandardMaterial({color:0x4a4136, roughness:.8});
+
+  const box=(w,h,d,x,y,z,m,collide)=>{
+    const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
+    b.position.set(x,y,z); b.castShadow=true; b.receiveShadow=true; G.add(b);
+    if(collide){ colliders.push({minX:X+x-w/2,maxX:X+x+w/2,minZ:z-d/2,maxZ:z+d/2,h:y+h/2});
+                 worldHits.push(b); }
+    return b;
+  };
+  /* a pointed arch drawn as a fan of voussoirs */
+  const arch=(cx,cz,r,depth,y0,mat,axis)=>{
+    for(let i=0;i<=12;i++){
+      const a=Math.PI*(i/12);
+      const b=new THREE.Mesh(new THREE.BoxGeometry(.36,.52,depth),mat);
+      const ox=Math.cos(a)*r, oy=Math.sin(a)*r*1.15;
+      if(axis==='x'){ b.position.set(cx,y0+oy,cz+ox); b.rotation.x=-(a-Math.PI/2); }
+      else          { b.position.set(cx+ox,y0+oy,cz); b.rotation.z=a-Math.PI/2; }
+      b.castShadow=true; G.add(b);
+    }
+  };
+
+  /* ---------------- prayer hall ---------------- */
+  const fl=new THREE.Mesh(new THREE.PlaneGeometry(50,29), new THREE.MeshStandardMaterial({
+    map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR, color:0x9a9384, roughness:.7}));
+  fl.rotation.x=-Math.PI/2; fl.position.set(0,0,-1.5); fl.receiveShadow=true; G.add(fl);
+  /* prayer rows run ACROSS the hall, parallel to the qibla wall */
+  for(let i=0;i<8;i++){
+    const r=new THREE.Mesh(new THREE.PlaneGeometry(46,2.3), i%2?carpet:carpet2);
+    r.rotation.x=-Math.PI/2; r.position.set(0,.02,-14+i*3.1); r.receiveShadow=true; G.add(r);
+  }
+  box(.7,12,29, -25,6,-1.5, sand, true);
+  box(.7,12,29,  25,6,-1.5, sand, true);
+  box(50,12,.7,  0,6,-16, sand, true);                    /* qibla wall */
+  box(50,.6,29,  0,12.3,-1.5, stone, false);              /* ceiling */
+  /* north wall of the hall, with three arched openings onto the sahn */
+  for(const seg of [[-18.5,13],[0,10],[18.5,13]]) box(seg[1],12,.7, seg[0],6,13, sand, true);
+  for(const ax of [-9.4,9.4]){
+    box(2.2,12,.9, ax,6,13, sand, true);
+    arch(ax<0?-13.9:13.9,13,3.1,.95,5.4,stone,'z');
+  }
+  arch(0,13,3.4,.95,5.4,stone,'z');
+
+  /* mihrab: niche dead centre of the qibla wall */
+  box(7.2,9,1.4, 0,4.5,-15.2, stone, false);
+  const niche=new THREE.Mesh(new THREE.BoxGeometry(3.6,6,.8), new THREE.MeshStandardMaterial({color:0x1f4a48,roughness:.6}));
+  niche.position.set(0,3,-14.6); G.add(niche);
+  arch(0,-14.55,1.9,.85,6,gold,'z');
+  /* minbar: the stepped pulpit, always to the RIGHT of the mihrab */
+  for(let i=0;i<6;i++) box(1.9,.42,.9, 3.9,.21+i*.42, -13.6+i*.9, wood, i===0);
+  box(.2,3.2,.2, 3.0,1.6,-13.4, wood, false);
+  box(.2,3.2,.2, 4.8,1.6,-13.4, wood, false);
+  box(2.1,.16,.16, 3.9,3.2,-13.4, gold, false);
+
+  /* dome over the bay in FRONT of the mihrab */
+  const drum=new THREE.Mesh(new THREE.CylinderGeometry(8.6,8.6,2.6,8), sand);
+  drum.position.set(0,13.6,-9); drum.castShadow=true; G.add(drum);
+  const dome=new THREE.Mesh(new THREE.SphereGeometry(8.6,28,15,0,Math.PI*2,0,Math.PI/2), teal);
+  dome.position.set(0,14.9,-9); dome.castShadow=true; G.add(dome);
+  const finial=new THREE.Mesh(new THREE.CylinderGeometry(.16,.16,2.6,8), gold);
+  finial.position.set(0,24.5,-9); G.add(finial);
+  const orb=new THREE.Mesh(new THREE.SphereGeometry(.8,14,10), gold);
+  orb.position.set(0,26.1,-9); G.add(orb);
+  /* four squinch columns carrying the dome */
+  for(const cx of [-8.6,8.6]) for(const cz of [-16.6,-1.4]){
+    const col=new THREE.Mesh(new THREE.CylinderGeometry(.72,.8,12,14), stone);
+    col.position.set(cx,6,cz); col.castShadow=true; G.add(col);
+    colliders.push({minX:X+cx-.8,maxX:X+cx+.8,minZ:cz-.8,maxZ:cz+.8,h:12});
+    worldHits.push(col);
+  }
+  /* hanging lamps down the hall */
+  for(const lx of [-16,-8,0,8,16]) for(const lz of [-11,-3,7]){
+    const ch=new THREE.Mesh(new THREE.CylinderGeometry(.03,.03,3.4,5), trim);
+    ch.position.set(lx,10.4,lz); G.add(ch);
+    const lp=new THREE.Mesh(new THREE.SphereGeometry(.36,12,8), new THREE.MeshBasicMaterial({color:0xffe2ab}));
+    lp.position.set(lx,8.5,lz); G.add(lp);
+  }
+  const hallLight=new THREE.PointLight(0xffdca8, 26, 46, 2);
+  hallLight.position.set(X,8,-6); scene.add(hallLight);
+  const mihrabLight=new THREE.PointLight(0xffe0b0, 12, 20, 2);
+  mihrabLight.position.set(X,5,-12); scene.add(mihrabLight);
+
+  /* shoe racks either side of the central arch, where they really are */
+  for(const sx of [-6.4,6.4]){
+    box(3.4,.12,1.1, sx,.9,12.0, wood, false);
+    box(3.4,.12,1.1, sx,1.5,12.0, wood, false);
+    box(.12,1.6,1.1, sx-1.7,.8,12.0, wood, false);
+    box(.12,1.6,1.1, sx+1.7,.8,12.0, wood, false);
+  }
+
+  /* ---------------- sahn (courtyard) ---------------- */
+  const yard=new THREE.Mesh(new THREE.PlaneGeometry(54,19), new THREE.MeshStandardMaterial({
+    map:TEX.floor, normalMap:TEX.floorN, color:0xa9a290, roughness:.9}));
+  yard.rotation.x=-Math.PI/2; yard.position.set(0,.015,23); yard.receiveShadow=true; G.add(yard);
+  /* riwaq: arcade of arches down both long sides */
+  for(const sx of [-25,25]){
+    for(let i=0;i<5;i++){
+      const cz=16.4+i*3.9;
+      const col=new THREE.Mesh(new THREE.CylinderGeometry(.5,.56,5.4,12), stone);
+      col.position.set(sx,2.7,cz); col.castShadow=true; G.add(col);
+      colliders.push({minX:X+sx-.6,maxX:X+sx+.6,minZ:cz-.6,maxZ:cz+.6,h:5.4});
+      if(i<4) arch(sx,cz+1.95,1.85,.7,5.2,stone,'x');
+    }
+    box(1.6,1.4,19, sx,6.1,23, sand, false);
+  }
+  /* ablution fountain at the centre of the sahn */
+  const basin=new THREE.Mesh(new THREE.CylinderGeometry(3.1,3.4,1.1,16), stone);
+  basin.position.set(0,.55,23); basin.castShadow=true; G.add(basin);
+  const water=new THREE.Mesh(new THREE.CylinderGeometry(2.8,2.8,.1,16),
+    new THREE.MeshStandardMaterial({color:0x3d6f7a, roughness:.15, metalness:.1}));
+  water.position.set(0,1.08,23); G.add(water);
+  const spout=new THREE.Mesh(new THREE.CylinderGeometry(.22,.3,2.2,10), stone);
+  spout.position.set(0,2.1,23); G.add(spout);
+  colliders.push({minX:X-3.4,maxX:X+3.4,minZ:19.6,maxZ:26.4,h:1.1});
+
+  /* street wall + gate, with AL-SALAAM over it */
+  box(19,4.6,.8, -17.5,2.3,32, sand, true);
+  box(19,4.6,.8,  17.5,2.3,32, sand, true);
+  /* the gate has to be tall enough to actually carry the sign - at 7.2 the
+     lettering floated in the sky above it */
+  /* piers stop BELOW the header, or they cut across the lettering */
+  for(const gx of [-4.2,4.2]) box(2.0,9.0,2.0, gx,4.5,32, sand, true);
+  box(22,3.2,1.5, 0,10.6,32, stone, false);         /* header the sign mounts on */
+  box(22,.5,1.9,  0,12.45,32, stone, false);        /* coping */
+  arch(0,32,3.4,1.0,3.4,stone,'z');
+
+  /* minarets at the outer corners of the courtyard */
+  for(const mx of [-26.5,26.5]){
+    const shaft=new THREE.Mesh(new THREE.CylinderGeometry(1.4,1.75,26,12), sand);
+    shaft.position.set(mx,13,31.5); shaft.castShadow=true; G.add(shaft);
+    const bal=new THREE.Mesh(new THREE.CylinderGeometry(2.2,2.2,.5,12), stone);
+    bal.position.set(mx,19.5,31.5); G.add(bal);
+    const bal2=new THREE.Mesh(new THREE.CylinderGeometry(1.9,1.9,.4,12), stone);
+    bal2.position.set(mx,24.4,31.5); G.add(bal2);
+    const cap=new THREE.Mesh(new THREE.ConeGeometry(1.8,3.6,12), teal);
+    cap.position.set(mx,27.8,31.5); cap.castShadow=true; G.add(cap);
+    const tip=new THREE.Mesh(new THREE.CylinderGeometry(.1,.1,1.7,8), gold);
+    tip.position.set(mx,30.3,31.5); G.add(tip);
+    colliders.push({minX:X+mx-1.8,maxX:X+mx+1.8,minZ:29.7,maxZ:33.3,h:26});
+  }
+
+  /* AL-SALAAM in big letters over the gate, both faces */
+  const cv=document.createElement('canvas'); cv.width=2048; cv.height=384;
+  { const g=cv.getContext('2d');
+    g.fillStyle='#efe6cf'; g.fillRect(0,0,2048,384);
+    g.strokeStyle='#2f7d78'; g.lineWidth=16; g.strokeRect(14,14,2020,356);
+    g.textAlign='center'; g.textBaseline='middle';
+    g.font='900 200px "Helvetica Neue", Arial, sans-serif';
+    g.fillStyle='#1f4a48'; g.fillText('AL-SALAAM',1024,170);
+    g.font='700 56px "Helvetica Neue", Arial, sans-serif';
+    g.fillStyle='#7a6f56'; g.fillText('M O S Q U E',1024,306); }
+  const tex=new THREE.CanvasTexture(cv); tex.colorSpace=THREE.SRGBColorSpace;
+  const signMat=new THREE.MeshBasicMaterial({map:tex});
+  for(const [zz,ry] of [[32.78,0],[31.22,Math.PI]]){
+    const sg=new THREE.Mesh(new THREE.PlaneGeometry(19.5,2.7), signMat);
+    sg.position.set(0,10.6,zz); sg.rotation.y=ry; G.add(sg);
+  }
+
+  /* courtyard lamps */
+  for(const lx of [-15,15]) for(const lz of [18,29]){
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(.12,.16,4.4,8), trim);
+    post.position.set(lx,2.2,lz); G.add(post);
+    const lamp=new THREE.Mesh(new THREE.SphereGeometry(.42,12,8), new THREE.MeshBasicMaterial({color:0xffe6b0}));
+    lamp.position.set(lx,4.7,lz); G.add(lamp);
+  }
+  const yardLight=new THREE.PointLight(0xffd9a0, 16, 34, 2);
+  yardLight.position.set(X,6,24); scene.add(yardLight);
+  console.info('Al-Salaam mosque built at x='+X);
 }
 
 /* ===================== STREET / FACADES =====================
@@ -1924,6 +2180,7 @@ function makePlayerCar(){
 }
 
 buildTown();
+buildMosque();
 /* mod_town2.js — Main Street extension for dead-aisle.html
    Defines extendTown(); call ONCE after buildTown().
    Requires globals: THREE, scene, colliders, MAT, rand, townMats, townWinGeo, townWheelGeo.
@@ -2521,7 +2778,7 @@ function carDrive(dt,keys){
       nx=cx+dx/d*1.6; nz=cz+dz/d*1.6;
     }
   }
-  nx=clamp(nx,-127,127); nz=clamp(nz,17,39);
+  nx=clamp(nx,WORLD_X0+8,WORLD_X1-8); nz=clamp(nz,17,39);
   townCar.position.set(nx,0,nz);
   townCar.rotation.y=yaw+(carSpeed/2.7)*Math.tan(carSteerVal)*dt;
 
@@ -3760,8 +4017,81 @@ function attachHostileModel(gltf){
     z.root.children.forEach(c=>{ if(c.isMesh&&c.geometry.type==='BoxGeometry') c.visible=false; });
   }
   hostileLoaded=true;
+  buildTownFolk(proto, clips, fit);
   console.info('hostile model ready:', Object.keys(clips).join(', '));
 }
+/* ===================== STAGE G: TOWN NPCs =====================
+   Civilians walking the pavements the whole length of the map, so the drive
+   between TOPS and the mosque is a town rather than an empty corridor. They
+   reuse the hostile rig - same skeleton, same walk clip, civilian palette -
+   so there is no extra rigging cost and no extra draw-call class.
+   They are ambience only: they never chase and never damage. */
+const TOWN_FOLK=[];
+const FOLK_DRAW=150;          /* only animate the ones you can actually see */
+function buildTownFolk(proto, clips, fit){
+  if(TOWN_FOLK.length) return;
+  const SHIRT=[0xb8b2a4,0x7d6a58,0x4c5a6b,0x6b5560,0x8a7f5e,0x3f4a44,0x93745a,0x5d6470];
+  const PANT =[0x3a4048,0x4e4438,0x2f3540,0x5a5348];
+  const walk = clips['run'] || clips['idle'] || Object.values(clips)[0];
+  /* spread them along the whole road, both pavements, both directions */
+  let i=0;
+  for(let x=WORLD_X0+60; x<WORLD_X1-40; x+=26){
+    /* keep them off the TOPS forecourt and out of the mosque courtyard */
+    if(Math.abs(x)<34 || Math.abs(x-MOSQUE_X)<40) continue;
+    for(const side of [0,1]){
+      if(Math.random()<.28) continue;
+      const m=skeletonClone(proto);
+      m.scale.setScalar(fit);
+      const shirt=SHIRT[i%SHIRT.length], pant=PANT[(i*3)%PANT.length];
+      const skinK=.74+((i*29)%9)/9*.5;
+      m.traverse(o=>{
+        if(!o.isMesh)return;
+        o.frustumCulled=true; o.castShadow=true; o.receiveShadow=false;
+        const src=Array.isArray(o.material)?o.material:[o.material];
+        o.material=src.map(mat=>{
+          if(!mat)return mat;
+          const c=mat.clone(); const nm=(mat.name||'').toLowerCase();
+          if(nm.includes('casualsuit')) c.color.multiplyScalar(.9).lerp(new THREE.Color(shirt),.6);
+          else if(nm.includes('male')||nm.includes('skin')) c.color.multiplyScalar(skinK);
+          else if(nm.includes('shoes')) c.color.lerp(new THREE.Color(pant),.4);
+          return c;
+        });
+        if(o.material.length===1)o.material=o.material[0];
+      });
+      const root=new THREE.Group();
+      /* north pavement is z 40.1..42.6; the south verge sits below the road at z<32 */
+      const z = side ? 41.4+rand(-.6,.6) : 30.6+rand(-.7,.7);
+      root.position.set(x+rand(-8,8), 0, z);
+      root.add(m); root.visible=false; scene.add(root);
+      const mixer=new THREE.AnimationMixer(m);
+      const act=walk?mixer.clipAction(walk):null;
+      if(act){ act.play(); act.time=Math.random()*2; }
+      TOWN_FOLK.push({root, mixer, act,
+        dir: side?1:-1, speed: rand(.55,1.15), z,
+        rate: rand(.55,.85)});
+      i++;
+    }
+  }
+  console.info('town folk:',TOWN_FOLK.length);
+}
+function townFolkUpdate(dt){
+  if(!TOWN_FOLK.length)return;
+  const cx = (phase==='drive'||phase==='parking') && townCar ? townCar.position.x : player.pos.x;
+  for(const f of TOWN_FOLK){
+    const near = Math.abs(f.root.position.x-cx) < FOLK_DRAW;
+    if(f.root.visible!==near) f.root.visible=near;
+    if(!near) continue;
+    f.root.position.x += f.dir*f.speed*dt;
+    if(f.root.position.x>WORLD_X1-30){ f.dir=-1; }
+    if(f.root.position.x<WORLD_X0+30){ f.dir=1; }
+    /* turn back rather than stroll through a shopfront or the mosque gate */
+    const px=f.root.position.x;
+    if(Math.abs(px)<30 || Math.abs(px-MOSQUE_X)<36) f.dir=(px>((Math.abs(px)<30)?0:MOSQUE_X))?1:-1;
+    f.root.rotation.y = f.dir>0 ? Math.PI/2 : -Math.PI/2;
+    if(f.mixer){ f.mixer.timeScale=f.rate*(f.speed/0.9); f.mixer.update(dt); }
+  }
+}
+
 function hostilePlay(z,name,fade){
   if(!z.acts||z.clipName===name)return;
   const next=z.acts[name]; if(!next)return;
@@ -4059,7 +4389,7 @@ function spawnZombie(waveNum,opts={}){
   for(const sx of [-19,19]) for(const sz of [-12,-6,0,6,12]) pts.push([sx,sz]);
   pts.push([-19,13],[19,13],[-19,-13],[19,-13]);
   let best=null,bd=-1;
-  if(opts.pos){ best=opts.pos; }
+  if(opts.pos){ best=[opts.pos[0]+ACT_OFF, opts.pos[1]]; }
   else{
     for(const p of pts){
       const d=Math.hypot(p[0]-player.pos.x,p[1]-player.pos.z);
@@ -4323,10 +4653,15 @@ const HV=(()=>{
    Carts and watermelons you can pick up with F and hurl at people.
    Simple ballistic projectiles - gravity, spin, sphere-vs-actor hits. */
 const THROWABLES=[];
+const THROW_LABEL={cart:'SHOPPING CART', watermelon:'WATERMELON', axe:'THROWING AXE'};
 let heldItem=null, throwProto={};
 const THROW_DEFS={
   cart:      {scale:.01, mass:1.0, damage:70, radius:.6,  hold:V3(.34,-.34,-.78), spin:5.5, burst:false},
   watermelon:{scale:1,   mass:.35, damage:34, radius:.28, hold:V3(.26,-.24,-.52), spin:11,  burst:true },
+  /* the axe: light, fast, and lethal - it tumbles end over end and sticks
+     where it lands rather than bouncing like the melon */
+  axe:       {scale:1,   mass:.5,  damage:120,radius:.34, hold:V3(.30,-.26,-.62), spin:16,  burst:false,
+              power:19, stick:true},
 };
 function spawnThrowable(type,x,z,y){
   const src=throwProto[type]; if(!src)return null;
@@ -4376,7 +4711,7 @@ function pickUp(t){
   t.mesh.rotation.set(0,0,0);
   gun.visible=false;
   const el=document.getElementById('weapon-name');
-  if(el) el.textContent=(t.type==='cart'?'SHOPPING CART':'WATERMELON');
+  if(el) el.textContent=THROW_LABEL[t.type]||t.type.toUpperCase();
   Audio.reload&&Audio.reload();
 }
 /* Put the held item back on the ground and give the rifle back. gunUpdate
@@ -4421,7 +4756,7 @@ function throwHeld(){
   t.mesh.quaternion.identity();
   t.mesh.traverse(o=>o.layers.set(0));
   const dir=V3(0,0,-1).applyQuaternion(camera.quaternion);
-  const power=t.type==='cart'?11:15.5;
+  const power=t.def.power||(t.type==='cart'?11:15.5);
   t.vel.copy(dir).multiplyScalar(power); t.vel.y+=3.1;
   t.spin.set(rand(-1,1),rand(-1,1),rand(-1,1)).normalize().multiplyScalar(t.def.spin);
   gun.visible=true;
@@ -4494,6 +4829,9 @@ function throwablesUpdate(dt,now){
       }
       t.vel.y*=-.28; t.vel.x*=.6; t.vel.z*=.6;
       t.spin.multiplyScalar(.5);
+      if(t.def.stick){ t.state='ground'; t.vel.set(0,0,0); t.spin.set(0,0,0);
+                       t.mesh.rotation.set(rand(-.2,.2), rand(0,6.3), Math.PI*.5+rand(-.25,.25));
+                       t.mesh.position.y=restY; continue; }
       if(Math.abs(t.vel.y)<1.2 && t.vel.lengthSq()<1.6){
         t.state='ground'; t.vel.set(0,0,0);
         t.mesh.rotation.x=0; t.mesh.rotation.z=0;
@@ -4507,7 +4845,7 @@ function throwablesUpdate(dt,now){
     if(heldItem){ if(hint.dataset.thr!=='h'){ hint.dataset.thr='h'; hint.textContent='F THROW'; } }
     else{
       const n=nearestThrowable();
-      if(n){ if(hint.dataset.thr!=='p'){ hint.dataset.thr='p'; hint.textContent='F PICK UP '+(n.type==='cart'?'CART':'WATERMELON'); } }
+      if(n){ if(hint.dataset.thr!=='p'){ hint.dataset.thr='p'; hint.textContent='F PICK UP '+(THROW_LABEL[n.type]||n.type.toUpperCase()); } }
       else if(hint.dataset.thr){ hint.dataset.thr=''; hint.textContent=phase==='inside'
         ? 'R RELOAD \u00b7 SHIFT SPRINT \u00b7 RMB AIM \u00b7 1/2/3 WEAPON' : 'FIGHT TO THE DOORS'; }
     }
@@ -4520,6 +4858,7 @@ new GLTFLoader().load('assets/throwables.glb', (gltf)=>{
     if(/cart/i.test(o.name)) throwProto.cart=o;
     if(/melon/i.test(o.name)) throwProto.watermelon=o;
   }
+  if(!throwProto.axe) console.info('axe prototype missing until axe.glb lands');
   /* carts around the lot, melons inside and out */
   spawnThrowable('cart',  6.2, 24.5); spawnThrowable('cart', -7.4, 25.8);
   spawnThrowable('cart', 12.5, 21.0); spawnThrowable('cart', -14.0, 20.4);
@@ -4528,6 +4867,23 @@ new GLTFLoader().load('assets/throwables.glb', (gltf)=>{
     spawnThrowable('watermelon',x,z);
   console.info('throwables:',THROWABLES.length,Object.keys(throwProto).join(','));
 }, undefined, ()=>console.info('assets/throwables.glb not reachable'));
+
+/* The axe ships as its own file. It is the secondary weapon: fewer of them,
+   scattered where you would actually find one, and lethal in one hit. */
+new GLTFLoader().load('assets/axe.glb', (gltf)=>{
+  const src=gltf.scene;
+  src.updateWorldMatrix(true,true);
+  const b=new THREE.Box3().setFromObject(src);
+  const len=Math.max(b.max.x-b.min.x, b.max.y-b.min.y, b.max.z-b.min.z);
+  /* normalise whatever scale the model shipped at to a ~0.75 m hand axe */
+  THROW_DEFS.axe.scale = len>1e-4 ? (0.75/len) : 1;
+  src.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=false; } });
+  throwProto.axe=src;
+  for(const [x,z] of [[-16.5,12.5],[15.8,-12.2],[-2.5,-13.4],[19.5,4.5]])
+    spawnThrowable('axe',x,z);
+  for(const [x,z] of [[-10.5,22.5],[9.5,26.8]]) spawnThrowable('axe',x,z);
+  console.info('axe ready, scale',THROW_DEFS.axe.scale.toFixed(3));
+}, undefined, ()=>console.info('assets/axe.glb not reachable'));
 
 /* ===================== RAGDOLL =====================
    Verlet ragdoll driven straight onto the skeleton - no physics engine.
@@ -4701,7 +5057,7 @@ const SFX=(()=>{
 const stats={kills:0,headshots:0,shotsFired:0,shotsHit:0};
 let points=500;
 let phase='menu', runTime=0, adren=0, phaseTime=0;
-const mission={insideLeft:0, spawnT:0, extractAnnounced:false, round:1};
+const mission={insideLeft:0, spawnT:0, extractAnnounced:false, round:1, act:1};
 /* Each cleared round comes back harder: more bodies in the store, a bigger
    crowd waiting in the lot, tougher and faster hostiles, and more of them
    allowed on screen at once. Capped so late rounds stay playable and the
@@ -4732,8 +5088,16 @@ function setPhase(p){
   /* the throwable prompt caches its last state on the element; writing
      hint.textContent below without clearing it stranded 'F THROW' forever */
   { const h=document.getElementById('hint'); if(h) h.dataset.thr=''; }
-  if(p==='outside'){ BOUNDS.minX=-23; BOUNDS.maxX=23; BOUNDS.minZ=-14; BOUNDS.maxZ=30.5; }
-  else { BOUNDS.minX=-21; BOUNDS.maxX=21; BOUNDS.minZ=-14; BOUNDS.maxZ=15.2; }
+  const A=ACT_OFF, act2=(mission.act===2);
+  if(p==='outside'){
+    BOUNDS.minX=A+(act2?-25:-23); BOUNDS.maxX=A+(act2?25:23);
+    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?31:30.5;
+  } else {
+    BOUNDS.minX=A+(act2?-24:-21); BOUNDS.maxX=A+(act2?24:21);
+    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?12.4:15.2;
+  }
+  ZBOUNDS.minX=A+(act2?-25:-23); ZBOUNDS.maxX=A+(act2?25:23);
+  ZBOUNDS.minZ=act2?-15:-14;     ZBOUNDS.maxZ=act2?31:30.5;
   const hint=document.getElementById('hint');
   const lab=document.getElementById('wave-label');
   if(p==='drive'){ hint.textContent='W/S DRIVE · A/D STEER · E RADIO'; lab.textContent='OBJECTIVE'; document.getElementById('wave-num').textContent='TOPS'; xh.style.opacity=0; }
@@ -4757,15 +5121,17 @@ function onCarParked(){
       goproSet(true);
       streamStart();
       SFX.deploy.play();
-      player.pos.set(8.2,1.7,22.6); player.vel.set(0,0,0);
-      player.yaw=0; player.pitch=0;
+      if(mission.act===2) player.pos.set(ACT_OFF+11.5,1.7,34.5);
+      else                player.pos.set(8.2,1.7,22.6);
+      player.vel.set(0,0,0);
+      player.yaw=mission.act===2?Math.PI*0.02:0; player.pitch=0;
       gun.visible=true; vmGroup.visible=true;
       carCamYaw=null;
       try{ radioAudio.pause(); }catch(e){}
       lotCrowdScatter();
       for(const p of OUTSIDE_PTS) spawnZombie(3,{pos:p,flee:Math.random()<.35});
       setPhase('outside');
-      banner('THEY KNOW YOU ARE HERE','GET TO THE DOORS');
+      banner('THEY KNOW YOU ARE HERE', mission.act===2?'GET THROUGH THE GATE':'GET TO THE DOORS');
       Audio.waveSting();
     });
   },600);
@@ -4773,10 +5139,12 @@ function onCarParked(){
 
 function enterStore(){
   setPhase('inside');
+  if(mission.act===2){ player.pos.set(ACT_OFF,1.7,10.5); }
   /* recycle anyone left in the lot - they cannot path through the wall, and
      both win gates wait for every zombie to leave the 'chase' state */
   for(const z of zombies){
-    if(z.state!=='idle'&&z.state!=='dead'&&z.root.position.z>15.5){
+    const gz=(mission.act===2)?13.2:15.5;
+    if(z.state!=='idle'&&z.state!=='dead'&&z.root.position.z>gz){
       z.state='idle'; z.root.visible=false;
       z.__lot=false; z.root.userData.flee=false;
     }
@@ -4784,14 +5152,65 @@ function enterStore(){
   setObjectiveState&&setObjectiveState('enter','done');
   setObjectiveState&&setObjectiveState('clear','active');
   setObjectiveState&&setObjectiveState('rescue','active');
-  banner('CLEAR THE STORE','4 SURVIVORS HIDING INSIDE');
+  banner(mission.act===2?'CLEAR THE PRAYER HALL':'CLEAR THE STORE','4 SURVIVORS HIDING INSIDE');
   Audio.waveSting();
   mission.insideLeft=roundScale().inside;
   mission.spawnT=.4;
 }
 
+/* Move the whole game to an act: shift every positional table, retarget the
+   parking assist, and drop the player back in the car at the start of the
+   drive. Act 1 is TOPS, act 2 is the Al-Salaam mosque 900 m west. */
+function setAct(n){
+  mission.act=n;
+  ACT_OFF = (n===2) ? MOSQUE_X : 0;
+  setActPark();
+  const SP=(n===2)?LC_SPAWN2:LC_SPAWN1, LT=(n===2)?LC_LOT2:LC_LOT1;
+  LC_SPAWN.minX=SP.minX+ACT_OFF; LC_SPAWN.maxX=SP.maxX+ACT_OFF;
+  LC_SPAWN.minZ=SP.minZ; LC_SPAWN.maxZ=SP.maxZ;
+  LC_LOT.minX=LT.minX+ACT_OFF; LC_LOT.maxX=LT.maxX+ACT_OFF;
+  LC_LOT.minZ=LT.minZ; LC_LOT.maxZ=LT.maxZ;
+  for(let i=0;i<survivors.length;i++){
+    const base=SURV_SPOTS[i%SURV_SPOTS.length];
+    survivors[i].home = (n===2)
+      ? [ACT_OFF+SURV_SPOTS2[i%SURV_SPOTS2.length][0], SURV_SPOTS2[i%SURV_SPOTS2.length][1]]
+      : [base[0], base[1]];
+  }
+  console.info('ACT',n,'offset',ACT_OFF);
+}
+window.__setAct=setAct;
+window.__act2=()=>actTwoBegin();
+window.__act2=()=>actTwoBegin();
+
+function actTwoBegin(){
+  setAct(2);
+  mission.insideLeft=0; mission.spawnT=0; mission.extractAnnounced=false;
+  /* back in the car, at the TOPS lot, pointed west toward the mosque */
+  if(townCar){ townCar.position.set(7.5,0,36.5); townCar.rotation.set(0,Math.PI/2,0); }
+  carSpeed=0; carParked=false; carCamYaw=null; autoParking=false;
+  player.alive=true; player.hp=player.maxHp;
+  setPhase('drive');
+  survivorsReset&&survivorsReset();
+  lotCrowdReset&&lotCrowdReset();
+  for(const z of zombies){ z.state='idle'; z.root.visible=false; z.__lot=false; ragReset(z); }
+  setObjectives&&setObjectives([
+    {id:'drive2',text:'DRIVE WEST TO THE AL-SALAAM MOSQUE'},
+    {id:'clear2',text:'CLEAR THE COURTYARD'},
+    {id:'rescue2',text:'FIND 4 SURVIVORS IN THE PRAYER HALL'},
+    {id:'extract2',text:'WALK THEM OUT THROUGH THE GATE'}]);
+  banner('NEW OBJECTIVE','AL-SALAAM MOSQUE \u2014 DRIVE WEST');
+  Audio.waveSting();
+}
+
 function missionComplete(){
   if(phase!=='inside')return;
+  /* clearing TOPS is only half the run - the mosque is act 2 */
+  if(mission.act!==2){
+    const saved=survivors.filter(s=>s.state==='following').length;
+    addPoints(400,'TOPS CLEAR +400');
+    actTwoBegin();
+    return;
+  }
   setPhase('win');
   playing=false; firing=false;
   document.exitPointerLock();
@@ -4818,7 +5237,13 @@ function missionUpdate(dt){
     if(phaseTime<3){ setPhase._b1=false; setPhase._b2=false; }
     return;
   }
-  if(phase==='outside'&&player.pos.z<14.7&&Math.abs(player.pos.x)<2.1){ enterStore(); }
+  /* the way in: TOPS front doors in act 1, the mosque's central arch in act 2 */
+  if(phase==='outside'){
+    const A=ACT_OFF;
+    const gate = mission.act===2 ? (player.pos.z<12.6 && Math.abs(player.pos.x-A)<3.0)
+                                 : (player.pos.z<14.7 && Math.abs(player.pos.x-A)<2.1);
+    if(gate) enterStore();
+  }
   if(phase==='inside'){
     if(mission.insideLeft>0){
       mission.spawnT-=dt;
@@ -5733,6 +6158,8 @@ function toggleMute(){
 /* ============================== SURVIVORS ============================== */
 const survivors=[];
 const SURV_SPOTS=[[-13.5,11.0],[13.2,10.6],[-19.5,-12.5],[18.8,-3.0]];
+/* prayer-hall hiding places: behind columns and beside the minbar */
+const SURV_SPOTS2=[[-17.5,-12.5],[16.8,-12.0],[-20.5,6.5],[19.5,4.0]];
 const SURV_NAMES=['MARA','JUDE','KIRA','OTIS'];
 const SURV_SKINS=[0xc9a184,0xba8f68,0xd8b494,0xa87a58];
 const SURV_LOOKS=[
@@ -6021,7 +6448,11 @@ const lc_claimed=new Set();
 let lc_burstDone=false;
 let lc_groanT=rand(3,6);
 const LC_LOT ={minX:-23,maxX:23,minZ:16,maxZ:29.5};   /* outer clamp (road starts z~32, store front z=15) */
+const LC_LOT1={minX:-23,maxX:23,minZ:16,maxZ:29.5};
+const LC_LOT2={minX:-25,maxX:25,minZ:14.5,maxZ:31};
 const LC_SPAWN={minX:-20,maxX:20,minZ:17,maxZ:29};
+const LC_SPAWN1={minX:-20,maxX:20,minZ:17,maxZ:29};
+const LC_SPAWN2={minX:-22,maxX:22,minZ:16,maxZ:30};
 const LC_WRECK={minX:-18.6,maxX:-13.4,minZ:16.8,maxZ:19.6}; /* derelict car at (-16,18.2) */
 
 /* predicate for the integrator: zombiesUpdate must skip these entirely */
@@ -7059,6 +7490,7 @@ function resetRun(){
   stats.kills=0; stats.headshots=0; stats.shotsFired=0; stats.shotsHit=0;
   points=500; runTime=0; adren=0;
   mission.insideLeft=0; mission.spawnT=0; mission.extractAnnounced=false;
+  setAct(1);                       /* every run starts back at TOPS */
   document.getElementById('points-val').textContent=points;
   document.getElementById('wave-num').textContent='-';
   player.pos.set(0,1.7,12.5); player.vel.set(0,0,0);
@@ -7156,6 +7588,7 @@ function loop(){
       lotCrowdUpdate&&lotCrowdUpdate(dt,now);
       missionUpdate(dt);
     }
+    townFolkUpdate&&townFolkUpdate(dt);
     throwablesUpdate&&throwablesUpdate(dt,now);
     survivorsUpdate&&survivorsUpdate(dt,now);
     survivorsHUD&&survivorsHUD();
