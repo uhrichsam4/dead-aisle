@@ -2246,6 +2246,7 @@ function phPlace(pack, name, x, z, opts){
     }
   }
   if(opts&&opts.brk) makeBreakable(o, opts.brk, opts.brkScale||1);
+  if(opts&&opts.cull) cullRegister(o, x, z, opts.cull);
   return o;
 }
 function phLoad(pack, url, then){
@@ -2328,6 +2329,74 @@ phLoad('furn','assets/ph_furn.glb',(lib)=>{
     phPlace('furn',n, X+13.5, 2.8+i*3.0, {h:.76,solid:true,brk:'wood'}));
   chairs.slice(0,3).forEach((n,i)=>
     phPlace('furn',n, -18+i*1.9, -11.0, {h:.95,solid:true,brk:'wood',brkScale:.5}));
+});
+
+/* ===================== SUPPLIED MODEL PACK (map2) =====================
+   The MAP / ENIMIS drops were unusable as delivered: every one of them is an
+   unrigged single mesh in the 150k-1.4M triangle range (the liquor store
+   alone was 1,376,705 tris - more than the whole frame budget) with 2k-4k
+   textures. scratchpad/pack2.py decimates each to a game budget, normalises
+   scale and origin, caps textures at 512 and packs the lot into one 6.8MB
+   GLB. What lands here is 18 props totalling ~98k tris.
+
+   The two figures are placed as motionless background civilians only, well
+   clear of any combat area: they have no skeleton, so they cannot be
+   animated, and standing them in a fight would read as broken. */
+phLoad('map2','assets/map2.glb',(lib)=>{
+  const P=(n,x,z,o)=>phPlace('map2',n,x,z,o);
+
+  /* ---- the liquor store: a real building on the way out of town ---- */
+  P('liquorstore', -268, 52.5, {h:9.2, ry:Math.PI, solid:true, cull:230});
+  P('ironfence', -268, 44.6, {h:2.0, ry:0, cull:200});
+  for(let i=-3;i<=3;i++) if(i) P('ironfence', -268+i*2.55, 44.6, {h:2.0, ry:0, cull:200});
+
+  /* ---- verge dressing the length of the drive ---- */
+  for(let x=-150; x>-840; x-=37){
+    const side = (x%74===0) ? 1 : -1;
+    P('deadtree', x, side>0?42.6:29.4, {h:rand(5.4,7.2), cull:200});
+  }
+  for(let x=-146; x>-840; x-=23){
+    P(Math.random()<.5?'grasstuft':'grasstuft2', x+rand(-4,4), rand(41.2,43.2), {h:rand(.3,.5), cull:130});
+    P(Math.random()<.5?'grasstuft':'grasstuft2', x+rand(-4,4), rand(28.8,30.8), {h:rand(.3,.5), cull:130});
+  }
+  for(let x=-160; x>-830; x-=61){
+    P('boulder',     x,        rand(43.5,45.5), {h:rand(.8,1.5), cull:170});
+    P('rockscatter', x-24,     rand(26.5,28.5), {h:rand(.5,.9),  cull:170});
+  }
+  /* rubble and culverts read as industry, so keep them to the industrial belt */
+  for(let x=-330; x>-575; x-=52){
+    P('rubblestack', x,    rand(43.8,45.2), {h:rand(1.3,1.9), solid:true, cull:190});
+    P('culvert',     x-26, rand(26.8,28.2), {h:rand(1.1,1.5), solid:true, cull:190});
+  }
+  for(const cx of [-200,-402,-486,-640,-790]) P('cobblepatch', cx, 41.6, {h:.16, cull:150});
+
+  /* ---- background civilians: street corners and the fuel stop ---- */
+  const FOLK2=[[-176,42.2,'man_hoodie',-2.3],[-241,29.2,'man_kurta',1.1],
+               [-402,26.6,'man_hoodie',0.4],[-455,42.4,'man_kurta',-1.9],
+               [-612,29.0,'man_kurta',2.6],[-742,42.6,'man_hoodie',-0.7]];
+  for(const [fx,fz,nm,fr] of FOLK2) P(nm, fx, fz, {h:1.79, ry:fr, cull:150});
+
+  /* ---- supermarket: the shelving and stock that came in the drop ---- */
+  /* end caps face the aisle mouths, clear of the walkway at z=11 */
+  P('shelfdisp',  -13.5, 5.4, {h:1.86, ry:Math.PI/2, solid:true, brk:'crate'});
+  P('shelfdisp',   13.5, 5.4, {h:1.86, ry:-Math.PI/2, solid:true, brk:'crate'});
+  P('shelfdisp',    0.0,-12.4,{h:1.86, ry:0,          solid:true, brk:'crate'});
+  P('shelfangled',-19.4,-6.2, {h:1.60, ry:Math.PI/2, solid:true, brk:'crate'});
+  P('shelfangled', 19.4,-6.2, {h:1.60, ry:-Math.PI/2,solid:true, brk:'crate'});
+  P('shelfempty', -19.4, 1.4, {h:1.36, ry:Math.PI/2, solid:true, brk:'crate'});
+  P('shelfempty',  19.4, 1.4, {h:1.36, ry:-Math.PI/2,solid:true, brk:'crate'});
+  /* loose stock on the floor and the checkout run */
+  for(const [sx,sz] of [[-6.4,10.2],[7.1,9.6],[-15.2,-9.4],[16.0,-10.1],[2.4,-13.6]])
+    P('steaktray', sx, sz, {h:.06, y:.02, cull:90});
+  for(let i=0;i<14;i++)
+    P('sodacan', rand(-19,19), rand(-13,10), {h:.13, y:.01, cull:80});
+  P('cartboxes', -9.2, 12.4, {h:1.0, ry:.6, solid:true});
+  P('cartboxes',  10.6, 13.1, {h:1.0, ry:-1.9, solid:true});
+  P('cartboxes',  22.0, 24.5, {h:1.0, ry:2.4, solid:true, cull:140});
+
+  /* ---- mosque: iron railing along the courtyard frontage ---- */
+  for(let i=-6;i<=6;i++)
+    P('ironfence', MOSQUE_X+i*2.55, 32.4, {h:2.0, ry:0, cull:230});
 });
 
 /* ===================== STREET / FACADES =====================
@@ -2505,7 +2574,12 @@ function makePlayerCar(){
    bullet holes and sparks like the rest of the world. */
 function buildHighway(){
   const X_NEAR=-140, X_FAR=-846;
-  const ZN=43.5, ZS=28.5;              /* road occupies z 32..40 - stay clear */
+  /* The town's own facades sit at z=46.6, which is 10.6 m off the road centre
+     and reads fine there because that row is dense and tall. Out here the
+     buildings are sparser, and at 43.5/28.5 they fell outside the in-car view
+     entirely - you drove down a corridor of empty verge. Pulling the frontage
+     in to ~5.5 m from the road edge puts it back in frame. */
+  const ZN=41.8, ZS=30.2;              /* road occupies z 32..40 - stay clear */
   const unitBox=new THREE.BoxGeometry(1,1,1);
   const grp=(cx,cz,r)=>{ const g=new THREE.Group(); scene.add(g);
     cullRegister(g,cx,cz,r||210); return g; };
@@ -2774,7 +2848,7 @@ function buildHighway(){
   let prevN=null, prevS=null;
   for(let x=X_NEAR; x>X_FAR; x-=46){
     const g=grp(x,36,230);
-    for(const [z,side] of [[ZN-2.4,'n'],[ZS+2.4,'s']]){
+    for(const [z,side] of [[40.9,'n'],[31.1,'s']]){   /* verge edge, clear of the 32..40 lane */
       const p=new THREE.Mesh(poleGeo,MAT_POLE);
       p.position.set(x,4.5,z); p.castShadow=true; g.add(p);
       const arm=new THREE.Mesh(armGeo,MAT_POLE); arm.position.set(x,8.4,z); g.add(arm);
@@ -8683,6 +8757,10 @@ window.__game={player, zombies, scene, camera, renderer, zombiesUpdate, spawnZom
   keysRef:()=>keys, pausedRef:()=>({playing,paused,locked}),
   mission, roundScale, carDrive, townCarRef:()=>townCar, carSpeedRef:v=>{ if(v!==undefined)carSpeed=v; return carSpeed; },
   carSkidRef:()=>carSkid, skidFX, skidsRef:()=>SKIDS, smokeRef:()=>SMOKE,
+  carCamSnap:()=>{ carCamYaw=null; },   /* screenshot harness: drop the camera smoothing */
+  cullForceOn:()=>{ for(const c of CULL) c.obj.visible=true; return CULL.length; },
+  cullStats:(x,z)=>{ let on=0,off=0; for(const c of CULL){
+    (Math.hypot(x-c.cx,z-c.cz)<c.r?on++:off++); } return {on,off,total:CULL.length}; },
   THREE};
 
 /* attract/screenshot mode: file:///...#shot */
