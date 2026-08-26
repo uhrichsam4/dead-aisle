@@ -533,6 +533,12 @@ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+/* Every renderer.render() rebuilds the shadow map. There are two scene passes
+   per frame - the world, then the view model through its own camera - so the
+   map was being rebuilt TWICE for one frame's worth of shadows, and the view
+   model's pass does not even light the world. Drive it manually: mark it dirty
+   once, before the world pass. */
+renderer.shadowMap.autoUpdate = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -596,7 +602,7 @@ function settingsApply(){
 }
 window.__settings=SETTINGS;
 
-const camera = new THREE.PerspectiveCamera(88, innerWidth/innerHeight, 0.05, 320);
+const camera = new THREE.PerspectiveCamera(88, innerWidth/innerHeight, 0.05, 230);
 camera.rotation.order = 'YXZ';
 
 /* The world runs at a GoPro-wide 88 deg, which makes anything held near the
@@ -678,7 +684,7 @@ addEventListener('resize', ()=>{
     return;
   }
 
-  const FX_RES_SCALE = 1;
+  let FX_RES_SCALE = 1;   /* driven by the adaptive-resolution controller */
 
   const VERT = `
     varying vec2 vUv;
@@ -859,6 +865,7 @@ addEventListener('resize', ()=>{
     u.exposure.value = renderer.toneMappingExposure;
 
     /* PASS 1: scene -> RT (linear HDR, no tonemap/OETF per r160 RT rules) */
+    renderer.shadowMap.needsUpdate = true;      /* exactly one rebuild a frame */
     renderer.setRenderTarget(rt);
     renderer.render(scene, camera);
     /* PASS 1b: view model over the top, own narrower FOV, fresh depth */
@@ -901,9 +908,19 @@ addEventListener('resize', ()=>{
              vignette: look.vignette, grain: look.grain, flicker: look.flicker };
   }
 
+  /* Dynamic resolution. Only the offscreen scene buffer shrinks - pass 2
+     still presents at full drawing-buffer size, so the HUD and the final
+     image stay sharp while the shaded pixels get cheaper. */
+  function fxSetResScale(s){
+    const v = Math.max(0.45, Math.min(1, s || 1));
+    if (Math.abs(v - FX_RES_SCALE) < 0.001) return FX_RES_SCALE;
+    FX_RES_SCALE = v; fxResize();
+    return FX_RES_SCALE;
+  }
+
   if (typeof addEventListener === 'function') addEventListener('resize', fxResize);
 
-  Object.assign(window, { fxInit, fxRender, fxResize, fxSetLook, __fxDebug:()=>({rt}) });
+  Object.assign(window, { fxInit, fxRender, fxResize, fxSetLook, fxSetResScale, __fxDebug:()=>({rt}) });
   window.__fxMat=()=>quadMat;
   fxInit();
 })();
@@ -955,6 +972,7 @@ function makeTube(x,z,on=true){
     const pt = new THREE.PointLight(0xcfe8d8, 44, 22, 1.7);
     pt.position.y=-.4; g.add(pt);
     tubeLights.push({mat:tubeMat, light:pt, base:44, t:rand(0,10), state:1});
+    lightRegister(pt,70);
   } else {
     const tube = new THREE.Mesh(new THREE.BoxGeometry(2.2,.05,.2),
       new THREE.MeshStandardMaterial({color:0x2c302c, roughness:.9}));
@@ -971,6 +989,49 @@ emergency.position.set(0,3.6,0); scene.add(emergency);
    Supermarket hall: 44 x 30 m, shelf rows, checkout front, freezer back */
 const colliders = []; // {minX,maxX,minZ,maxZ}
 const worldHits = []; // solid meshes bullets should stop on
+
+/* ===================== DISTANCE CULLING =====================
+   The scene carries ~6000 meshes. three.js frustum-tests every one of them
+   every frame even when the whole room is 900 m away, so the cost is paid
+   before a single triangle is drawn. Registering a GROUP lets one visibility
+   flag skip its entire subtree. */
+const CULL=[];
+function cullRegister(obj, cx, cz, radius){
+  if(!obj)return obj;
+  CULL.push({obj, cx, cz, r:radius});
+  return obj;
+}
+let _cullT=0;
+function cullUpdate(dt){
+  _cullT-=dt; if(_cullT>0)return;
+  _cullT=.2;                                   /* 5 Hz is plenty for this */
+  const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
+  const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  for(const c of CULL){
+    const d=Math.hypot(px-c.cx, pz-c.cz);
+    const on=d<c.r;
+    if(c.obj.visible!==on) c.obj.visible=on;
+  }
+}
+
+/* ---- point lights are per-fragment on every lit material in range; keep
+   only the handful near the player switched on ---- */
+const MANAGED_LIGHTS=[];
+function lightRegister(l,radius){ if(l){ MANAGED_LIGHTS.push({l, base:l.intensity, r:radius||40}); } return l; }
+let _lightT=0;
+function managedLightsUpdate(dt){
+  _lightT-=dt; if(_lightT>0)return;
+  _lightT=.25;
+  const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
+  const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  for(const m of MANAGED_LIGHTS){
+    const d=Math.hypot(px-m.l.position.x, pz-m.l.position.z);
+    const on=d<m.r;
+    if(on && m.l.intensity===0) m.l.intensity=m.base;
+    else if(!on && m.l.intensity!==0) m.l.intensity=0;
+  }
+}
+
 
 /* --- breakables --- */
 const DEBRIS=[];
@@ -992,7 +1053,10 @@ let lightMix = 1;
 function addBox(w,h,d,x,y,z, mat, rotY=0, collide=true){
   const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat);
   m.position.set(x,y,z); m.rotation.y=rotY;
-  m.castShadow=true; m.receiveShadow=true;
+  /* the shadow map re-draws every caster, so only geometry big enough to
+     throw a shadow you would actually notice earns the second pass */
+  m.castShadow = Math.max(w,h,d) >= 1.6;
+  m.receiveShadow=true;
   scene.add(m);
   if(collide && rotY===0){
     const col={minX:x-w/2,maxX:x+w/2,minZ:z-d/2,maxZ:z+d/2,h};
@@ -1268,6 +1332,8 @@ function makeShelfRow(z){
   return grp;
 }
 const shelfRows=[makeShelfRow(-8.2), makeShelfRow(-2.9), makeShelfRow(2.9), makeShelfRow(8.2)];
+/* the store's stock is ~1000 tiny meshes; skip the lot unless you are there */
+for(const r of shelfRows) cullRegister(r, 0, r.position.z, 70);
 /* shelf tiers of the props.glb gondola (2.92 x 2.17 x 0.89) and how far its
    shelf face stands off the row spine. The stock is placed against these. */
 const SHELF_TIERS=[.38,.95,1.52];
@@ -1471,7 +1537,7 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
       const src=lib2[nm]; if(!src)return null;
       const c=src.clone(true);
       c.position.set(x,0,z); c.rotation.y=ry||0; if(sc)c.scale.setScalar(sc);
-      c.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+      c.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; } });
       scene.add(c); solidify(c);
       return c;
     };
@@ -1482,6 +1548,7 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
       const a=put2('shelf0', -21.2, z, Math.PI/2);  if(a)WALL_UNITS.push(a);
       const b2=put2('shelf0',  21.2, z, -Math.PI/2); if(b2)WALL_UNITS.push(b2);
     }
+    for(const u of WALL_UNITS) cullRegister(u, u.position.x, u.position.z, 70);
     stockWallUnits();          /* no-op if food.glb has not landed yet */
     /* checkout line - retire the primitive counters first so the lanes are
        not three interpenetrating desks deep */
@@ -1617,9 +1684,9 @@ const ambRef=scene.children.find(o=>o.isAmbientLight);
 ambRef.intensity=LIGHT_DAY.ambI; ambRef.color.copy(LIGHT_DAY.ambC);
 hemi.intensity=LIGHT_DAY.hemiI;
 moon.color.copy(LIGHT_DAY.sunC); moon.intensity=LIGHT_DAY.sunI;
-const blue=new THREE.PointLight(0x5a7fae,12,20,1.8); blue.position.set(0,3,-13); scene.add(blue);
-const green=new THREE.PointLight(0x6a8a5a,9,13,1.8); green.position.set(-17,3,8); scene.add(green);
-const exitGlow=new THREE.PointLight(0x44ff66,2.2,5.5); exitGlow.position.set(0,3.9,14); scene.add(exitGlow);
+const blue=new THREE.PointLight(0x5a7fae,12,20,1.8); blue.position.set(0,3,-13); scene.add(blue); lightRegister(blue,60);
+const green=new THREE.PointLight(0x6a8a5a,9,13,1.8); green.position.set(-17,3,8); scene.add(green); lightRegister(green,60);
+const exitGlow=new THREE.PointLight(0x44ff66,2.2,5.5); exitGlow.position.set(0,3.9,14); scene.add(exitGlow); lightRegister(exitGlow,50);
 if(scene.background&&scene.background.isColor) scene.background.copy(LIGHT_DAY.bg);
 scene.fog.color.copy(LIGHT_DAY.fog);
 scene.fog.density=LIGHT_DAY.fogD;
@@ -1756,6 +1823,7 @@ function buildTown(){
        band, the awning and the AC unit floating in the sky. */
     const bg=new THREE.Group(); scene.add(bg);
     (window.__boxBuildings=window.__boxBuildings||[]).push(bg);
+    cullRegister(bg, b.x, 48, 210);
 
     const bm=new THREE.Mesh(new THREE.BoxGeometry(b.w,b.h,b.d),
       facadeMat(new THREE.Color(b.c).multiplyScalar(1.7),b.w,b.h));
@@ -1891,7 +1959,9 @@ function buildMosque(){
      invisible full-height wall across the room. */
   const box=(w,h,d,x,y,z,m,collide)=>{
     const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
-    b.position.set(x,y,z); b.castShadow=true; b.receiveShadow=true; G.add(b);
+    b.position.set(x,y,z);
+    b.castShadow = Math.max(w,h,d) >= 1.6;
+    b.receiveShadow=true; G.add(b);
     if(collide==='solid'){ worldHits.push(b); }
     else if(collide){ colliders.push({minX:X+x-w/2,maxX:X+x+w/2,minZ:z-d/2,maxZ:z+d/2,h:y+h/2});
                       worldHits.push(b); }
@@ -2007,13 +2077,13 @@ function buildMosque(){
   box(1.2,.6,.8,  20.6,.3,4.0, carpet, 'solid');
 
   /* lighting per space, or the new rooms are pitch black */
-  const vestLight=new THREE.PointLight(0xffdca8, 20, 34, 2); vestLight.position.set(X,7,11); scene.add(vestLight);
-  const corrLight=new THREE.PointLight(0xffd6a0, 12, 18, 2); corrLight.position.set(X,5.4,4.8); scene.add(corrLight);
+  const vestLight=new THREE.PointLight(0xffdca8, 20, 34, 2); vestLight.position.set(X,7,11); scene.add(vestLight); lightRegister(vestLight,70);
+  const corrLight=new THREE.PointLight(0xffd6a0, 12, 18, 2); corrLight.position.set(X,5.4,4.8); scene.add(corrLight); lightRegister(corrLight,55);
   for(const cx of [-13,13]){
-    const cl=new THREE.PointLight(0xffe0b4, 14, 26, 2); cl.position.set(X+cx,4.4,4.8); scene.add(cl);
+    const cl=new THREE.PointLight(0xffe0b4, 14, 26, 2); cl.position.set(X+cx,4.4,4.8); scene.add(cl); lightRegister(cl,55);
   }
   for(const cx of [-22.2,22.2]){
-    const sl=new THREE.PointLight(0xffcf90, 6, 11, 2); sl.position.set(X+cx,3.4,3.0); scene.add(sl);
+    const sl=new THREE.PointLight(0xffcf90, 6, 11, 2); sl.position.set(X+cx,3.4,3.0); scene.add(sl); lightRegister(sl,40);
   }
 
   /* mihrab: niche dead centre of the qibla wall */
@@ -2053,9 +2123,9 @@ function buildMosque(){
     lp.position.set(lx,8.5,lz); G.add(lp);
   }
   const hallLight=new THREE.PointLight(0xffdca8, 26, 46, 2);
-  hallLight.position.set(X,8,-6); scene.add(hallLight);
+  hallLight.position.set(X,8,-6); scene.add(hallLight); lightRegister(hallLight,90);
   const mihrabLight=new THREE.PointLight(0xffe0b0, 12, 20, 2);
-  mihrabLight.position.set(X,5,-12); scene.add(mihrabLight);
+  mihrabLight.position.set(X,5,-12); scene.add(mihrabLight); lightRegister(mihrabLight,60);
 
   /* shoe racks either side of the central arch, where they really are */
   for(const sx of [-6.4,6.4]){
@@ -2141,7 +2211,8 @@ function buildMosque(){
     lamp.position.set(lx,4.7,lz); G.add(lamp);
   }
   const yardLight=new THREE.PointLight(0xffd9a0, 16, 34, 2);
-  yardLight.position.set(X,6,24); scene.add(yardLight);
+  yardLight.position.set(X,6,24); scene.add(yardLight); lightRegister(yardLight,80);
+  cullRegister(G, X, 8, 300);
   console.info('Al-Salaam mosque built at x='+X);
 }
 
@@ -2162,7 +2233,8 @@ function phPlace(pack, name, x, z, opts){
   o.scale.setScalar(sc);
   o.position.set(x, (opts&&opts.y)||0, z);
   o.rotation.y=(opts&&opts.ry!==undefined)?opts.ry:rand(0,Math.PI*2);
-  o.traverse(m=>{ if(m.isMesh){ m.castShadow=true; m.receiveShadow=true; m.frustumCulled=true; } });
+  const tall=(opts&&opts.h)?opts.h>=1.2:false;
+  o.traverse(m=>{ if(m.isMesh){ m.castShadow=tall; m.receiveShadow=true; m.frustumCulled=true; } });
   scene.add(o);
   o.updateWorldMatrix(true,true);
   const wb=new THREE.Box3().setFromObject(o);
@@ -2277,6 +2349,7 @@ new GLTFLoader().load('assets/street.glb', (gltf)=>{
       const b=new THREE.Box3().setFromObject(m);
       colliders.push({minX:b.min.x,maxX:b.max.x,minZ:b.min.z,maxZ:b.max.z,h:Math.max(2,b.max.y)});
     }
+    cullRegister(m, x, z, 210);
     return m;
   };
   /* hide the block buildings on the main strip - facades take over */
@@ -2416,7 +2489,318 @@ function makePlayerCar(){
   return car;
 }
 
+/* ===================== HIGHWAY: TOPS -> AL-SALAAM =====================
+   The ~700 m between the supermarket frontage (ends at x=-130) and the mosque
+   (x=-900) was bare road with nothing either side of it. This fills it as one
+   continuous drive that reads as leaving town:
+
+     -140 .. -320   outer commercial strip, thinning out
+     -320 .. -580   industrial belt: sheds, yards, fuel stop, water tower
+     -580 .. -846   walled compounds and palms on the approach to the mosque
+
+   Cost control: every body reuses ONE unit BoxGeometry (scaled per mesh) and
+   one of six shared facade materials, and every building is its own group
+   registered with cullRegister, so 700 m of frontage costs nothing to draw
+   until you are within ~210 m of it. Bodies go into worldHits so they take
+   bullet holes and sparks like the rest of the world. */
+function buildHighway(){
+  const X_NEAR=-140, X_FAR=-846;
+  const ZN=43.5, ZS=28.5;              /* road occupies z 32..40 - stay clear */
+  const unitBox=new THREE.BoxGeometry(1,1,1);
+  const grp=(cx,cz,r)=>{ const g=new THREE.Group(); scene.add(g);
+    cullRegister(g,cx,cz,r||210); return g; };
+  /* six buckets instead of one clone per building: facadeMat clones a texture
+     on every call, and 40+ of those is a lot of texture memory for tiling
+     nobody looks at closely at 60 km/h. */
+  const FAC=[[0x3e4448,14,9],[0x52483c,16,7],[0x454a50,13,11],
+             [0x4a453e,18,6.5],[0x40464a,15,8.5],[0x50443a,12,10]]
+    .map(([c,w,h])=>facadeMat(new THREE.Color(c).multiplyScalar(1.7),w,h));
+  const MAT_RIB =new THREE.MeshStandardMaterial({color:0x6d7176,roughness:.82,metalness:.25});
+  const MAT_WALL=new THREE.MeshStandardMaterial({color:0xa89b86,roughness:.96});
+  const MAT_ROOF=new THREE.MeshStandardMaterial({color:0x8a8177,roughness:.95});
+  const MAT_DOOR=new THREE.MeshStandardMaterial({color:0x5a5f63,roughness:.7,metalness:.35});
+  const MAT_POLE=new THREE.MeshStandardMaterial({color:0x6b5f4e,roughness:.98});
+  const MAT_WIRE=new THREE.MeshBasicMaterial({color:0x1a1a1a});
+  const MAT_TRUNK=new THREE.MeshStandardMaterial({color:0x6a5a44,roughness:1});
+  const MAT_FROND=new THREE.MeshStandardMaterial({color:0x46632f,roughness:.94,side:THREE.DoubleSide,flatShading:true});
+  const MAT_SCRUB=new THREE.MeshStandardMaterial({color:0x5f6644,roughness:1,flatShading:true});
+  const poleGeo=new THREE.CylinderGeometry(.16,.22,9,6);
+  const armGeo=new THREE.BoxGeometry(2.4,.14,.14);
+  const trunkGeo=new THREE.CylinderGeometry(.19,.30,6.2,6);
+  /* A flat rectangle reads as a green paper strip, not a palm. Build the
+     frond once as a tapered strip that droops along its length, then share
+     that one geometry across every tree on the road. */
+  const frondGeo=(()=>{
+    const SEG=4, L=3.3, pos=[], idx=[];
+    for(let i=0;i<=SEG;i++){
+      const t=i/SEG;
+      const halfW=.30*(1-t)+.045;         /* wide at the base, thin at the tip */
+      const drop=-1.15*t*t;               /* accelerating droop, not a straight line */
+      pos.push(t*L,drop, halfW,  t*L,drop,-halfW);
+    }
+    for(let i=0;i<SEG;i++){
+      const a=i*2;
+      idx.push(a,a+1,a+2, a+1,a+3,a+2);
+    }
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setIndex(idx); g.computeVertexNormals();
+    return g;
+  })();
+  const bushGeo=new THREE.IcosahedronGeometry(.62,0);
+
+  const solid=(m,x0,x1,z0,z1,h)=>{ colliders.push({minX:x0,maxX:x1,minZ:z0,maxZ:z1,h:h}); worldHits.push(m); };
+
+  /* --- a plain street building: body, window grid, optional band + awning --- */
+  const bld=(g,x,zf,w,h,d,facing,o)=>{
+    o=o||{};
+    const zc = facing<0 ? zf+d/2 : zf-d/2;      /* facing -1 => front looks -z */
+    const b=new THREE.Mesh(unitBox,FAC[o.m|0]);
+    b.scale.set(w,h,d); b.position.set(x,h/2,zc);
+    b.castShadow=true; b.receiveShadow=true; g.add(b);
+    solid(b, x-w/2, x+w/2, Math.min(zf,zc-d/2), Math.max(zf,zc+d/2), h);
+    const zFace = zf + facing*0.06;
+    if(o.band!==false){
+      const band=new THREE.Mesh(unitBox,townMats.store);
+      band.scale.set(w-1.2,2.5,.18); band.position.set(x,1.35,zFace); g.add(band);
+    }
+    const cols=Math.max(3,Math.floor((w-3.4)/2.1));
+    const x0=x-((cols-1)*2.1)/2, rows=o.rows||Math.max(2,Math.round((h-3)/2.4));
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+      if(3.2+r*2.25 > h-1) continue;                  /* no windows above the roof */
+      const wm=new THREE.Mesh(townWinGeo,Math.random()<.34?townMats.winLit:townMats.winDark);
+      wm.position.set(x0+c*2.1, 3.2+r*2.25, zFace+facing*.02);
+      if(facing>0) wm.rotation.y=Math.PI;
+      g.add(wm);
+    }
+    if(o.awn){
+      const aw=new THREE.Mesh(unitBox,new THREE.MeshStandardMaterial({color:o.awn,roughness:.9}));
+      aw.scale.set(w*.5,.14,1.6); aw.position.set(x,2.9,zf+facing*.55);
+      aw.rotation.x=-.32*facing; g.add(aw);
+    }
+    return b;
+  };
+
+  /* --- long industrial shed: ribbed walls, roller door, roof vents --- */
+  const shed=(g,x,zf,w,h,d,facing)=>{
+    const zc = facing<0 ? zf+d/2 : zf-d/2;
+    const b=new THREE.Mesh(unitBox,MAT_RIB);
+    b.scale.set(w,h,d); b.position.set(x,h/2,zc);
+    b.castShadow=true; b.receiveShadow=true; g.add(b);
+    solid(b, x-w/2, x+w/2, Math.min(zf,zc-d/2), Math.max(zf,zc+d/2), h);
+    for(let rx=-w/2+1.6; rx<w/2-1; rx+=2.8){        /* vertical corrugation ribs */
+      const rib=new THREE.Mesh(unitBox,MAT_DOOR);
+      rib.scale.set(.13,h*.94,.1); rib.position.set(x+rx,h*.47,zf+facing*.07); g.add(rib);
+    }
+    const dw=Math.min(6.5,w*.42);
+    const door=new THREE.Mesh(unitBox,MAT_DOOR);
+    door.scale.set(dw,Math.min(4.4,h*.62),.16);
+    door.position.set(x, Math.min(4.4,h*.62)/2, zf+facing*.12); g.add(door);
+    for(let i=0;i<3;i++){
+      const v=new THREE.Mesh(unitBox,MAT_DOOR);
+      v.scale.set(1.5,.5,1.5); v.position.set(x-w/4+i*(w/4), h+.25, zc+rand(-d/5,d/5)); g.add(v);
+    }
+  };
+
+  /* --- walled compound: perimeter wall, gate, one or two flat-roof houses --- */
+  const compound=(g,x,zf,w,d,facing)=>{
+    const zc = facing<0 ? zf+d/2 : zf-d/2, wh=2.5;
+    const seg=(sx,sz,sw,sd)=>{
+      const m=new THREE.Mesh(unitBox,MAT_WALL);
+      m.scale.set(sw,wh,sd); m.position.set(sx,wh/2,sz);
+      m.castShadow=true; m.receiveShadow=true; g.add(m);
+      solid(m,sx-sw/2,sx+sw/2,sz-sd/2,sz+sd/2,wh);
+    };
+    const gate=3.2, side=(w-gate)/2;
+    seg(x-w/2+side/2, zf, side, .3);               /* front wall, split for a gate */
+    seg(x+w/2-side/2, zf, side, .3);
+    seg(x-w/2, zc, .3, d); seg(x+w/2, zc, .3, d);
+    seg(x, zf-facing*d, w, .3);
+    for(const p of [-1,1]){
+      const pier=new THREE.Mesh(unitBox,MAT_WALL);
+      pier.scale.set(.5,3.1,.5); pier.position.set(x+p*gate/2,1.55,zf); g.add(pier);
+    }
+    const nh=Math.random()<.5?2:1;
+    for(let i=0;i<nh;i++){
+      const hw=rand(6,9), hh=rand(3.2,5.4), hd=rand(6,8);
+      const hx=x+(nh===1?rand(-2,2):(i?w/4:-w/4)), hz=zc-facing*rand(0,d/6);
+      const hm=new THREE.Mesh(unitBox,MAT_WALL);
+      hm.scale.set(hw,hh,hd); hm.position.set(hx,hh/2,hz);
+      hm.castShadow=true; hm.receiveShadow=true; g.add(hm);
+      solid(hm,hx-hw/2,hx+hw/2,hz-hd/2,hz+hd/2,hh);
+      const rf=new THREE.Mesh(unitBox,MAT_ROOF);
+      rf.scale.set(hw+.5,.22,hd+.5); rf.position.set(hx,hh+.1,hz); g.add(rf);
+      for(let r=0;r<2;r++){                          /* two shuttered windows */
+        const wm=new THREE.Mesh(townWinGeo,townMats.winDark);
+        wm.position.set(hx-1.5+r*3, hh*.55, hz+facing*(hd/2+.03));
+        if(facing>0) wm.rotation.y=Math.PI; g.add(wm);
+      }
+    }
+  };
+
+  /* --- roadside furniture --- */
+  const palm=(g,x,z)=>{
+    const t=new THREE.Mesh(trunkGeo,MAT_TRUNK);
+    const hgt=rand(.85,1.3); t.scale.setScalar(hgt);
+    t.position.set(x,3.1*hgt,z); t.rotation.z=rand(-.09,.09);
+    t.castShadow=true; g.add(t);
+    /* alternate a raised and a drooping ring so the crown has depth instead
+       of every frond sitting on one plane */
+    for(let i=0;i<9;i++){
+      const f=new THREE.Mesh(frondGeo,MAT_FROND);
+      f.position.set(x,6.05*hgt,z);
+      f.rotation.y=i*(Math.PI*2/9)+rand(-.12,.12);
+      f.rotation.z=(i%2?-.06:.30)+rand(-.07,.07);
+      f.scale.setScalar(hgt*rand(.88,1.12));
+      g.add(f);
+    }
+    const nut=new THREE.Mesh(bushGeo,MAT_TRUNK);
+    nut.scale.set(.5,.38,.5); nut.position.set(x,6.0*hgt,z); g.add(nut);
+  };
+  /* Flat planes lying in the verge read as painted rectangles from a moving
+     car. Squashed icosahedra in a loose clump read as scrub at any angle. */
+  const scrub=(g,x,z)=>{
+    const n=2+(Math.random()<.5?1:0);
+    for(let i=0;i<n;i++){
+      const s=new THREE.Mesh(bushGeo,MAT_SCRUB);
+      const sc=rand(.55,1.05);
+      s.scale.set(sc,sc*rand(.42,.62),sc);
+      s.position.set(x+rand(-.9,.9), .19*sc, z+rand(-.7,.7));
+      s.rotation.set(rand(0,.4),rand(0,Math.PI),rand(0,.4));
+      s.castShadow=true; g.add(s);
+    }
+  };
+  const billboard=(g,x,z,facing,line1,line2)=>{
+    const cv=document.createElement('canvas'); cv.width=512; cv.height=256;
+    const c=cv.getContext('2d');
+    c.fillStyle='#d9d3c4'; c.fillRect(0,0,512,256);
+    c.fillStyle='#b23a2e'; c.fillRect(0,0,512,44);
+    c.textAlign='center'; c.fillStyle='#f2efe6'; c.font='700 30px Arial';
+    c.fillText(line1,256,33);
+    c.fillStyle='#2d2f2b'; c.font='900 62px Arial'; c.fillText(line2,256,150);
+    c.font='500 22px Arial'; c.fillStyle='#63615a'; c.fillText('NEXT EXIT',256,205);
+    const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace;
+    const p=new THREE.Mesh(new THREE.PlaneGeometry(7.4,3.7),
+      new THREE.MeshBasicMaterial({map:tx}));
+    p.position.set(x,6.4,z); if(facing>0) p.rotation.y=Math.PI; g.add(p);
+    for(const px of [-2.6,2.6]){
+      const leg=new THREE.Mesh(unitBox,MAT_POLE);
+      leg.scale.set(.28,4.6,.28); leg.position.set(x+px,2.3,z); g.add(leg);
+    }
+  };
+  const waterTower=(g,x,z)=>{
+    const tank=new THREE.Mesh(new THREE.CylinderGeometry(4.2,4.2,5.2,12),MAT_RIB);
+    tank.position.set(x,15.6,z); tank.castShadow=true; g.add(tank);
+    const cone=new THREE.Mesh(new THREE.ConeGeometry(4.3,1.6,12),MAT_RIB);
+    cone.position.set(x,19,z); g.add(cone);
+    for(let i=0;i<4;i++){
+      const a=i*Math.PI/2+.79, lx=x+Math.cos(a)*3.1, lz=z+Math.sin(a)*3.1;
+      const leg=new THREE.Mesh(unitBox,MAT_POLE);
+      leg.scale.set(.34,13,.34); leg.position.set(lx,6.5,lz); g.add(leg);
+      colliders.push({minX:lx-.4,maxX:lx+.4,minZ:lz-.4,maxZ:lz+.4,h:13});
+    }
+    worldHits.push(tank);
+  };
+  const fuelStop=(g,x,z,facing)=>{
+    const canopy=new THREE.Mesh(unitBox,MAT_ROOF);
+    canopy.scale.set(17,.55,9); canopy.position.set(x,5.1,z);
+    canopy.castShadow=true; g.add(canopy); worldHits.push(canopy);
+    for(const px of [-7,7]) for(const pz of [-3.4,3.4]){
+      const c=new THREE.Mesh(unitBox,MAT_DOOR);
+      c.scale.set(.42,5,.42); c.position.set(x+px,2.5,z+pz); g.add(c);
+      colliders.push({minX:x+px-.5,maxX:x+px+.5,minZ:z+pz-.5,maxZ:z+pz+.5,h:5});
+    }
+    for(const px of [-3.4,3.4]){                    /* pumps */
+      const p=new THREE.Mesh(unitBox,MAT_RIB);
+      p.scale.set(1.1,1.9,.7); p.position.set(x+px,.95,z);
+      p.castShadow=true; g.add(p);
+      solid(p,x+px-.6,x+px+.6,z-.4,z+.4,1.9);
+    }
+    bld(g,x+13.5,z-facing*7.5,11,4.6,8,facing,{m:1,rows:1,band:false});
+  };
+  const yard=(g,x,z,w)=>{                            /* fenced lot with containers */
+    const CONT=[0x8a4a3c,0x3f5a78,0x4a5c40,0x8a7a4a,0x6a5a7a];
+    for(let i=0;i<5;i++){
+      const cw=rand(5.8,6.2), cx=x+rand(-w/2+4,w/2-4), cz=z+rand(-5,5);
+      const stack=Math.random()<.35?2:1;
+      for(let s=0;s<stack;s++){
+        const c=new THREE.Mesh(unitBox,new THREE.MeshStandardMaterial(
+          {color:CONT[(i+s)%CONT.length],roughness:.9,metalness:.15}));
+        c.scale.set(cw,2.5,2.4); c.position.set(cx,1.25+s*2.55,cz);
+        c.rotation.y=Math.random()<.5?0:Math.PI/2;
+        c.castShadow=true; c.receiveShadow=true; g.add(c);
+        if(!s) solid(c,cx-cw/2,cx+cw/2,cz-1.4,cz+1.4,2.5+2.55*(stack-1));
+      }
+    }
+    for(let fx=-w/2; fx<=w/2; fx+=3){                /* chain-link posts */
+      const p=new THREE.Mesh(unitBox,MAT_POLE);
+      p.scale.set(.12,2.2,.12); p.position.set(x+fx,1.1,z-8.5); g.add(p);
+    }
+  };
+
+  /* ---------------- zone 1: outer commercial, -140 .. -320 ---------------- */
+  let mi=0;
+  for(let x=X_NEAR; x>-320; x-=17.5){
+    const g=grp(x,ZN,200);
+    bld(g,x,ZN,rand(13,17),rand(6,11),12.5,-1,
+        {m:(mi++)%6, awn: Math.random()<.4 ? [0x7a3a30,0x3f5a44,0x54502f][mi%3] : 0});
+    if(Math.random()<.72){
+      const g2=grp(x-6,ZS,200);
+      bld(g2,x-6,ZS,rand(12,16),rand(5.5,9),12,1,{m:(mi++)%6});
+    }
+  }
+  /* ---------------- zone 2: industrial belt, -320 .. -580 ---------------- */
+  for(let x=-322; x>-580; x-=44){
+    const g=grp(x,ZN,240);
+    shed(g,x,ZN+2,rand(30,40),rand(7.5,9.5),20,-1);
+    const g2=grp(x-20,ZS,240);
+    if(Math.random()<.55) yard(g2,x-20,ZS-9,34);
+    else shed(g2,x-20,ZS-2,rand(24,34),rand(7,9),18,1);
+  }
+  { const g=grp(-402,ZS,260); fuelStop(g,-402,ZS-6,1); }
+  { const g=grp(-486,ZN+26,300); waterTower(g,-486,ZN+26); }
+  { const g=grp(-360,ZN,240); billboard(g,-360,ZN-1.5,-1,'AL-SALAAM','MASJID'); }
+  { const g=grp(-540,ZS,240); billboard(g,-540,ZS+1.5,1,'TOPS','SUPERMARKET'); }
+  /* ---------------- zone 3: compounds + palms, -580 .. -846 ---------------- */
+  for(let x=-584; x>X_FAR; x-=34){
+    const g=grp(x,ZN,220);
+    compound(g,x,ZN,rand(24,30),rand(18,24),-1);
+    if(Math.random()<.8){
+      const g2=grp(x-15,ZS,220);
+      compound(g2,x-15,ZS,rand(22,28),rand(16,22),1);
+    }
+  }
+  /* ---------------- continuous roadside dressing ---------------- */
+  let prevN=null, prevS=null;
+  for(let x=X_NEAR; x>X_FAR; x-=46){
+    const g=grp(x,36,230);
+    for(const [z,side] of [[ZN-2.4,'n'],[ZS+2.4,'s']]){
+      const p=new THREE.Mesh(poleGeo,MAT_POLE);
+      p.position.set(x,4.5,z); p.castShadow=true; g.add(p);
+      const arm=new THREE.Mesh(armGeo,MAT_POLE); arm.position.set(x,8.4,z); g.add(arm);
+      colliders.push({minX:x-.3,maxX:x+.3,minZ:z-.3,maxZ:z+.3,h:9});
+      const prev = side==='n'?prevN:prevS;
+      if(prev!==null){                               /* slack wire back to the last pole */
+        const w=new THREE.Mesh(unitBox,MAT_WIRE);
+        w.scale.set(prev-x,.05,.05); w.position.set((prev+x)/2,8.1,z); g.add(w);
+      }
+      if(side==='n') prevN=x; else prevS=x;
+    }
+  }
+  for(let x=X_NEAR; x>X_FAR; x-=11){                 /* scrub along both verges */
+    const g=grp(x,36,150);
+    scrub(g,x+rand(-3,3),rand(41,42.8));
+    scrub(g,x+rand(-3,3),rand(29.4,31));
+  }
+  for(let x=-560; x>X_FAR; x-=17){                   /* palm avenue into the mosque */
+    const g=grp(x,36,190);
+    palm(g,x,41.4); palm(g,x-8,30.6);
+  }
+  console.info('highway: filled x '+X_NEAR+' .. '+X_FAR);
+}
+
 buildTown();
+buildHighway();
 buildMosque();
 /* mod_town2.js — Main Street extension for dead-aisle.html
    Defines extendTown(); call ONCE after buildTown().
@@ -2431,31 +2815,36 @@ function extendTown(){
 
   /* ---------- 1 & 2: facades (east fill 45->125, west strip -130..-45) ---------- */
   function t2_facade(b){
+    /* one group per building so distance culling is a single flag rather than
+       a frustum test on every window quad */
+    const t2_g=new THREE.Group(); t2_g.add(t2_g);
+    cullRegister(t2_g, b.x, b.f, 210);
+    const scene_add=(o)=>t2_g.add(o);
     const t2_bm=new THREE.Mesh(new THREE.BoxGeometry(b.w,b.h,b.d),
       facadeMat(new THREE.Color(b.c).multiplyScalar(1.7),b.w,b.h));
     t2_bm.position.set(b.x,b.h/2,b.f+b.d/2);
-    t2_bm.castShadow=true; t2_bm.receiveShadow=true; scene.add(t2_bm);
+    t2_bm.castShadow=true; t2_bm.receiveShadow=true; scene_add(t2_bm);
     colliders.push({minX:b.x-b.w/2,maxX:b.x+b.w/2,minZ:b.f-.1,maxZ:b.f+b.d,h:b.h});
 
     const t2_band=new THREE.Mesh(new THREE.BoxGeometry(b.w-1.2,2.5,.18),townMats.store);
-    t2_band.position.set(b.x,1.35,b.f-.08); scene.add(t2_band);
+    t2_band.position.set(b.x,1.35,b.f-.08); t2_g.add(t2_band);
 
     const t2_cols=Math.max(3,Math.floor((b.w-3.4)/2.1));
     const t2_x0=b.x-((t2_cols-1)*2.1)/2;
     for(let t2_r=0;t2_r<b.rows;t2_r++)for(let t2_c=0;t2_c<t2_cols;t2_c++){
       const t2_w=new THREE.Mesh(townWinGeo,Math.random()<.38?townMats.winLit:townMats.winDark);
       t2_w.position.set(t2_x0+t2_c*2.1,3.2+t2_r*2.25,b.f-.02);
-      t2_w.rotation.y=t2_winRot; scene.add(t2_w);
+      t2_w.rotation.y=t2_winRot; t2_g.add(t2_w);
     }
     if(b.awn){
       const t2_aw=new THREE.Mesh(new THREE.BoxGeometry(b.w*.5,.14,1.6),
         new THREE.MeshStandardMaterial({color:b.awn,roughness:.9}));
-      t2_aw.position.set(b.x,2.9,b.f-.5); t2_aw.rotation.x=-.32; scene.add(t2_aw);
+      t2_aw.position.set(b.x,2.9,b.f-.5); t2_aw.rotation.x=-.32; t2_g.add(t2_aw);
     }
     if(b.acRow){
       for(let t2_i=0;t2_i<3;t2_i++){
         const t2_ac=new THREE.Mesh(new THREE.BoxGeometry(1.8,.7,1.4),MAT.metalD);
-        t2_ac.position.set(b.x-2.6+t2_i*2.6,b.h+.35,b.f+b.d/2); scene.add(t2_ac);
+        t2_ac.position.set(b.x-2.6+t2_i*2.6,b.h+.35,b.f+b.d/2); t2_g.add(t2_ac);
       }
     }
   }
@@ -4410,7 +4799,18 @@ function attachHostileModel(gltf){
     variantI++;
     m.traverse(o=>{
       if(!o.isMesh)return;
-      o.frustumCulled=false; o.castShadow=true; o.receiveShadow=false;
+      /* frustumCulled=false is the usual workaround for a skinned mesh whose
+         bind-space bounds are wrong - but it means every visible hostile is
+         drawn even when it is behind you or through a wall, which was
+         ~1.4M triangles a frame inside the store. Cull them properly and give
+         the geometry a bounding sphere big enough that no animation pops it. */
+      o.frustumCulled=true;
+      if(o.geometry){
+        if(!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+        if(o.geometry.boundingSphere) o.geometry.boundingSphere.radius=Math.max(
+          o.geometry.boundingSphere.radius, 1.6);
+      }
+      o.castShadow=true; o.receiveShadow=false;
       const src=Array.isArray(o.material)?o.material:[o.material];
       o.material=src.map(mat=>{
         if(!mat)return mat;
@@ -4446,7 +4846,11 @@ function attachHostileModel(gltf){
    so there is no extra rigging cost and no extra draw-call class.
    They are ambience only: they never chase and never damage. */
 const TOWN_FOLK=[];
-const FOLK_DRAW=150;          /* only animate the ones you can actually see */
+const FOLK_DRAW=88;           /* only animate the ones you can actually see */
+/* 69 civilians x 6 sub-meshes was 414 skinned draw calls on its own. Fewer
+   bodies, a shorter draw distance, and the face/hair sub-meshes stripped -
+   nobody reads an eyebrow on a pedestrian 60 m away. */
+const FOLK_STRIP=/eyebrow|low_poly|short04/i;
 function buildTownFolk(proto, clips, fit){
   if(TOWN_FOLK.length) return;
   const SHIRT=[0xb8b2a4,0x7d6a58,0x4c5a6b,0x6b5560,0x8a7f5e,0x3f4a44,0x93745a,0x5d6470];
@@ -4454,7 +4858,7 @@ function buildTownFolk(proto, clips, fit){
   const walk = clips['run'] || clips['idle'] || Object.values(clips)[0];
   /* spread them along the whole road, both pavements, both directions */
   let i=0;
-  for(let x=WORLD_X0+60; x<WORLD_X1-40; x+=26){
+  for(let x=WORLD_X0+60; x<WORLD_X1-40; x+=64){
     /* keep them off the TOPS forecourt and out of the mosque courtyard */
     if(Math.abs(x)<34 || Math.abs(x-MOSQUE_X)<40) continue;
     for(const side of [0,1]){
@@ -4463,9 +4867,11 @@ function buildTownFolk(proto, clips, fit){
       m.scale.setScalar(fit);
       const shirt=SHIRT[i%SHIRT.length], pant=PANT[(i*3)%PANT.length];
       const skinK=.74+((i*29)%9)/9*.5;
+      for(const kid of [...m.children]) if(FOLK_STRIP.test(kid.name||'')) kid.removeFromParent();
       m.traverse(o=>{
         if(!o.isMesh)return;
-        o.frustumCulled=true; o.castShadow=true; o.receiveShadow=false;
+        if(FOLK_STRIP.test(o.name||'')){ o.removeFromParent(); return; }
+        o.frustumCulled=true; o.castShadow=false; o.receiveShadow=false;
         const src=Array.isArray(o.material)?o.material:[o.material];
         o.material=src.map(mat=>{
           if(!mat)return mat;
@@ -8118,8 +8524,31 @@ function startGame(keepRound){
   /* voice lines are static files now - nothing to prefetch */
   try{ const r=document.body.requestPointerLock(); if(r&&r.catch)r.catch(()=>{}); }catch(e){}
 }
+/* ---- adaptive resolution --------------------------------------------------
+   Measures real frame time and trades scene-buffer resolution for framerate.
+   Shrinks after a sustained miss, grows back once there is headroom, and only
+   ever moves one step per decision so it cannot oscillate visibly. The user's
+   quality slider still sets the ceiling via renderer.setPixelRatio. */
+const DRS={acc:0,n:0,win:0,scale:1,last:performance.now()};
+function drsUpdate(){
+  const now=performance.now(), ft=now-DRS.last; DRS.last=now;
+  if(ft<=0||ft>500) return;         /* first frame, or the tab was backgrounded */
+  DRS.acc+=ft; DRS.n++; DRS.win+=ft;
+  if(DRS.win<600) return;           /* decide a bit under twice a second */
+  const avg=DRS.acc/DRS.n; DRS.acc=0; DRS.n=0; DRS.win=0;
+  const before=DRS.scale;
+  /* 17.5ms is just past a vsynced 60fps frame (16.7ms). Growing below 14ms
+     instead would strand every vsync-capped machine at whatever scale a
+     transient dip left it at, since it can never report faster than 16.7. */
+  if(avg>21)        DRS.scale=Math.max(.55, DRS.scale-.10);   /* below ~48fps */
+  else if(avg<17.5) DRS.scale=Math.min(1,   DRS.scale+.05);   /* holding 60fps */
+  if(DRS.scale!==before){ try{ window.fxSetResScale&&window.fxSetResScale(DRS.scale); }catch(e){} }
+}
+window.__drs=()=>({scale:DRS.scale});
+
 function loop(){
   requestAnimationFrame(loop);
+  drsUpdate();
   const dt=Math.min(clock.getDelta(),.05);
   const now=performance.now()/1000;
   if(playing&&!paused){
@@ -8154,6 +8583,7 @@ function loop(){
     survivorsHUD&&survivorsHUD();
     bloodUpdate(dt); poolsUpdate(dt); shellsUpdate(dt); sparksUpdate(dt); tracersUpdate(dt);
     debrisUpdate(dt); smokeUpdate(dt); skidFX(dt);
+    cullUpdate(dt); managedLightsUpdate(dt);
     groanTimer-=dt;
     if(groanTimer<=0){ groanTimer=rand(2.5,6);
       const alive=zombies.filter(z=>z.state==='chase');
@@ -8209,6 +8639,7 @@ function loop(){
   netTick(dt,now);
   if(window.fxRender&&SETTINGS.fx&&!location.hash.includes('nfx')) fxRender(dt);
   else {
+    renderer.shadowMap.needsUpdate = true;
     renderer.render(scene,camera);
     const ac=renderer.autoClear, bg=scene.background;
     renderer.autoClear=false; scene.background=null;
