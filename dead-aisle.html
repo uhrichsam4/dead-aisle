@@ -960,6 +960,22 @@ emergency.position.set(0,3.6,0); scene.add(emergency);
    Supermarket hall: 44 x 30 m, shelf rows, checkout front, freezer back */
 const colliders = []; // {minX,maxX,minZ,maxZ}
 const worldHits = []; // solid meshes bullets should stop on
+
+/* --- breakables --- */
+const DEBRIS=[];
+const BREAK_KINDS={
+  glass:    {hp:14,  kind:'glass',    col:0xbcd6e2, chips:16, snd:'dry'},
+  wood:     {hp:60,  kind:'wood',     col:0x7a5a38, chips:12, snd:'step'},
+  plaster:  {hp:110, kind:'concrete', col:0xb9b3a4, chips:14, snd:'step'},
+  crate:    {hp:45,  kind:'wood',     col:0x8a6a42, chips:12, snd:'step'},
+  pottery:  {hp:18,  kind:'concrete', col:0xc0a184, chips:14, snd:'dry'},
+  metal:    {hp:170, kind:'metal',    col:0x9aa0a4, chips:10, snd:'dry'},
+};
+function makeBreakable(mesh, kindName, hpScale){
+  const d=BREAK_KINDS[kindName]; if(!mesh||!d)return mesh;
+  mesh.userData.brk={hp:d.hp*(hpScale||1), max:d.hp*(hpScale||1), def:d};
+  return mesh;
+}
 const shaftMats = [];
 let lightMix = 1;
 function addBox(w,h,d,x,y,z, mat, rotY=0, collide=true){
@@ -1106,11 +1122,11 @@ for(const wx of [-16,-8,0,8,16]){
   if(wx!==0){
     const b=new THREE.Mesh(new THREE.BoxGeometry(4.6,3.2,.08), MAT.board);
     b.position.set(wx,1.9,14.7); b.rotation.z=rand(-.08,.08); b.rotation.y=Math.PI;
-    scene.add(b);
+    scene.add(b); worldHits.push(b); makeBreakable(b,'wood');
     for(let s=0;s<3;s++){
       const plank=new THREE.Mesh(new THREE.BoxGeometry(5.2,.34,.05), MAT.metalD);
       plank.position.set(wx+rand(-.2,.2), .8+s*1.1, 14.55); plank.rotation.z=rand(-.12,.12);
-      scene.add(plank);
+      scene.add(plank); worldHits.push(plank); makeBreakable(plank,'wood',.45);
     }
   }else{
     /* glass double doors, swung open */
@@ -1118,6 +1134,7 @@ for(const wx of [-16,-8,0,8,16]){
     for(const s of[-1,1]){
       const d=new THREE.Mesh(new THREE.PlaneGeometry(1.9,3.3),glass);
       d.position.set(s*1.85,1.65,15.9); d.rotation.y=s*1.25; scene.add(d);
+      worldHits.push(d); makeBreakable(d,'glass');
     }
     /* push bars ride ON each swung-open leaf. A single 3.9 m bar across the
        opening read as a barrier blocking the entrance. */
@@ -1479,6 +1496,7 @@ for(const cx of CHECKOUT_X){
   lane.position.set(cx+1.7, .75, 11.6); scene.add(lane); checkoutBlocks.push(lane);
   const scr=new THREE.Mesh(new THREE.PlaneGeometry(.7,.5), new THREE.MeshBasicMaterial({color:0x143318}));
   scr.position.set(cx-.6,1.5,11.6); scr.rotation.y=Math.PI; scene.add(scr); checkoutBlocks.push(scr);
+  worldHits.push(scr); makeBreakable(scr,'glass',.6);
 }
 window.__checkoutBlocks=checkoutBlocks;
 
@@ -1492,6 +1510,7 @@ const fzCv=document.createElement('canvas'); fzCv.width=1024; fzCv.height=64;
 const fzTex=new THREE.CanvasTexture(fzCv); fzTex.colorSpace=THREE.SRGBColorSpace;
 const fz=new THREE.Mesh(new THREE.PlaneGeometry(41,2.1), new THREE.MeshBasicMaterial({map:fzTex}));
 fz.position.set(0,1.5,-14.05); scene.add(fz);
+worldHits.push(fz); makeBreakable(fz,'glass',2.4);
 
 /* debris: scattered paper / boxes / carts.
    Placed by rejection sampling - dropping them at pure random buried boxes
@@ -1524,6 +1543,7 @@ for(let i=0;i<8;i++){
   const sp=floorSpot(-19,19,-13,13,.5); if(!sp)continue;
   const bx=new THREE.Mesh(new THREE.BoxGeometry(rand(.5,.9),rand(.4,.7),rand(.5,.8)), debrisMats[1]);
   bx.position.set(sp[0],.3,sp[1]); bx.rotation.y=rand(0,6.3); scene.add(bx);
+  worldHits.push(bx); makeBreakable(bx,'crate');
 }
 /* shopping carts tipped */
 function cart(x,z,rot){
@@ -1877,22 +1897,108 @@ function buildMosque(){
   const fl=new THREE.Mesh(new THREE.PlaneGeometry(50,29), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR, color:0x9a9384, roughness:.7}));
   fl.rotation.x=-Math.PI/2; fl.position.set(0,0,-1.5); fl.receiveShadow=true; G.add(fl);
-  /* prayer rows run ACROSS the hall, parallel to the qibla wall */
-  for(let i=0;i<8;i++){
+  /* prayer rows run ACROSS the hall, parallel to the qibla wall. They stop at
+     the hall's north wall (z=0.9) - they used to run on into the corridor and
+     the side chambers. */
+  for(let i=0;i<5;i++){
     const r=new THREE.Mesh(new THREE.PlaneGeometry(46,2.3), i%2?carpet:carpet2);
-    r.rotation.x=-Math.PI/2; r.position.set(0,.02,-14+i*3.1); r.receiveShadow=true; G.add(r);
+    r.rotation.x=-Math.PI/2; r.position.set(0,.02,-14.2+i*3.2); r.receiveShadow=true; G.add(r);
   }
   box(.7,12,29, -25,6,-1.5, sand, true);
   box(.7,12,29,  25,6,-1.5, sand, true);
   box(50,12,.7,  0,6,-16, sand, true);                    /* qibla wall */
   box(50,.6,29,  0,12.3,-1.5, stone, false);              /* ceiling */
-  /* north wall of the hall, with three arched openings onto the sahn */
-  for(const seg of [[-18.5,13],[0,10],[18.5,13]]) box(seg[1],12,.7, seg[0],6,13, sand, true);
-  for(const ax of [-9.4,9.4]){
-    box(2.2,12,.9, ax,6,13, sand, true);
-    arch(ax<0?-13.9:13.9,13,3.1,.95,5.4,stone,'z');
-  }
+  /* ---------------- interior circulation ----------------
+     One straight spine, the way a mosque of this type actually reads:
+       VESTIBULE (son cemaat yeri, full width, z 9.05..12.65)
+         -> a 4.4 portal into the AXIAL CORRIDOR (7.0 clear, z 1.25..8.35)
+         -> a 3.0 door left and right at the corridor midpoint into two
+            symmetrical CHAMBERS (wudu hall west, madrasa east)
+         -> the corridor mouth opens into the big PRAYER HALL.
+     Each chamber also has its own door south into the hall, so neither is a
+     dead end, and a walled corner store at its far end. */
+
+  /* facade on z=13, split around the 7.1 entrance arch */
+  box(21.8,12,.7, -14.45,6,13, sand, true);
+  box(21.8,12,.7,  14.45,6,13, sand, true);
   arch(0,13,3.4,.95,5.4,stone,'z');
+
+  /* portal wall on z=8.7, split around a deliberately tight 4.4 threshold */
+  box(23.15,12,.7, -13.78,6,8.7, sand, true);
+  box(23.15,12,.7,  13.78,6,8.7, sand, true);
+  arch(0,8.7,2.2,.8,5.4,stone,'z');
+
+  /* corridor side walls, each split around a 3.0 door at z=4.9 */
+  box(.7,12,2.65, -3.85,6,7.72, sand, true);
+  box(.7,12,2.85, -3.85,6,1.98, sand, true);
+  box(.7,12,2.65,  3.85,6,7.72, sand, true);
+  box(.7,12,2.85,  3.85,6,1.98, sand, true);
+  arch(-3.85,4.9,1.5,.8,3.4,stone,'x');
+  arch( 3.85,4.9,1.5,.8,3.4,stone,'x');
+
+  /* hall north wall on z=0.9: the 7.0 corridor mouth plus a 3.0 door from
+     each chamber, so the chambers loop back into the hall */
+  box(7.35,12,.7, -21.68,6,0.9, sand, true);
+  box(11.5,12,.7,  -9.25,6,0.9, sand, true);
+  box(11.5,12,.7,   9.25,6,0.9, sand, true);
+  box(7.35,12,.7,  21.68,6,0.9, sand, true);
+  arch(-16.5,0.9,1.5,.8,3.4,stone,'z');
+  arch( 16.5,0.9,1.5,.8,3.4,stone,'z');
+
+  /* walled corner stores - one survivor hides in each */
+  box(.7,6,3.75, -19.5,3,3.12, stone, true);
+  box(1.85,6,.7, -24.43,3,5.0, stone, true);
+  box(1.75,6,.7, -20.02,3,5.0, stone, true);
+  box(.7,6,3.75,  19.5,3,3.12, stone, true);
+  box(1.85,6,.7,  24.43,3,5.0, stone, true);
+  box(1.75,6,.7,  20.02,3,5.0, stone, true);
+
+  /* wash-stall divider west, bookcase spine east */
+  box(.6,2.4,3.05, -11,1.2,7.12, stone, true);
+  box(.6,2.4,3.05,  11,1.2,7.12, stone, true);
+
+  /* dropped ceilings: lofty vestibule, squeezed corridor, low chambers - so
+     stepping into the hall actually opens up */
+  box(49.3,.6,3.6,   0,10.5,10.85, stone, false);
+  box(7,.6,8.5,      0,7.9,4.8,    stone, false);
+  box(20.5,.6,7.6, -14.4,6.1,4.8,  stone, false);
+  box(20.5,.6,7.6,  14.4,6.1,4.8,  stone, false);
+
+  /* ---- room dressing ---- */
+  /* corridor runner + sconces */
+  { const r=new THREE.Mesh(new THREE.PlaneGeometry(6,7.1), carpet2);
+    r.rotation.x=-Math.PI/2; r.position.set(0,.02,4.8); r.receiveShadow=true; G.add(r); }
+  for(const sx of [-3.4,3.4]) for(const sz of [2.6,7.0]){
+    const sc=new THREE.Mesh(new THREE.BoxGeometry(.3,.5,.28), gold);
+    sc.position.set(sx,3.4,sz); G.add(sc);
+    const gl=new THREE.Mesh(new THREE.SphereGeometry(.16,10,8), new THREE.MeshBasicMaterial({color:0xffe2ab}));
+    gl.position.set(sx*.86,3.4,sz); G.add(gl);
+  }
+  /* west chamber: wudu wash trough with taps */
+  box(9,.9,1.1, -13,.45,1.9, stone, true);
+  for(let i=0;i<8;i++) box(.1,.5,.1, -17+i*1.1, 1.2, 1.9, gold, false);
+  box(9,.12,1.1, -13,.96,1.9, teal, false);
+  /* east chamber: bookcases + reading desks */
+  box(.6,3.2,4.0, 24.0,1.6,3.0, wood, true);
+  box(.6,3.2,4.0, 24.0,1.6,7.0, wood, true);
+  for(const dz of [2.6,5.4]) box(2.2,.1,1.0, 20.5,.78,dz, wood, true);
+  /* corner stores: shelving and stacked mats */
+  for(const sy of [1.0,1.7,2.4]){
+    box(4.6,.12,.9, -22.25,sy,1.8, wood, false);
+    box(4.6,.12,.9,  22.25,sy,1.8, wood, false);
+  }
+  box(1.2,.6,.8, -20.6,.3,4.0, carpet, false);
+  box(1.2,.6,.8,  20.6,.3,4.0, carpet, false);
+
+  /* lighting per space, or the new rooms are pitch black */
+  const vestLight=new THREE.PointLight(0xffdca8, 20, 34, 2); vestLight.position.set(X,7,11); scene.add(vestLight);
+  const corrLight=new THREE.PointLight(0xffd6a0, 12, 18, 2); corrLight.position.set(X,5.4,4.8); scene.add(corrLight);
+  for(const cx of [-13,13]){
+    const cl=new THREE.PointLight(0xffe0b4, 14, 26, 2); cl.position.set(X+cx,4.4,4.8); scene.add(cl);
+  }
+  for(const cx of [-22.2,22.2]){
+    const sl=new THREE.PointLight(0xffcf90, 6, 11, 2); sl.position.set(X+cx,3.4,3.0); scene.add(sl);
+  }
 
   /* mihrab: niche dead centre of the qibla wall */
   box(7.2,9,1.4, 0,4.5,-15.2, stone, false);
@@ -3680,7 +3786,7 @@ function shoot(now){
       bloodBurst(h.point, dir, isHead?26:14);
       if(isHead&&ud.zombie.hp<=0) headPop(h.point);
     } else {
-      impactSpark(h.point, h.face?h.face.normal.clone():V3(0,1,0));
+      worldHit(h, dir, weapon.damage);
     }
   }
   tracer(muzzleWorld(), end);
@@ -3804,6 +3910,106 @@ function tracer(a,b){
 }
 function tracersUpdate(dt){
   for(const t of tracerPool){ if(t.t>0){ t.t-=dt; t.m.material.opacity=Math.max(0,t.t/.07*.7); if(t.t<=0)t.m.visible=false; } }
+}
+
+/* ===================== DESTRUCTION =====================
+   Rounds leave holes, and anything registered as breakable takes damage and
+   eventually comes apart into debris. A destroyed panel drops its collider
+   and its bullet geometry, so the hole you shot is a hole you can walk and
+   shoot through - not a decal on a solid wall. */
+const HOLES=[], HOLE_MAX=160;
+let holeGeo=null, holeMats=null;
+function holeInit(){
+  if(holeGeo)return;
+  holeGeo=new THREE.PlaneGeometry(1,1);
+  const mk=(inner,outer)=>{
+    const cv=document.createElement('canvas'); cv.width=cv.height=64;
+    const g=cv.getContext('2d');
+    const gr=g.createRadialGradient(32,32,1,32,32,31);
+    gr.addColorStop(0,inner); gr.addColorStop(.45,outer); gr.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle=gr; g.fillRect(0,0,64,64);
+    /* a few radial cracks so it reads as an impact, not a sticker */
+    g.strokeStyle=outer; g.lineWidth=1.4;
+    for(let i=0;i<7;i++){ const a=Math.random()*6.283, r=10+Math.random()*20;
+      g.beginPath(); g.moveTo(32,32); g.lineTo(32+Math.cos(a)*r,32+Math.sin(a)*r); g.stroke(); }
+    const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace;
+    return new THREE.MeshBasicMaterial({map:t,transparent:true,depthWrite:false,
+      polygonOffset:true, polygonOffsetFactor:-4, polygonOffsetUnits:-4});
+  };
+  holeMats={
+    concrete: mk('rgba(18,18,20,.95)','rgba(150,146,138,.75)'),
+    metal:    mk('rgba(12,12,14,.95)','rgba(190,190,196,.8)'),
+    wood:     mk('rgba(24,16,10,.95)','rgba(120,86,54,.8)'),
+    glass:    mk('rgba(210,230,240,.85)','rgba(180,205,220,.55)'),
+  };
+}
+const _hN=V3(), _hQ=new THREE.Quaternion(), _hUp=V3(0,0,1);
+function bulletHole(point, normal, kind){
+  holeInit();
+  const m=holeMats[kind]||holeMats.concrete;
+  const q=new THREE.Mesh(holeGeo,m);
+  _hN.copy(normal||V3(0,1,0)).normalize();
+  _hQ.setFromUnitVectors(_hUp,_hN);
+  q.quaternion.copy(_hQ);
+  q.position.copy(point).addScaledVector(_hN,.012);
+  const sc=rand(.10,.20); q.scale.set(sc,sc,1);
+  q.rotateZ(rand(0,6.283));
+  q.renderOrder=2;
+  scene.add(q);
+  HOLES.push(q);
+  while(HOLES.length>HOLE_MAX){ const old=HOLES.shift(); scene.remove(old); }
+}
+
+function breakableAt(obj){
+  let o=obj;
+  while(o){ if(o.userData&&o.userData.brk) return o; o=o.parent; }
+  return null;
+}
+const debrisGeo=new THREE.BoxGeometry(1,1,1);
+function shatter(mesh, dir){
+  const d=mesh.userData.brk.def;
+  mesh.updateWorldMatrix(true,false);
+  const b=new THREE.Box3().setFromObject(mesh);
+  const c=b.getCenter(V3()), sz=b.getSize(V3());
+  const n=Math.min(d.chips, 18);
+  for(let i=0;i<n;i++){
+    const m=new THREE.Mesh(debrisGeo,new THREE.MeshStandardMaterial({
+      color:new THREE.Color(d.col).multiplyScalar(rand(.7,1.15)), roughness:.9}));
+    m.scale.set(Math.max(.04,sz.x*rand(.06,.2)), Math.max(.04,sz.y*rand(.06,.2)), Math.max(.04,sz.z*rand(.06,.2)));
+    m.position.set(c.x+rand(-1,1)*sz.x*.4, c.y+rand(-1,1)*sz.y*.4, c.z+rand(-1,1)*sz.z*.4);
+    m.rotation.set(rand(0,6.3),rand(0,6.3),rand(0,6.3));
+    m.castShadow=false; scene.add(m);
+    const away=(dir?dir.clone():V3(rand(-1,1),0,rand(-1,1))).setY(0).normalize();
+    DEBRIS.push({m, v:V3(away.x*rand(.5,3.4)+rand(-1.4,1.4), rand(1.4,5.2), away.z*rand(.5,3.4)+rand(-1.4,1.4)),
+      s:V3(rand(-9,9),rand(-9,9),rand(-9,9)), t:rand(2.6,4.4)});
+  }
+  retireMesh(mesh);
+  try{ Audio[d.snd]&&Audio[d.snd](); }catch(e){}
+  shake=Math.max(shake,.16);
+}
+function debrisUpdate(dt){
+  for(let i=DEBRIS.length-1;i>=0;i--){
+    const p=DEBRIS[i];
+    p.t-=dt;
+    p.v.y-=19*dt;
+    p.m.position.addScaledVector(p.v,dt);
+    if(p.m.position.y<.03){ p.m.position.y=.03; p.v.y*=-.32; p.v.x*=.7; p.v.z*=.7; p.s.multiplyScalar(.6); }
+    p.m.rotation.x+=p.s.x*dt; p.m.rotation.y+=p.s.y*dt; p.m.rotation.z+=p.s.z*dt;
+    if(p.t<.7){ p.m.material.transparent=true; p.m.material.opacity=Math.max(0,p.t/.7); }
+    if(p.t<=0){ scene.remove(p.m); p.m.material.dispose(); DEBRIS.splice(i,1); }
+  }
+}
+/* what a round does to the world when it does not hit a person */
+function worldHit(h, dir, dmg){
+  const nrm=h.face?h.face.normal.clone().transformDirection(h.object.matrixWorld):V3(0,1,0);
+  const brk=breakableAt(h.object);
+  const kind=brk?brk.userData.brk.def.kind:'concrete';
+  impactSpark(h.point, nrm);
+  bulletHole(h.point, nrm, kind);
+  if(!brk)return;
+  const b=brk.userData.brk;
+  b.hp-=dmg;
+  if(b.hp<=0) shatter(brk, dir);
 }
 
 /* impact sparks */
@@ -5077,6 +5283,11 @@ const BOUNDS={minX:-21,maxX:21,minZ:-14,maxZ:14};
 window.__phase='menu';
 
 const INSIDE_PTS=[[-19,-12],[19,-12],[-19,-6],[19,-6],[-8,-11],[8,-11],[-16,0],[16,0],[-19,5],[19,5],[-10,9],[10,9],[-17,13],[17,13],[0,-9.4],[3,-12]];
+/* the mosque has rooms, so its wave spawns are spread across hall, chambers,
+   corridor and vestibule rather than reusing the supermarket's aisle ends */
+const INSIDE_PTS2=[[-20.5,-2.5],[20.5,-2.5],[-11,-9],[11,-9],[0,-13],[-21,7],[21,7],
+                   [-14.5,3],[14.5,3],[-7.5,6.6],[7.5,6.6],[0,7.4],[0,2.2],[-18,11],[18,11]];
+function insidePts(){ return mission.act===2 ? INSIDE_PTS2 : INSIDE_PTS; }
 const OUTSIDE_PTS=[[-20,28],[20,27],[-8,26],[24,23.5],[-24,22],[14,29]];
 const LINE_SUB='Remember lads, subscribe to PewDiePie.';
 const LINE_WIN='We made it out. GG chat.';
@@ -5154,7 +5365,7 @@ function enterStore(){
   setObjectiveState&&setObjectiveState('rescue','active');
   banner(mission.act===2?'CLEAR THE PRAYER HALL':'CLEAR THE STORE','4 SURVIVORS HIDING INSIDE');
   Audio.waveSting();
-  mission.insideLeft=roundScale().inside;
+  mission.insideLeft=Math.min(roundScale().inside, insidePts().length*2);
   mission.spawnT=.4;
 }
 
@@ -5248,7 +5459,8 @@ function missionUpdate(dt){
     if(mission.insideLeft>0){
       mission.spawnT-=dt;
       if(mission.spawnT<=0&&threatCount()<roundScale().cap){
-        const p=INSIDE_PTS[(INSIDE_PTS.length-mission.insideLeft)%INSIDE_PTS.length];
+        const T=insidePts();
+        const p=T[(T.length-mission.insideLeft%T.length)%T.length];
         if(spawnZombie(4,{pos:p,flee:false})){ mission.insideLeft--; mission.spawnT=rand(.45,1.1); }
       }
     }else if(threatCount()===0&&!mission.extractAnnounced){
@@ -5766,7 +5978,7 @@ function netBuildSnap(){
                      +townCar.rotation.y.toFixed(3), +carSpeed.toFixed(2), carParked?1:0,
                      +carSteerVal.toFixed(3)]:null;
   return {t:'snap', z:zs, p:ps, c:car,
-          m:[mission.insideLeft|0, threatCount()|0, phase, mission.round|0]};
+          m:[mission.insideLeft|0, threatCount()|0, phase, mission.round|0, mission.act|0]};
 }
 function netApplySnap(d){
   if(NET.mode!=='client')return;
@@ -5818,6 +6030,13 @@ function netApplySnap(d){
   if(d.m){
     mission.insideLeft=d.m[0];
     if(d.m[3]) mission.round=d.m[3];
+    /* the host decides which act the party is in; a client that missed it
+       would keep the old bounds and spawn tables 900 m away */
+    if(d.m[4] && d.m[4]!==mission.act){
+      setAct(d.m[4]);
+      banner(d.m[4]===2?'NEW OBJECTIVE':'ROUND START',
+             d.m[4]===2?'AL-SALAAM MOSQUE \u2014 GET IN THE CAR':'');
+    }
     /* missionUpdate is host-only, so a client's HUD would otherwise sit at
        zero threats and round 1 for the whole match */
     const tc=d.m[1]|0;
@@ -5841,11 +6060,17 @@ function netFollowPhase(p){
       const yaw=townCar.rotation.y;
       player.pos.set(townCar.position.x+Math.cos(yaw)*2.4, 1.7, townCar.position.z-Math.sin(yaw)*2.4);
     }
+    /* act 2 steps out into the courtyard side of the road, not the lot */
+    if(mission.act===2) player.pos.z=Math.min(player.pos.z,34.5);
     player.yaw=0; player.pitch=0; player.alive=true;
     gun.visible=true; vmGroup.visible=true; carCamYaw=null;
     return;
   }
-  if(p==='inside'&&phase!=='inside'){ setPhase('inside'); player.pos.set(0,1.7,13.5); return; }
+  if(p==='inside'&&phase!=='inside'){
+    setPhase('inside');
+    player.pos.set(ACT_OFF, 1.7, mission.act===2?10.5:13.5);
+    return;
+  }
   if(p==='win'&&phase!=='win'){ setPhase('win'); playing=false; document.exitPointerLock(); showWin(window.__runStats||{}); }
 }
 
@@ -6159,7 +6384,7 @@ function toggleMute(){
 const survivors=[];
 const SURV_SPOTS=[[-13.5,11.0],[13.2,10.6],[-19.5,-12.5],[18.8,-3.0]];
 /* prayer-hall hiding places: behind columns and beside the minbar */
-const SURV_SPOTS2=[[-17.5,-12.5],[16.8,-12.0],[-20.5,6.5],[19.5,4.0]];
+const SURV_SPOTS2=[[-22.2,2.9],[22.2,2.9],[-17.5,-12.5],[16.8,-12.0]];
 const SURV_NAMES=['MARA','JUDE','KIRA','OTIS'];
 const SURV_SKINS=[0xc9a184,0xba8f68,0xd8b494,0xa87a58];
 const SURV_LOOKS=[
@@ -6169,6 +6394,12 @@ const SURV_LOOKS=[
   {shirt:0x4da06a,pants:0x5a4632,hair:0x4a3320},
 ];
 const EXIT_ZONE={minX:-2,maxX:2,minZ:12.5,maxZ:14.5};
+/* the way out is act-dependent: the TOPS doors, or the mosque's central arch */
+function exitZone(){
+  return mission.act===2
+    ? {minX:ACT_OFF-3.4, maxX:ACT_OFF+3.4, minZ:9.5, maxZ:13.4}
+    : EXIT_ZONE;
+}
 let surv_completeFired=false, surv_hudEl=null;
 const surv_badges=[];
 const _svP=V3(), _svD=V3(), _svW=V3();
@@ -6255,7 +6486,10 @@ function survivorsInit(){
   if(surv_hudEl)return;
   for(let i=0;i<4;i++){
     const s=makeSurvivor(SURV_NAMES[i],i);
-    s.root.position.set(SURV_SPOTS[i][0],0,SURV_SPOTS[i][1]);
+    /* s.home is act-aware (setAct rewrites it); SURV_SPOTS is act-1 only, so
+       reading it directly left the survivors standing in TOPS during act 2 */
+    { const h=s.home||SURV_SPOTS[i%SURV_SPOTS.length];
+      s.root.position.set(h[0],0,h[1]); }
     s.root.rotation.y=rand(0,6.3);
     scene.add(s.root);
     survivors.push(s);
@@ -6311,7 +6545,11 @@ function survivorsUpdate(dt,now){
           const ddx=px-cx,ddz=pz-cz,d2=ddx*ddx+ddz*ddz;
           if(d2<.1225&&d2>0){const dd=Math.sqrt(d2);px=cx+ddx/dd*.35;pz=cz+ddz/dd*.35;}
         }
-        rp.x=clamp(px,-21.2,21.2); rp.z=clamp(pz,-14.2,14.2);
+        /* act-aware: these used to be bare act-1 numbers, which pinned a
+       following survivor 900 m away from the mosque */
+    { const A=ACT_OFF, a2=(mission.act===2);
+      rp.x=clamp(px, A+(a2?-24.2:-21.2), A+(a2?24.2:21.2));
+      rp.z=clamp(pz, a2?-15.2:-14.2, a2?12.2:14.2); }
       }
     }else if(nzd<9){ faceYaw=Math.atan2(nzx-rp.x,nzz-rp.z); }
     if(faceYaw!==null){
@@ -6343,8 +6581,9 @@ function survivorsUpdate(dt,now){
   if(!surv_completeFired&&survivors.length===4&&
      survivors.every(s=>s.state==='following')&&
      zombies.every(z=>z.state!=='chase')&&
-     player.pos.x>EXIT_ZONE.minX&&player.pos.x<EXIT_ZONE.maxX&&
-     player.pos.z>EXIT_ZONE.minZ&&player.pos.z<EXIT_ZONE.maxZ){
+     (()=>{const E=exitZone();
+        return player.pos.x>E.minX&&player.pos.x<E.maxX&&
+               player.pos.z>E.minZ&&player.pos.z<E.maxZ;})()){
     surv_completeFired=true;
     if(typeof missionComplete==='function')missionComplete();
   }
@@ -6355,7 +6594,10 @@ function survivorsReset(){
   for(let i=0;i<survivors.length;i++){
     const s=survivors[i];
     s.state='hiding'; s.tremble=.25; s.moving=0; s.whimperCd=0; s.t=rand(0,9);
-    s.root.position.set(SURV_SPOTS[i][0],0,SURV_SPOTS[i][1]);
+    /* s.home is act-aware (setAct rewrites it); SURV_SPOTS is act-1 only, so
+       reading it directly left the survivors standing in TOPS during act 2 */
+    { const h=s.home||SURV_SPOTS[i%SURV_SPOTS.length];
+      s.root.position.set(h[0],0,h[1]); }
     s.root.rotation.set(0,rand(0,6.3),0);
   }
 }
@@ -7593,6 +7835,7 @@ function loop(){
     survivorsUpdate&&survivorsUpdate(dt,now);
     survivorsHUD&&survivorsHUD();
     bloodUpdate(dt); poolsUpdate(dt); shellsUpdate(dt); sparksUpdate(dt); tracersUpdate(dt);
+    debrisUpdate(dt);
     groanTimer-=dt;
     if(groanTimer<=0){ groanTimer=rand(2.5,6);
       const alive=zombies.filter(z=>z.state==='chase');
