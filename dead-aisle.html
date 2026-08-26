@@ -109,6 +109,11 @@
     cursor:pointer; transition:all .15s; box-shadow:0 6px 20px rgba(246,212,52,.22); }
   #btn-play:hover { background:#ffe75c; transform:translateY(-1px); }
   #btn-play:disabled { background:#4a4a42; color:#8b8b80; cursor:default; box-shadow:none; transform:none; }
+  #loadbar { position:relative; margin-top:8px; height:14px; font:600 10px/14px ui-monospace,monospace;
+             letter-spacing:.09em; color:#8b8b80; text-align:center; transition:opacity .5s; }
+  #loadbar i { position:absolute; left:0; bottom:0; height:2px; width:0%; background:#f6d434;
+               transition:width .25s ease-out; }
+  #loadbar.done { opacity:0; pointer-events:none; }
 
   #lobby-party { position:absolute; right:26px; bottom:30px; width:308px;
     background:rgba(9,12,17,.85); border:1px solid rgba(255,255,255,.10); border-radius:10px; padding:14px 16px; }
@@ -455,6 +460,7 @@
       <div class="modesub">PARK AT TOPS &middot; CLEAR THE STORE &middot; GET ALL 4 SURVIVORS OUT</div>
     </div>
     <button id="btn-play">PLAY</button>
+    <div id="loadbar"><span id="loadbar-txt">LOADING WORLD</span><i id="loadbar-fill"></i></div>
   </div>
 
   <div id="lobby-party">
@@ -517,6 +523,94 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ---- asset load queue ----
+   The module asks for 12 GLBs totalling ~64 MB the moment it runs. Chrome
+   allows 6 connections per host; under that much contention some loads stall
+   with headers received and a body that never arrives, and GLTFLoader then
+   calls NEITHER onLoad nor onError - that asset is silently missing for the
+   whole session. Which one loses the race varies per run, which is why the
+   shelves were sometimes unstocked, the street pack sometimes absent and the
+   extra props sometimes gone. Loaded one at a time in isolation every file
+   parses in under 100 ms, so the files were never the problem.
+
+   Cap how many are in flight, and put a watchdog on each so a stalled body
+   cannot hold a slot for ever and wedge the queue behind it.
+   Signature matches GLTFLoader.load(url,onLoad,onProgress,onError) so call
+   sites are unchanged apart from the name. */
+const GLTF_MAX=3, GLTF_TIMEOUT=45000;
+let _gltfActive=0, _gltfSeen=0, _gltfDone=0, _gltfIdleT=null;
+const _gltfQ=[];
+function gltfLoad(url,onLoad,onProgress,onError){
+  _gltfSeen++;
+  _gltfQ.push({url,onLoad,onError,tries:0});
+  _gltfProgress();
+  _gltfPump();
+}
+/* Assets are enqueued over time - some chain off others - so the total is not
+   known up front and the readout shows done/seen-so-far. It hides itself once
+   the queue has been empty for a moment rather than at a fixed count. */
+function _gltfProgress(){
+  const el=document.getElementById('loadbar');
+  if(!el)return;
+  const txt=document.getElementById('loadbar-txt'), fill=document.getElementById('loadbar-fill');
+  const pct=_gltfSeen? Math.round(_gltfDone/_gltfSeen*100):0;
+  if(txt) txt.textContent='LOADING WORLD  '+_gltfDone+'/'+_gltfSeen;
+  if(fill) fill.style.width=pct+'%';
+  clearTimeout(_gltfIdleT);
+  if(!_gltfActive && !_gltfQ.length){
+    _gltfIdleT=setTimeout(()=>{
+      if(!_gltfActive && !_gltfQ.length){
+        if(txt) txt.textContent='WORLD READY';
+        el.classList.add('done');
+      }
+    }, 900);
+  }else{
+    el.classList.remove('done');
+  }
+}
+function _gltfPump(){
+  while(_gltfActive<GLTF_MAX && _gltfQ.length) _gltfStart(_gltfQ.shift());
+}
+/* so a stuck load can be identified from the console instead of guessed at */
+window.__assets=()=>({active:_gltfActive, seen:_gltfSeen, done:_gltfDone,
+                      queued:_gltfQ.map(j=>j.url)});
+function _gltfStart(j){
+  _gltfActive++;
+  let settled=false;
+  const release=()=>{ settled=true; clearTimeout(j.guard); _gltfActive--; };
+  const finish=(fn,arg)=>{
+    if(settled)return;
+    release(); _gltfDone++;
+    /* a throw in a handler must not leak the slot, or the queue stalls */
+    /* the stack matters: a handler that throws leaves that asset's content
+       missing for the session, and the message alone does not say where */
+    try{ fn&&fn(arg); }
+    catch(e){ console.warn('asset handler failed',j.url,(e&&e.stack)||e); }
+    _gltfProgress(); _gltfPump();
+  };
+  /* Watch for a STALL, not for elapsed time: a big file on a slow link, or a
+     slow texture decode, is not a failure. Every progress event rearms the
+     timer, so it only fires when nothing has arrived for GLTF_TIMEOUT. */
+  const arm=()=>{
+    clearTimeout(j.guard);
+    j.guard=setTimeout(onStall, GLTF_TIMEOUT);
+  };
+  const onStall=()=>{
+    if(settled)return;
+    release();
+    if(j.tries<1){ j.tries++; console.warn('asset stalled, retrying:',j.url); _gltfQ.push(j); }
+    else{ console.warn('asset gave up after retry:',j.url); _gltfDone++;
+          try{ j.onError&&j.onError(new Error('timeout')); }catch(e){} }
+    _gltfProgress(); _gltfPump();
+  };
+  arm();
+  new GLTFLoader().load(j.url,
+    (g)=>finish(j.onLoad,g),
+    ()=>{ if(!settled) arm(); },
+    (e)=>finish(j.onError,e));
+}
+
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 window.onerror = (m,s,l,c)=>{ document.getElementById('err').textContent = `ERR ${m} @${l}:${c}`; };
@@ -590,14 +684,27 @@ function settingsApply(){
        the browser downsample. Hard-capped at 4x so a slider drag cannot ask
        for a buffer the GPU refuses to allocate. */
     renderer.setPixelRatio(Math.min(Math.min(devicePixelRatio,2)*(SETTINGS.res/100), 4));
+    /* The scene renders into the postfx target, not straight to the canvas.
+       fxResize was only wired to the window resize event, so moving the
+       quality slider changed the canvas and left the target at its old size -
+       the setting did nothing to the actual render resolution. Harmless
+       before fxInit, hence the guard. */
+    try{ window.fxResize&&window.fxResize(); }catch(e){}
     scene.traverse(o=>{ if(o.isMesh&&o.material){ const m=[].concat(o.material); m.forEach(x=>{ if(x)x.needsUpdate=true; }); } });
   }catch(e){}
-  try{ Audio.setVolume&&Audio.setVolume(SETTINGS.master/100); }catch(e){}
-  try{ parkSong.volume=Math.min(parkSong.volume, SETTINGS.music/100); }catch(e){}
-  try{ radioAudio.volume=SETTINGS.music/100; }catch(e){}
-  try{ SFX.setVolumeScale&&SFX.setVolumeScale(SETTINGS.sfx/100); }catch(e){}
-  try{ HV.setVolumeScale&&HV.setVolumeScale(SETTINGS.sfx/100); }catch(e){}
-  try{ Steps.setVolumeScale&&Steps.setVolumeScale(SETTINGS.sfx/100); }catch(e){}
+  /* MASTER used to reach only the procedural WebAudio bus, so gunshots,
+     hostile voices, footsteps and music ignored it entirely. Fold it into
+     every channel instead of leaving it on one. */
+  const volM=SETTINGS.master/100, volS=(SETTINGS.sfx/100)*volM, volMus=(SETTINGS.music/100)*volM;
+  try{ Audio.setVolume&&Audio.setVolume(volM); }catch(e){}
+  /* Math.min against the LIVE volume latched: turning the slider down pinned
+     the track low and turning it back up could never restore it. Scale the
+     fade's own target instead, which is what radioAudio already does. */
+  try{ parkSong.volume=(parkSongTarget||0)*(SETTINGS.music/100); }catch(e){}
+  try{ radioAudio.volume=volMus; }catch(e){}
+  try{ SFX.setVolumeScale&&SFX.setVolumeScale(volS); }catch(e){}
+  try{ HV.setVolumeScale&&HV.setVolumeScale(volS); }catch(e){}
+  try{ Steps.setVolumeScale&&Steps.setVolumeScale(volS); }catch(e){}
   settingsSave();
 }
 window.__settings=SETTINGS;
@@ -971,8 +1078,10 @@ function makeTube(x,z,on=true){
     g.add(tube);
     const pt = new THREE.PointLight(0xcfe8d8, 44, 22, 1.7);
     pt.position.y=-.4; g.add(pt);
-    tubeLights.push({mat:tubeMat, light:pt, base:44, t:rand(0,10), state:1});
-    lightRegister(pt,70);
+    /* hand the flicker entry its MANAGED_LIGHTS record so it can honour the
+       distance cull instead of writing over it every frame */
+    tubeLights.push({mat:tubeMat, light:pt, base:44, t:rand(0,10), state:1,
+                     managed:lightRegister(pt,70)&&MANAGED_LIGHTS[MANAGED_LIGHTS.length-1]});
   } else {
     const tube = new THREE.Mesh(new THREE.BoxGeometry(2.2,.05,.2),
       new THREE.MeshStandardMaterial({color:0x2c302c, roughness:.9}));
@@ -1017,7 +1126,17 @@ function cullUpdate(dt){
 /* ---- point lights are per-fragment on every lit material in range; keep
    only the handful near the player switched on ---- */
 const MANAGED_LIGHTS=[];
-function lightRegister(l,radius){ if(l){ MANAGED_LIGHTS.push({l, base:l.intensity, r:radius||40}); } return l; }
+function lightRegister(l,radius){
+  if(!l) return l;
+  /* l.position is local, and the store tubes hang off groups, so the distance
+     test was comparing the player's world position against a local offset and
+     effectively never culled them. None of these lights move, so resolve the
+     world position once, here. */
+  l.updateWorldMatrix(true,false);
+  const w=l.getWorldPosition(new THREE.Vector3());
+  MANAGED_LIGHTS.push({l, base:l.intensity, r:radius||40, wx:w.x, wz:w.z, on:true});
+  return l;
+}
 let _lightT=0;
 function managedLightsUpdate(dt){
   _lightT-=dt; if(_lightT>0)return;
@@ -1025,8 +1144,9 @@ function managedLightsUpdate(dt){
   const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
   const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
   for(const m of MANAGED_LIGHTS){
-    const d=Math.hypot(px-m.l.position.x, pz-m.l.position.z);
+    const d=Math.hypot(px-m.wx, pz-m.wz);
     const on=d<m.r;
+    m.on=on;                       /* the tube flicker loop reads this */
     if(on && m.l.intensity===0) m.l.intensity=m.base;
     else if(!on && m.l.intensity!==0) m.l.intensity=0;
   }
@@ -1058,7 +1178,11 @@ function addBox(w,h,d,x,y,z, mat, rotY=0, collide=true){
   m.castShadow = Math.max(w,h,d) >= 1.6;
   m.receiveShadow=true;
   scene.add(m);
-  if(collide && rotY===0){
+  /* collide==='solid': stop bullets but add no AABB. The shell used to pass
+     plain false, which skipped worldHits too - so rounds went straight
+     through the supermarket's walls and ceiling and hit the town outside.
+     Movement there is handled by the BOUNDS clamp, not by colliders. */
+  if(collide && collide!=='solid' && rotY===0){
     const col={minX:x-w/2,maxX:x+w/2,minZ:z-d/2,maxZ:z+d/2,h};
     colliders.push(col);
     m.userData.collider=col;   /* so a mesh that is later retired can drop it */
@@ -1175,26 +1299,32 @@ const MAT = {
   const f=new THREE.Mesh(new THREE.PlaneGeometry(47,33), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR,
     color:0x8d8b86, roughness:.72, metalness:.04 }));
-  f.rotation.x=-Math.PI/2; f.receiveShadow=true; scene.add(f);
+  f.rotation.x=-Math.PI/2; f.receiveShadow=true;
+  /* Oversizing this to tuck under the walls put it in the same plane as the
+     1240x46 town ground, and coplanar surfaces z-fight - grass flickered
+     through the shop floor along the front wall. 6 mm down is invisible
+     indoors and lets the ground win everywhere outside. */
+  f.position.y=-0.006;
+  scene.add(f);
 })();
 
 /* ceiling */
-addBox(44,.3,30, 0,4.5,0, MAT.ceil, 0,false);
+addBox(44,.3,30, 0,4.5,0, MAT.ceil, 0,'solid');
 
 /* perimeter walls */
-addBox(.4,5,30,-22,2.5,0,MAT.wall,0,false);
-addBox(.4,5,30, 22,2.5,0,MAT.wall,0,false);
-addBox(44,5,.4, 0,2.5,-15,MAT.wall,0,false);
+addBox(.4,5,30,-22,2.5,0,MAT.wall,0,'solid');
+addBox(.4,5,30, 22,2.5,0,MAT.wall,0,'solid');
+addBox(44,5,.4, 0,2.5,-15,MAT.wall,0,'solid');
 /* front wall with CENTER DOOR GAP x -2..2 */
-addBox(20,5,.4,-12,2.5,15,MAT.wallIn,0,false);
-addBox(20,5,.4,12,2.5,15,MAT.wallIn,0,false);
-addBox(4.6,1.6,.45,0,4.2,15,MAT.wallIn,0,false);
+addBox(20,5,.4,-12,2.5,15,MAT.wallIn,0,'solid');
+addBox(20,5,.4,12,2.5,15,MAT.wallIn,0,'solid');
+addBox(4.6,1.6,.45,0,4.2,15,MAT.wallIn,0,'solid');
 for(const dx of[-2.1,2.1]) addBox(.25,3.4,.5,dx,1.7,15,MAT.metalD);
 for(const wx of [-16,-8,0,8,16]){
   /* wx=0 is the ENTRANCE. Building the window frame there put piers at
      x=-1.8/+1.8 and a 5 m sill across the floor, bricking up the doorway. */
   if(wx!==0){
-    addBox(5,1.2,.45, wx,4.4,15, MAT.wallIn,0,false);          // header
+    addBox(5,1.2,.45, wx,4.4,15, MAT.wallIn,0,'solid');          // header
     addBox(1.4,3.8,.45, wx-1.8,1.9,15, MAT.wallIn,0,false);     // pier
     addBox(1.4,3.8,.45, wx+1.8,1.9,15, MAT.wallIn,0,false);
     addBox(5,.5,.45, wx,.25,15, MAT.wallIn,0,false);
@@ -1360,6 +1490,15 @@ let SHELF_ITEMS=null;
    ~1030. Instances are parented to the row/unit they sit on, so the existing
    distance culling still applies to them. */
 const _instTmp=new THREE.Matrix4(), _instInv=new THREE.Matrix4(), _instLocal=new THREE.Matrix4();
+/* Bucketing per shelf was a mistake: 28 wall units x ~21 source objects gave
+   437 batches holding barely one instance each, which costs MORE than the
+   plain meshes it replaced. Stock is static, so bake the placements into
+   world space and bucket by source across the whole store - ~21 batches for
+   all 700 wall items instead of 437. */
+function stockWorld(parent, local){
+  parent.updateMatrixWorld(true);
+  return new THREE.Matrix4().multiplyMatrices(parent.matrixWorld, local);
+}
 function instanceStock(src, mats, parent){
   if(!src||!mats.length)return 0;
   src.updateWorldMatrix(true,true);
@@ -1391,26 +1530,26 @@ function stockMatrix(x,y,z,ry,sc){
 function stockWallUnits(){
   if(!SHELF_ITEMS||!SHELF_ITEMS.length||!WALL_UNITS.length)return;
   let n=0, batches=0;
+  const wallMats=new Map();
   for(const u of WALL_UNITS){
     if(u.userData.stocked)continue;
     u.userData.stocked=true;
-    const uMats=new Map();
     for(const ty of WALL_TIERS){
       if(Math.random()<.10)continue;                 /* the odd bare shelf */
       let x=-1.05;
       while(x<1.0){
         const si=(Math.random()*SHELF_ITEMS.length)|0;
         const src=SHELF_ITEMS[si];
-        let bucket=uMats.get(si);
-        if(!bucket){ bucket=[]; uMats.set(si,bucket); }
-        bucket.push(stockMatrix(x, ty, WALL_FACE_Z+rand(-.03,.03),
-          rand(0,Math.PI*2), (src.userData.shelfScale||1)*rand(1.4,2.1)));
+        let bucket=wallMats.get(si);
+        if(!bucket){ bucket=[]; wallMats.set(si,bucket); }
+        bucket.push(stockWorld(u, stockMatrix(x, ty, WALL_FACE_Z+rand(-.03,.03),
+          rand(0,Math.PI*2), (src.userData.shelfScale||1)*rand(1.4,2.1))));
         n++;
         x+=rand(.24,.42);
       }
     }
-    for(const [si,mats] of uMats) batches+=instanceStock(SHELF_ITEMS[si], mats, u);
   }
+  for(const [si,mats] of wallMats) batches+=instanceStock(SHELF_ITEMS[si], mats, scene);
   console.info('wall shelving stocked:',n,'items across',WALL_UNITS.length,
                'units in',batches,'instanced batches');
 }
@@ -1422,7 +1561,7 @@ function stockWallUnits(){
 /* grocery boxes from the convenience-store pack, mixed in with the food so
    the shelves carry packaged goods as well as loose produce */
 const shelfExtras=[];
-new GLTFLoader().load('assets/cstore.glb', (g3)=>{
+gltfLoad('assets/cstore.glb', (g3)=>{
   for(const o of g3.scene.children.slice()){
     if(/^box_|^can_/.test(o.name)){
       o.userData.shelfScale = /^can_/.test(o.name) ? .30 : .26;
@@ -1448,13 +1587,13 @@ new GLTFLoader().load('assets/cstore.glb', (g3)=>{
    Whichever finished first won, so on roughly half of all loads every boxed
    good was silently dropped. Chained instead - both cstore paths call it. */
 function loadFood(){
-new GLTFLoader().load('assets/food.glb', (gltf)=>{
+gltfLoad('assets/food.glb', (gltf)=>{
   const base=gltf.scene.children.filter(o=>o.isMesh||o.children.length);
   const items=base.concat(shelfExtras);
   if(!items.length)return;
   let swapped=0, batches=0;
+  const allMats=new Map();                 /* source index -> world matrices */
   for(const row of shelfRows){
-    const rowMats=new Map();               /* source index -> instance matrices */
     for(const child of row.children.slice()){
       if(!child.userData||!child.userData.product)continue;
       if(Math.random()>.5) continue;                /* leave some as boxes */
@@ -1472,19 +1611,19 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
            the shelf faces, which point outward at dz +/-0.30. */
         const tier=SHELF_TIERS[clamp(Math.round((child.userData.product.y-.59)/.75),0,SHELF_TIERS.length-1)];
         const face=child.position.z>=0?1:-1;
-        let bucket=rowMats.get(si);
-        if(!bucket){ bucket=[]; rowMats.set(si,bucket); }
-        bucket.push(stockMatrix(
+        let bucket=allMats.get(si);
+        if(!bucket){ bucket=[]; allMats.set(si,bucket); }
+        bucket.push(stockWorld(row, stockMatrix(
           child.position.x+(k-(n-1)/2)*rand(.13,.2),
           tier,
           face*(SHELF_FACE_Z+rand(-.05,.05)),
-          rand(0,Math.PI*2), sc));
+          rand(0,Math.PI*2), sc)));
         swapped++;
       }
       child.visible=false;
     }
-    for(const [si,mats] of rowMats) batches+=instanceStock(items[si], mats, row);
   }
+  for(const [si,mats] of allMats) batches+=instanceStock(items[si], mats, scene);
   SHELF_ITEMS=items;
   stockWallUnits();
   console.info('shelf stock:',swapped,'food items from',items.length,
@@ -1496,7 +1635,7 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
    Real retail furniture replaces the block shelving. The colliders and the
    product boxes stay exactly where they were, so navigation and the colour
    of the aisles are unchanged - only the grey frame/planks are swapped. */
-new GLTFLoader().load('assets/props.glb', (gltf)=>{
+gltfLoad('assets/props.glb', (gltf)=>{
   const lib={};
   gltf.scene.children.slice().forEach(o=>{ lib[o.name]=o; });
   /* the pack's retail orange is very saturated and blows out under the
@@ -1577,7 +1716,7 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
   place('case_b',    -18.5,   6.0,  Math.PI/2);
   place('shelf_tall', 20.6, -8.0, -Math.PI/2);   /* was inside the back-wall run */
   /* the industrial shelving + cashier desk pack */
-  new GLTFLoader().load('assets/storeprops.glb', (g2)=>{
+  gltfLoad('assets/storeprops.glb', (g2)=>{
     const lib2={}; for(const o of g2.scene.children.slice()) lib2[o.name]=o;
     const put2=(nm,x,z,ry,sc)=>{
       const src=lib2[nm]; if(!src)return null;
@@ -1632,9 +1771,23 @@ const fzCv=document.createElement('canvas'); fzCv.width=1024; fzCv.height=64;
   for(let i=0;i<16;i++){ g.fillStyle='#2e4a52'; g.fillRect(i*64+4,0,56,64); g.fillStyle='#1b2c31'; g.fillRect(i*64+30,0,4,64); }
 }
 const fzTex=new THREE.CanvasTexture(fzCv); fzTex.colorSpace=THREE.SRGBColorSpace;
-const fz=new THREE.Mesh(new THREE.PlaneGeometry(41,2.1), new THREE.MeshBasicMaterial({map:fzTex}));
-fz.position.set(0,1.5,-14.05); scene.add(fz);
-worldHits.push(fz); makeBreakable(fz,'glass',2.4);
+/* This was ONE 41 m plane registered as a single breakable, so a couple of
+   rounds deleted the entire freezer run at once - and shatter sizes its chips
+   from the mesh bounds, so it threw 8-metre "glass shards" across the shop.
+   The texture already draws 16 doors; make each door its own pane, with UVs
+   sliced to its own section of the shared bitmap so no texture is cloned. */
+const FZ_N=16, FZ_W=41/FZ_N;
+const fzMat=new THREE.MeshBasicMaterial({map:fzTex});
+for(let i=0;i<FZ_N;i++){
+  const g=new THREE.PlaneGeometry(FZ_W,2.1);
+  const uv=g.attributes.uv;
+  for(let k=0;k<uv.count;k++) uv.setX(k, (uv.getX(k)+i)/FZ_N);
+  uv.needsUpdate=true;
+  const pane=new THREE.Mesh(g,fzMat);
+  pane.position.set(-41/2+FZ_W*(i+.5), 1.5, -14.05);
+  scene.add(pane);
+  worldHits.push(pane); makeBreakable(pane,'glass',2.4);
+}
 
 /* debris: scattered paper / boxes / carts.
    Placed by rejection sampling - dropping them at pure random buried boxes
@@ -2277,7 +2430,11 @@ function phPlace(pack, name, x, z, opts){
   const h=Math.max(.001, b.max.y-b.min.y);
   const sc=(opts&&opts.h) ? (opts.h/h) : 1;
   o.scale.setScalar(sc);
-  o.position.set(x, (opts&&opts.y)||0, z);
+  /* Packs vary: some models have their origin on the base, others at the
+     centre of the bounding box. Placing by origin buried every centre-origin
+     prop to half its height. Seat the BASE at the requested y instead, which
+     is a no-op for the base-origin ones (b.min.y is already 0). */
+  o.position.set(x, ((opts&&opts.y)||0) - b.min.y*sc, z);
   o.rotation.y=(opts&&opts.ry!==undefined)?opts.ry:rand(0,Math.PI*2);
   const tall=(opts&&opts.h)?opts.h>=1.2:false;
   o.traverse(m=>{ if(m.isMesh){ m.castShadow=tall; m.receiveShadow=true; m.frustumCulled=true; } });
@@ -2287,8 +2444,13 @@ function phPlace(pack, name, x, z, opts){
   if(opts&&opts.solid){
     o.traverse(m=>{ if(m.isMesh) worldHits.push(m); });
     if(opts.collide!==false && (wb.max.y-wb.min.y)>1.0){
-      colliders.push({minX:wb.min.x+.1,maxX:wb.max.x-.1,minZ:wb.min.z+.1,maxZ:wb.max.z-.1,
-                      h:Math.max(.6,wb.max.y)});
+      /* retireMesh() removes userData.collider when a breakable shatters;
+         without the back-reference the AABB stayed behind as an invisible
+         wall where the prop used to be. */
+      const col={minX:wb.min.x+.1,maxX:wb.max.x-.1,minZ:wb.min.z+.1,maxZ:wb.max.z-.1,
+                 h:Math.max(.6,wb.max.y)};
+      colliders.push(col);
+      o.userData.collider=col;
     }
   }
   if(opts&&opts.brk) makeBreakable(o, opts.brk, opts.brkScale||1);
@@ -2296,7 +2458,7 @@ function phPlace(pack, name, x, z, opts){
   return o;
 }
 function phLoad(pack, url, then){
-  new GLTFLoader().load(url,(g)=>{
+  gltfLoad(url,(g)=>{
     const lib={};
     for(const c of g.scene.children.slice()) if(c.name) lib[c.name]=c;
     PH_PACKS[pack]=lib;
@@ -2346,7 +2508,8 @@ phLoad('store','assets/ph_store.glb',(lib)=>{
   boxes.slice(0,5).forEach((n,i)=>
     phPlace('store',n, 12+i*1.7, -12.2, {h:.42,solid:true,brk:'crate'}));
   bottles.slice(0,8).forEach((n,i)=>
-    phPlace('store',n, -6+i*1.7, 6.0, {h:.26,y:.98,solid:true,brk:'glass',brkScale:.8}));
+    /* y:.98 hovered them in mid-air over the aisle; stand them on the floor */
+    phPlace('store',n, -6+i*1.7, 6.0, {h:.26,solid:true,brk:'glass',brkScale:.8}));
 });
 
 /* ---- street dressing ---- */
@@ -2392,14 +2555,18 @@ phLoad('map2','assets/map2.glb',(lib)=>{
   const P=(n,x,z,o)=>phPlace('map2',n,x,z,o);
 
   /* ---- the liquor store: a real building on the way out of town ---- */
-  P('liquorstore', -268, 52.5, {h:9.2, ry:Math.PI, solid:true, cull:230});
-  P('ironfence', -268, 44.6, {h:2.0, ry:0, cull:200});
-  for(let i=-3;i<=3;i++) if(i) P('ironfence', -268+i*2.55, 44.6, {h:2.0, ry:0, cull:200});
+  /* z=52.5 buried it inside the zone-1 frontage block, whose bodies run from
+     ZN=41.8 back to 54.3. Sit it ON the frontage line instead (its scaled
+     footprint is ~8.5 m deep), and buildHighway skips its own building at
+     this x so the two do not occupy the same ground. */
+  P('liquorstore', -268, 46.1, {h:9.2, ry:Math.PI, solid:true, cull:230});
+  for(let i=-3;i<=3;i++) P('ironfence', -268+i*2.55, 41.2, {h:2.0, ry:0, cull:200});
 
   /* ---- verge dressing the length of the drive ---- */
-  for(let x=-150; x>-840; x-=37){
-    const side = (x%74===0) ? 1 : -1;
-    P('deadtree', x, side>0?42.6:29.4, {h:rand(5.4,7.2), cull:200});
+  /* side was keyed on (x%74===0), which never holds once x steps by 37 from
+     -150, so all 19 trees lined the south verge. Alternate on the index. */
+  for(let x=-150, ti=0; x>-840; x-=37, ti++){
+    P('deadtree', x, (ti%2)?42.6:29.4, {h:rand(5.4,7.2), cull:200});
   }
   for(let x=-146; x>-840; x-=23){
     P(Math.random()<.5?'grasstuft':'grasstuft2', x+rand(-4,4), rand(41.2,43.2), {h:rand(.3,.5), cull:130});
@@ -2441,8 +2608,11 @@ phLoad('map2','assets/map2.glb',(lib)=>{
   P('cartboxes',  22.0, 24.5, {h:1.0, ry:2.4, solid:true, cull:140});
 
   /* ---- mosque: iron railing along the courtyard frontage ---- */
-  for(let i=-6;i<=6;i++)
+  /* leave the middle three panels out: they were fencing off the gateway */
+  for(let i=-6;i<=6;i++){
+    if(Math.abs(i)<2) continue;
     P('ironfence', MOSQUE_X+i*2.55, 32.4, {h:2.0, ry:0, cull:230});
+  }
 });
 
 /* ===================== EXTRA PROP PACK =====================
@@ -2474,6 +2644,7 @@ phLoad('extra','assets/ph_extra.glb',(lib)=>{
       P('plastic_crate_0'+(1+(s2%3)), cx, cz, {h:.42, y:s2*.42, ry:rand(-.3,.3), solid:!s2, cull:95});
   }
   /* cleaning aisle and checkout dressing */
+  /* these used to carry y:.98, which floated them in mid-air over the aisle */
   for(let i=0;i<5;i++){
     const s=spot(-19,19,-12,12);
     if(s) P(['multi_cleaner_5_litre','multi_cleaner_bottle','drain_cleaner','lubricant_spray',
@@ -2549,7 +2720,7 @@ phLoad('extra','assets/ph_extra.glb',(lib)=>{
    furniture. The pack's trees (2.3k polys) replace the scanned cypress,
    which shredded under decimation. */
 const STREET_FIT={facadeY:0, ry:0};
-new GLTFLoader().load('assets/street.glb', (gltf)=>{
+gltfLoad('assets/street.glb', (gltf)=>{
   const lib={};
   for(const o of gltf.scene.children.slice()) lib[o.name]=o;
   const put=(name,x,z,ry,sc,collide,y)=>{
@@ -2973,6 +3144,8 @@ function buildHighway(){
   /* ---------------- zone 1: outer commercial, -140 .. -320 ---------------- */
   let mi=0;
   for(let x=X_NEAR; x>-320; x-=17.5){
+    /* the map2 liquor store owns this frontage - see the map2 pack */
+    if(Math.abs(x+268)<11) continue;
     const g=grp(x,ZN,200);
     bld(g,x,ZN,rand(13,17),rand(6,11),12.5,-1,
         {m:(mi++)%6, awn: Math.random()<.4 ? [0x7a3a30,0x3f5a44,0x54502f][mi%3] : 0});
@@ -3049,7 +3222,9 @@ function extendTown(){
   function t2_facade(b){
     /* one group per building so distance culling is a single flag rather than
        a frustum test on every window quad */
-    const t2_g=new THREE.Group(); t2_g.add(t2_g);
+    /* was t2_g.add(t2_g) - a self-add, which three.js rejects with a console
+       error, so none of these 11 buildings was ever in the scene */
+    const t2_g=new THREE.Group(); scene.add(t2_g);
     cullRegister(t2_g, b.x, b.f, 210);
     const scene_add=(o)=>t2_g.add(o);
     const t2_bm=new THREE.Mesh(new THREE.BoxGeometry(b.w,b.h,b.d),
@@ -3492,7 +3667,7 @@ function applyCarFit(){
   carModel.position.set(CAR_FIT.x,CAR_FIT.y,CAR_FIT.z);
   carModel.rotation.set(0,CAR_FIT.ry,0);
 }
-new GLTFLoader().load('assets/car.glb',(gltf)=>{
+gltfLoad('assets/car.glb',(gltf)=>{
   const m=gltf.scene;
   m.traverse(o=>{
     if(!o.isMesh)return;
@@ -3573,7 +3748,7 @@ function carWheelsBind(m){
 }
 
 function buildWrecks(){
-  new GLTFLoader().load('assets/car-lod.glb',(g2)=>{
+  gltfLoad('assets/car-lod.glb',(g2)=>{
     const src=g2.scene;
     const WRECK_TINT=[0x4a4a50,0x6a4038,0x39424e,0x555046,0x3e4a3e];
     const sites=window.__wreckSites||[];
@@ -3774,6 +3949,9 @@ function carCamera(dt){
    so there is no hard cut at either end. */
 const parkSong=new window.Audio('assets/park-song.mp3');
 parkSong.loop=true; parkSong.preload='auto'; parkSong.volume=0;
+/* the level the fade is aiming at, so settingsApply can rescale rather than
+   clamp against whatever the volume happens to be mid-fade */
+let parkSongTarget=0;
 let parkFade=null;
 /* N toggles just the park track, independently of the global M mute */
 let parkMuted=false, allMuted=false;
@@ -3792,7 +3970,8 @@ function parkSongStart(target, secs=3.4){
   const t0=performance.now();
   parkFade=setInterval(()=>{
     const k=Math.min(1,(performance.now()-t0)/(secs*1000));
-    parkSong.volume=target*(k*k*(3-2*k));
+    parkSongTarget=target;
+    parkSong.volume=target*(k*k*(3-2*k))*(SETTINGS.music/100);
     if(k>=1)clearInterval(parkFade);
   },40);
 }
@@ -4094,7 +4273,13 @@ addEventListener('keyup',e=>keys[e.code]=false);
 let locked=false, playing=false, paused=false;
 const menuEl=document.getElementById('menu'), deadEl=document.getElementById('dead'), pauseEl=document.getElementById('pause');
 
-document.getElementById('btn-retry').onclick=()=>startGame(true);   /* retry the same round */
+/* The win screen's REDEPLOY tells clients to restart too; this one did not,
+   so a host who died restarted alone and the party desynced for good. Same
+   round number, so clients just re-run endReset()+startGame(true). */
+document.getElementById('btn-retry').onclick=()=>{
+  if(NET.mode==='host'&&NET.conns.length) netSend({t:'round',n:mission.round});
+  startGame(true);
+};
 document.getElementById('btn-resume').onclick=()=>document.body.requestPointerLock();
 /* The lobby is a UI, not a click-anywhere splash - it has a PLAY button, a
    name field and a party panel, so a blanket click handler would fire while
@@ -4104,7 +4289,13 @@ let everLocked=false, pausedAt=0;
 document.addEventListener('pointerlockchange',()=>{
   locked = document.pointerLockElement===document.body;
   if(locked){ everLocked=true; }
-  if(!locked && playing && player.alive && everLocked){ paused=true; pauseEl.classList.remove('hidden'); }
+  if(!locked && playing && player.alive && everLocked){
+    paused=true; pauseEl.classList.remove('hidden');
+    /* these are looping sources driven from the frame loop, which stops
+       ticking while paused - so they held their last state and droned on */
+    try{ Steps.stop(); }catch(e){}
+    try{ Audio.engineStop(); Audio.skidSet(0); }catch(e){}
+  }
   if(locked){
     /* wall-clock weapon timers would otherwise tick down while paused */
     if(paused&&pausedAt){
@@ -4112,6 +4303,7 @@ document.addEventListener('pointerlockchange',()=>{
       weapon.lastShot+=gap; weapon.reloadEnd+=gap; vmOneShotEnd+=gap;
     }
     pausedAt=0;
+    if(paused && (phase==='drive'||phase==='parking')){ try{ Audio.engineStart(); }catch(e){} }
     paused=false; pauseEl.classList.add('hidden');
   } else if(paused&&!pausedAt){ pausedAt=performance.now()/1000; }
 });
@@ -4475,7 +4667,7 @@ function selectWeapon(i){
   if(el) el.textContent=w.name;
   if(typeof Audio!=='undefined'&&Audio.reload) try{ Audio.reload(); }catch(e){}
 }
-new GLTFLoader().load('assets/guns.glb', (gltf)=>{
+gltfLoad('assets/guns.glb', (gltf)=>{
   for(const w of WEAPONS){
     const src=gltf.scene.children.find(o=>o.name===w.id);
     if(!src)continue;
@@ -4738,7 +4930,10 @@ function shatter(mesh, dir){
   for(let i=0;i<n;i++){
     const m=new THREE.Mesh(debrisGeo,new THREE.MeshStandardMaterial({
       color:new THREE.Color(d.col).multiplyScalar(rand(.7,1.15)), roughness:.9}));
-    m.scale.set(Math.max(.04,sz.x*rand(.06,.2)), Math.max(.04,sz.y*rand(.06,.2)), Math.max(.04,sz.z*rand(.06,.2)));
+    /* clamp absolutely: a chip off a wall panel is still a chip, not a
+       half-metre slab of geometry flying across the room */
+    const chip=(e)=>clamp(e*rand(.06,.2), .04, .34);
+    m.scale.set(chip(sz.x), chip(sz.y), chip(sz.z));
     m.position.set(c.x+rand(-1,1)*sz.x*.4, c.y+rand(-1,1)*sz.y*.4, c.z+rand(-1,1)*sz.z*.4);
     m.rotation.set(rand(0,6.3),rand(0,6.3),rand(0,6.3));
     m.castShadow=false; scene.add(m);
@@ -4829,6 +5024,201 @@ function smokeUpdate(dt){
     if(p.t<=0){ scene.remove(p.sp); p.sp.material.dispose(); SMOKE.splice(i,1); }
   }
 }
+/* ---- static ground decals ----
+   1200 m of road was one clean unbroken surface. This lays cracks, oil
+   stains, resurfacing patches and old tyre tracks over it, plus grime in the
+   lot and at the mosque forecourt.
+
+   Every mark of a given type shares one InstancedMesh, so the whole set costs
+   four draw calls no matter how many marks there are. The geometry is
+   pre-rotated flat, so each instance matrix is just translate + yaw + scale.
+   polygonOffset keeps them off the road surface without z-fighting, and they
+   sit below the dynamic skid marks at y=.03 so fresh rubber reads on top. */
+const DECAL_KINDS={};
+function decalTex(kind){
+  const cv=document.createElement('canvas'); cv.width=cv.height=128;
+  const g=cv.getContext('2d');
+  g.clearRect(0,0,128,128);
+  if(kind==='crack'){
+    /* a branching fracture: walk a main line, spawn shorter offshoots */
+    g.strokeStyle='rgba(18,17,16,.85)'; g.lineCap='round';
+    const walk=(x,y,ang,len,w,depth)=>{
+      g.lineWidth=w; g.beginPath(); g.moveTo(x,y);
+      let cx=x, cy=y, a=ang;
+      for(let i=0;i<len;i++){
+        a+=(Math.random()-.5)*.55; cx+=Math.cos(a)*4; cy+=Math.sin(a)*4;
+        g.lineTo(cx,cy);
+      }
+      g.stroke();
+      if(depth>0&&len>4){
+        walk(cx,cy,a+rand(.5,1.2),(len*.55)|0,Math.max(.6,w*.6),depth-1);
+        walk(cx,cy,a-rand(.5,1.2),(len*.5)|0, Math.max(.6,w*.6),depth-1);
+      }
+    };
+    walk(12,64,0,20,2.2,2);
+  }else if(kind==='oil'){
+    const r=g.createRadialGradient(64,64,4,64,64,58);
+    r.addColorStop(0,'rgba(12,11,14,.72)');
+    r.addColorStop(.55,'rgba(20,18,22,.34)');
+    r.addColorStop(1,'rgba(20,18,22,0)');
+    g.fillStyle=r; g.beginPath();
+    /* an irregular blob, not a perfect disc */
+    for(let i=0;i<=24;i++){
+      const a=i/24*Math.PI*2, rr=42+Math.sin(a*3.1)*9+Math.cos(a*5.3)*6;
+      i?g.lineTo(64+Math.cos(a)*rr,64+Math.sin(a)*rr):g.moveTo(64+Math.cos(a)*rr,64+Math.sin(a)*rr);
+    }
+    g.closePath(); g.fill();
+  }else if(kind==='patch'){
+    /* a resurfacing patch: darker rectangle with a ragged sealed edge */
+    g.fillStyle='rgba(38,36,34,.6)';
+    g.beginPath();
+    for(let i=0;i<=20;i++){
+      const t=i/20, a=t*Math.PI*2;
+      const rx=52+Math.sin(a*4)*5, ry=34+Math.cos(a*3)*5;
+      i?g.lineTo(64+Math.cos(a)*rx,64+Math.sin(a)*ry):g.moveTo(64+Math.cos(a)*rx,64+Math.sin(a)*ry);
+    }
+    g.closePath(); g.fill();
+    g.strokeStyle='rgba(16,15,14,.5)'; g.lineWidth=3; g.stroke();
+  }else{ /* track: two faded parallel bands */
+    for(const bx of [40,88]){
+      const lg=g.createLinearGradient(bx-11,0,bx+11,0);
+      lg.addColorStop(0,'rgba(26,24,22,0)');
+      lg.addColorStop(.5,'rgba(26,24,22,.42)');
+      lg.addColorStop(1,'rgba(26,24,22,0)');
+      g.fillStyle=lg; g.fillRect(bx-11,0,22,128);
+    }
+  }
+  const t=new THREE.CanvasTexture(cv);
+  t.colorSpace=THREE.SRGBColorSpace;
+  t.anisotropy=8;
+  return t;
+}
+function decalBuild(){
+  const geo=new THREE.PlaneGeometry(1,1); geo.rotateX(-Math.PI/2);
+  const spec=[
+    ['crack', .55],
+    ['oil',   .60],
+    ['patch', .48],
+    ['track', .40],
+  ];
+  for(const [kind,op] of spec){
+    DECAL_KINDS[kind]={
+      geo,
+      mat:new THREE.MeshBasicMaterial({map:decalTex(kind),transparent:true,opacity:op,
+        depthWrite:false,polygonOffset:true,polygonOffsetFactor:-3,polygonOffsetUnits:-3}),
+      mats:[],
+    };
+  }
+}
+function decalAdd(kind,x,z,size,yaw){
+  const d=DECAL_KINDS[kind]; if(!d)return;
+  const m=new THREE.Matrix4();
+  m.compose(new THREE.Vector3(x,.028,z),
+            new THREE.Quaternion().setFromEuler(new THREE.Euler(0,yaw===undefined?rand(0,Math.PI*2):yaw,0)),
+            new THREE.Vector3(size,1,size*rand(.7,1.4)));
+  d.mats.push(m);
+}
+function decalCommit(){
+  let n=0;
+  for(const k in DECAL_KINDS){
+    const d=DECAL_KINDS[k];
+    if(!d.mats.length)continue;
+    const im=new THREE.InstancedMesh(d.geo,d.mat,d.mats.length);
+    for(let i=0;i<d.mats.length;i++) im.setMatrixAt(i,d.mats[i]);
+    im.instanceMatrix.needsUpdate=true;
+    im.receiveShadow=false; im.castShadow=false;
+    /* one mesh spanning 1200 m: frustum-culling it as a unit would pop the
+       whole road's wear in and out, so leave it always submitted - it is a
+       single call either way */
+    im.frustumCulled=false;
+    im.renderOrder=1;
+    scene.add(im); n+=d.mats.length;
+  }
+  console.info('ground decals:',n,'marks in',Object.keys(DECAL_KINDS).length,'batches');
+}
+function decalScatter(){
+  decalBuild();
+  /* the road, all 1200 m of it */
+  for(let x=WORLD_X0+20; x<WORLD_X1-20; x+=rand(9,26)){
+    const lane=rand(33.2,38.8);
+    const r=Math.random();
+    if(r<.34)      decalAdd('crack', x, lane, rand(2.2,5.0));
+    else if(r<.56) decalAdd('patch', x, lane, rand(2.4,4.6));
+    else if(r<.78) decalAdd('track', x, lane, rand(3.0,6.5), rand(-.12,.12));
+    else           decalAdd('oil',   x, lane, rand(1.1,2.4));
+  }
+  /* heavier wear where cars actually stop and turn: the store lot */
+  for(let i=0;i<30;i++)
+    decalAdd(Math.random()<.45?'oil':'crack', rand(-22,22), rand(17,30), rand(1.0,3.0));
+  for(let i=0;i<10;i++)
+    decalAdd('track', rand(-20,20), rand(18,29), rand(2.6,5.0), rand(-.3,.3));
+  /* mosque forecourt */
+  for(let i=0;i<18;i++)
+    decalAdd(Math.random()<.5?'crack':'patch', MOSQUE_X+rand(-24,24), rand(15,31), rand(1.4,3.6));
+  /* fuel stop apron and the industrial yards leak */
+  for(let i=0;i<14;i++)
+    decalAdd('oil', -402+rand(-12,12), rand(24,30), rand(1.2,2.8));
+  decalCommit();
+}
+
+/* ---- ambient dust ----
+   A slow drift of motes so outdoor air is not perfectly empty. One Points
+   cloud of 260 sprites, recentred on the camera each frame, so it costs a
+   single draw call and never needs more particles to cover more ground. */
+let dustPts=null, dustVel=null;
+const DUST_N=260, DUST_BOX=46;
+function dustInit(){
+  if(dustPts)return;
+  const pos=new Float32Array(DUST_N*3);
+  dustVel=new Float32Array(DUST_N*3);
+  for(let i=0;i<DUST_N;i++){
+    pos[i*3]  =rand(-DUST_BOX,DUST_BOX);
+    pos[i*3+1]=rand(.4,9);
+    pos[i*3+2]=rand(-DUST_BOX,DUST_BOX);
+    dustVel[i*3]  =rand(-.32,.32);
+    dustVel[i*3+1]=rand(-.05,.09);
+    dustVel[i*3+2]=rand(-.32,.32);
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  const cv=document.createElement('canvas'); cv.width=cv.height=32;
+  const c=cv.getContext('2d');
+  const r=c.createRadialGradient(16,16,0,16,16,15);
+  r.addColorStop(0,'rgba(255,246,226,.9)'); r.addColorStop(1,'rgba(255,246,226,0)');
+  c.fillStyle=r; c.fillRect(0,0,32,32);
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace;
+  dustPts=new THREE.Points(g,new THREE.PointsMaterial({
+    map:t, size:.075, sizeAttenuation:true, transparent:true, opacity:.34,
+    depthWrite:false, blending:THREE.AdditiveBlending, fog:true }));
+  dustPts.frustumCulled=false;
+  scene.add(dustPts);
+}
+function dustUpdate(dt){
+  if(!dustPts)return;
+  /* indoors there is no wind and the motes would sit in the walls */
+  const want = (phase!=='inside'&&phase!=='menu');
+  if(dustPts.visible!==want) dustPts.visible=want;
+  if(!want)return;
+  const p=dustPts.geometry.attributes.position, a=p.array;
+  const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z;
+  for(let i=0;i<DUST_N;i++){
+    const j=i*3;
+    a[j]  +=dustVel[j]  *dt;
+    a[j+1]+=dustVel[j+1]*dt;
+    a[j+2]+=dustVel[j+2]*dt;
+    /* wrap around the camera so the same 260 motes cover wherever you are */
+    if(a[j]-cx> DUST_BOX) a[j]-=DUST_BOX*2; else if(a[j]-cx<-DUST_BOX) a[j]+=DUST_BOX*2;
+    if(a[j+2]-cz> DUST_BOX) a[j+2]-=DUST_BOX*2; else if(a[j+2]-cz<-DUST_BOX) a[j+2]+=DUST_BOX*2;
+    if(a[j+1]>cy+11) a[j+1]=cy-1.5; else if(a[j+1]<cy-2.5) a[j+1]=cy+9;
+  }
+  p.needsUpdate=true;
+}
+/* Built here rather than up with the rest of the world: DECAL_KINDS and
+   dustPts are declared just above, and calling from buildTown() would read
+   them in their temporal dead zone. */
+decalScatter();
+dustInit();
+
 let _skidT=0;
 function skidFX(dt){
   if(!townCar||carSkid<.22){ return; }
@@ -4848,14 +5238,23 @@ function skidFX(dt){
 
 /* impact sparks */
 const sparks=[];
+/* Every impact used to allocate 5 BoxGeometries + 5 materials for the sparks
+   and another geometry + material for the hole, and sparksUpdate only did
+   scene.remove - so a firefight leaked thousands of GPU buffers that were
+   never disposed. They are all identical, so share one of each. */
+const sparkGeo=new THREE.BoxGeometry(.02,.02,.02);
+const sparkMats=[new THREE.MeshBasicMaterial({color:0x888877}),
+                 new THREE.MeshBasicMaterial({color:0xcccccc})];
+const scorchGeo=new THREE.CircleGeometry(.03,6);
+const scorchMat=new THREE.MeshBasicMaterial({color:0x111111});
 function impactSpark(p,n){
   for(let i=0;i<5;i++){
-    const s=new THREE.Mesh(new THREE.BoxGeometry(.02,.02,.02), new THREE.MeshBasicMaterial({color:i%2?0xcccccc:0x888877}));
+    const s=new THREE.Mesh(sparkGeo, sparkMats[i&1]);
     s.position.copy(p);
     const v=n.clone().multiplyScalar(rand(1,3)).add(V3(rand(-1,1),rand(0,2),rand(-1,1)));
     sparks.push({m:s,v,t:rand(.2,.4)}); scene.add(s);
   }
-  const hole=new THREE.Mesh(new THREE.CircleGeometry(.03,6), new THREE.MeshBasicMaterial({color:0x111111}));
+  const hole=new THREE.Mesh(scorchGeo, scorchMat);
   hole.position.copy(p).add(n.clone().multiplyScalar(.005)); hole.lookAt(p.clone().add(n)); scene.add(hole);
   setTimeout(()=>scene.remove(hole),9000);
 }
@@ -5100,9 +5499,16 @@ function buildTownFolk(proto, clips, fit){
       const shirt=SHIRT[i%SHIRT.length], pant=PANT[(i*3)%PANT.length];
       const skinK=.74+((i*29)%9)/9*.5;
       for(const kid of [...m.children]) if(FOLK_STRIP.test(kid.name||'')) kid.removeFromParent();
+      /* Object3D.traverse caches l=children.length before it loops, so calling
+         removeFromParent() from inside the callback shortens the array under
+         it and children[i] comes back undefined - "Cannot read properties of
+         undefined (reading 'traverse')". That threw partway through the very
+         first NPC, so most of the town crowd was never built. Collect the
+         strays and detach them after the walk instead. */
+      const strip=[];
       m.traverse(o=>{
         if(!o.isMesh)return;
-        if(FOLK_STRIP.test(o.name||'')){ o.removeFromParent(); return; }
+        if(FOLK_STRIP.test(o.name||'')){ strip.push(o); return; }
         o.frustumCulled=true; o.castShadow=false; o.receiveShadow=false;
         const src=Array.isArray(o.material)?o.material:[o.material];
         o.material=src.map(mat=>{
@@ -5115,6 +5521,7 @@ function buildTownFolk(proto, clips, fit){
         });
         if(o.material.length===1)o.material=o.material[0];
       });
+      for(const dead of strip) dead.removeFromParent();
       const root=new THREE.Group();
       /* north pavement is z 40.1..42.6; the south verge sits below the road at z<32 */
       const z = side ? 41.4+rand(-.6,.6) : 30.6+rand(-.7,.7);
@@ -5160,7 +5567,7 @@ function hostilePlay(z,name,fade){
   next.fadeIn(fade===undefined?.18:fade).play();
   z.clipName=name;
 }
-new GLTFLoader().load('assets/hostile.glb',
+gltfLoad('assets/hostile.glb',
   attachHostileModel,
   undefined,
   ()=>console.info('assets/hostile.glb not reachable (file:// blocks it) - using block figures'));
@@ -5357,9 +5764,16 @@ const cinematicDeath=(z,dt)=>{
   /* Clamp to whichever region the body is ALREADY in. The old fixed
      z -14..14 was the store interior, so the first frame of every
      parking-lot kill snapped the corpse 5-15 m through the storefront. */
-  const cdIn = rp.z < 15.5;
-  rp.x=clamp(rp.x+cd.slide.x*dt, cdIn?-21:LC_LOT.minX, cdIn?21:LC_LOT.maxX);
-  rp.z=clamp(rp.z+cd.slide.z*dt, cdIn?-14:LC_LOT.minZ, cdIn?14:LC_LOT.maxZ);
+  /* These were the act-1 interior bounds as literals, so any hostile killed
+     inside the mosque was clamped to x in [-21,21] and snapped ~900 m east to
+     the supermarket. Mirror the act-aware interior extents setPhase uses, and
+     key the inside/outside test off the act's own lot edge. */
+  const cd_a2 = (mission.act===2);
+  const cdInMinX = ACT_OFF+(cd_a2?-24:-21), cdInMaxX = ACT_OFF+(cd_a2?24:21);
+  const cdInMinZ = cd_a2?-15:-14,           cdInMaxZ = cd_a2?12.4:15.2;
+  const cdIn = rp.z < LC_LOT.minZ;
+  rp.x=clamp(rp.x+cd.slide.x*dt, cdIn?cdInMinX:LC_LOT.minX, cdIn?cdInMaxX:LC_LOT.maxX);
+  rp.z=clamp(rp.z+cd.slide.z*dt, cdIn?cdInMinZ:LC_LOT.minZ, cdIn?cdInMaxZ:LC_LOT.maxZ);
   /* ease-out-back fall with overshoot bounce */
   const p=clamp(cd.t/.7,0,1), e=zv_eob(p);
   if(!cd.thud && p>.72){                       /* the moment the body lands */
@@ -5786,14 +6200,26 @@ function dropHeld(){
 
 /* Every melon that bursts is removed from the scene for good, so without this
    run 2 had no throwables at all and carts stayed wherever they landed. */
+/* Act-2 homes. Throwables spawn once at load with act-1 coordinates, so the
+   whole second half of the game had no carts, melons or axes - the axe is the
+   secondary weapon, so it was simply unobtainable after TOPS. These are points
+   inside the prayer hall and out in the courtyard, offset by ACT_OFF. */
+const THROW_SPOTS2=[[-16,10],[16,10],[-20,-6],[20,-6],[0,-13],[-11,6],[11,6],
+                    [-6,-9],[6,-9],[0,4],[-18,2],[18,2],[8,20],[-8,22],[13,24]];
 function throwablesReset(){
   dropHeld();
+  let ti2=0;
   for(const t of THROWABLES){
     if(t.state==='held'){ camera.remove(t.mesh); }
     if(!t.mesh.parent) scene.add(t.mesh);
     t.mesh.traverse(o=>o.layers.set(0));
     t.mesh.visible=true;
-    t.mesh.position.set(t.home.x,t.home.y,t.home.z);
+    if(mission.act===2){
+      const sp=THROW_SPOTS2[ti2++%THROW_SPOTS2.length];
+      t.mesh.position.set(ACT_OFF+sp[0], t.home.y, sp[1]);
+    }else{
+      t.mesh.position.set(t.home.x,t.home.y,t.home.z);
+    }
     t.mesh.rotation.set(0,rand(0,Math.PI*2),0);
     t.mesh.scale.setScalar(t.def.scale);
     t.vel.set(0,0,0); t.spin.set(0,0,0); t.life=0; t.state='ground';
@@ -5908,7 +6334,7 @@ function throwablesUpdate(dt,now){
     }
   }
 }
-new GLTFLoader().load('assets/throwables.glb', (gltf)=>{
+gltfLoad('assets/throwables.glb', (gltf)=>{
   for(const o of gltf.scene.children.slice()){
     throwProto[o.name]=o;
     /* the exporter renamed the joined cart, so alias whatever looks like one */
@@ -5927,7 +6353,7 @@ new GLTFLoader().load('assets/throwables.glb', (gltf)=>{
 
 /* The axe ships as its own file. It is the secondary weapon: fewer of them,
    scattered where you would actually find one, and lethal in one hit. */
-new GLTFLoader().load('assets/axe.glb', (gltf)=>{
+gltfLoad('assets/axe.glb', (gltf)=>{
   const src=gltf.scene;
   src.updateWorldMatrix(true,true);
   const b=new THREE.Box3().setFromObject(src);
@@ -6153,7 +6579,10 @@ function setPhase(p){
   const A=ACT_OFF, act2=(mission.act===2);
   if(p==='outside'){
     BOUNDS.minX=A+(act2?-25:-23); BOUNDS.maxX=A+(act2?25:23);
-    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?31:30.5;
+    /* act 2 parks on the street at z=34.5, outside the old 31 cap - the
+       player was yanked 3.5 m through the perimeter wall on arrival. Let the
+       forecourt be walkable so the walk in through the gate is real. */
+    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?37:30.5;
   } else {
     BOUNDS.minX=A+(act2?-24:-21); BOUNDS.maxX=A+(act2?24:21);
     BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?12.4:15.2;
@@ -6254,12 +6683,20 @@ function actTwoBegin(){
   setPhase('drive');
   survivorsReset&&survivorsReset();
   lotCrowdReset&&lotCrowdReset();
+  /* a cart still in hand across the transition left the player holding an
+     act-1 prop 900 m away and unable to fire */
+  throwablesReset&&throwablesReset();
   for(const z of zombies){ z.state='idle'; z.root.visible=false; z.__lot=false; ragReset(z); }
+  /* These carried ids drive2/clear2/rescue2/extract2, but every
+     setObjectiveState call in the game addresses the act-1 ids, so the whole
+     act-2 panel sat inert for the entire second half. Same ids, act-2 text. */
   setObjectives&&setObjectives([
-    {id:'drive2',text:'DRIVE WEST TO THE AL-SALAAM MOSQUE'},
-    {id:'clear2',text:'CLEAR THE COURTYARD'},
-    {id:'rescue2',text:'FIND 4 SURVIVORS IN THE PRAYER HALL'},
-    {id:'extract2',text:'WALK THEM OUT THROUGH THE GATE'}]);
+    {id:'drive',  text:'DRIVE WEST TO THE AL-SALAAM MOSQUE'},
+    {id:'park',   text:'PARK AT THE GATE'},
+    {id:'enter',  text:'GET INSIDE THE MOSQUE'},
+    {id:'clear',  text:'CLEAR EVERY THREAT'},
+    {id:'rescue', text:'FIND THE 4 SURVIVORS'},
+    {id:'extract',text:'WALK THEM OUT THROUGH THE GATE'}]);
   banner('NEW OBJECTIVE','AL-SALAAM MOSQUE \u2014 DRIVE WEST');
   Audio.waveSting();
 }
@@ -6838,13 +7275,45 @@ function netOnData(c,raw){
       const pl=NET.players[c.peer]; if(!pl)break;
       pl.x=d.p[0]; pl.y=d.p[1]; pl.z=d.p[2]; pl.yaw=d.y; pl.hp=d.hp; pl.dead=!!d.dead;
       pl.t=performance.now();
+      /* netRenderTick only moves an avatar when p0/p1 are present, and those
+         were written in netApplySnap, which returns early unless we are the
+         client. So the host had x/z but never the buffers, and every
+         team-mate's body sat at world origin for the whole match. Feed the
+         same buffers here. */
+      const tNow=performance.now()/1000, np={x:pl.x,y:pl.y,z:pl.z,yaw:pl.yaw};
+      pl.p0=pl.p1||np; pl.p1=np;
+      pl.t0=(pl.t1===undefined?tNow:pl.t1); pl.t1=tNow;
+      netAvatarFor(pl);
       break;
     }
     case 'hit': {                                 /* client -> host: I shot one */
       if(NET.mode!=='host')break;
       const z=zombies[d.i];
-      if(z&&z.state!=='idle'&&z.state!=='dead')
+      if(z&&z.state!=='idle'&&z.state!=='dead'){
+        /* hitZombie credits whoever is local, so on the host every client
+           kill was scored to the host and the shooter's HUD stayed at 0 kills
+           and 500 points for the whole match. Echo the outcome back. */
+        const wasDead=(z.state==='dead');
         hitZombie(z, d.dmg, V3(d.d[0],0,d.d[1]), V3(d.p[0],d.p[1],d.p[2]), !!d.h);
+        const killed=(!wasDead && z.state==='dead');
+        try{ c.send(JSON.stringify({t:'cred', h:!!d.h, k:killed, i:d.i|0})); }catch(e){}
+      }
+      break;
+    }
+    case 'cred': {                                /* host -> client: your shot landed */
+      if(NET.mode!=='client')break;
+      /* mirror exactly what hitZombie/killZombie award locally on the host */
+      addPoints(d.h?15:10,null);
+      if(d.k){
+        stats.kills++; if(d.h) stats.headshots++;
+        adren=1;
+        const base=d.h?90:55;
+        addPoints(base, d.h?'HEADSHOT +'+base:'+'+base, !!d.h);
+        showHitmarker(true);
+        const kz=zombies[d.i|0];
+        try{ if(kz&&kz.root) Audio.killGroan(kz.root.position); }catch(e){}
+        try{ SFX.kill.play(1); }catch(e){}
+      }
       break;
     }
     case 'start': {                               /* host -> client */
@@ -7529,6 +7998,10 @@ function survivorsUpdate(dt,now){
   }
   /* extraction */
   if(!surv_completeFired&&survivors.length===4&&
+     /* the game's own ALL CLEAR: set only once the wave is exhausted, nothing
+        is left alive and all four are following. Without it an act could be
+        completed during a lull while entries were still waiting to spawn. */
+     mission.extractAnnounced&&
      survivors.every(s=>s.state==='following')&&
      zombies.every(z=>z.state!=='chase')&&
      (()=>{const E=exitZone();
@@ -7984,6 +8457,10 @@ const breath_tick=()=>{
   if(!breath_ctx)return;
   if(breath_ctx.state==='suspended'){ breath_ctx.resume(); return; }
   const now=breath_ctx.currentTime;
+  /* After a long pause breath_nextT is far behind the clock, and every
+     skipped cycle got scheduled at now+.02 - so unpausing fired all of them
+     simultaneously. Drop the backlog rather than replaying it. */
+  if(breath_nextT<now) breath_nextT=now+.02;
   while(breath_nextT<now+.3){
     breath_nextT+=breath_scheduleCycle(Math.max(breath_nextT,now+.02));
   }
@@ -8676,13 +9153,18 @@ function resetRun(){
     ragReset(z);
   }
   zVariantInit&&zVariantInit();
+  /* setAct FIRST. survivorsReset places the four actors at the CURRENT act's
+     spots, so resetting before switching back to act 1 left them at the
+     mosque, 900 m outside the act-1 player clamp - round 2, and any
+     re-deploy from act 2, could never be completed. actTwoBegin already does
+     it in this order. */
+  mission.insideLeft=0; mission.spawnT=0; mission.extractAnnounced=false;
+  setAct(1);                       /* every run starts back at TOPS */
   lotCrowdReset&&lotCrowdReset();
   survivorsInit&&survivorsInit();   /* idempotent: builds the 4 actors once */
   survivorsReset&&survivorsReset();
   stats.kills=0; stats.headshots=0; stats.shotsFired=0; stats.shotsHit=0;
   points=500; runTime=0; adren=0;
-  mission.insideLeft=0; mission.spawnT=0; mission.extractAnnounced=false;
-  setAct(1);                       /* every run starts back at TOPS */
   document.getElementById('points-val').textContent=points;
   document.getElementById('wave-num').textContent='-';
   player.pos.set(0,1.7,12.5); player.vel.set(0,0,0);
@@ -8811,10 +9293,14 @@ function loop(){
     }
     townFolkUpdate&&townFolkUpdate(dt);
     throwablesUpdate&&throwablesUpdate(dt,now);
-    survivorsUpdate&&survivorsUpdate(dt,now);
+    /* survivorsUpdate can call missionComplete, and a client running it would
+       advance ITSELF into act 2 (or onto the win screen) while the host is
+       still playing - then get yanked back by the next snapshot. The host
+       owns mission state and broadcasts it via the snapshot's act field. */
+    if(NET.mode!=='client') survivorsUpdate&&survivorsUpdate(dt,now);
     survivorsHUD&&survivorsHUD();
     bloodUpdate(dt); poolsUpdate(dt); shellsUpdate(dt); sparksUpdate(dt); tracersUpdate(dt);
-    debrisUpdate(dt); smokeUpdate(dt); skidFX(dt);
+    debrisUpdate(dt); smokeUpdate(dt); skidFX(dt); dustUpdate(dt);
     cullUpdate(dt); managedLightsUpdate(dt);
     groanTimer-=dt;
     if(groanTimer<=0){ groanTimer=rand(2.5,6);
@@ -8836,7 +9322,10 @@ function loop(){
         tl.t=tl.state?rand(.4,3):rand(.04,.16);
       }
       const base=tl.base*(phase==='drive'||phase==='parking'||phase==='menu'?tk:1);
-      const target=tl.state?base:2;
+      /* this used to overwrite intensity unconditionally each frame, which
+         undid managedLightsUpdate's culling the instant it applied */
+      const managed=tl.managed;
+      const target=(managed&&!managed.on) ? 0 : (tl.state?base:2);
       tl.light.intensity=lerp(tl.light.intensity,target,clamp(dt*22,0,1));
       tl.mat.color.setScalar(clamp(tl.light.intensity/tl.base,.08,1.2)*.85+.1);
     }
@@ -8867,7 +9356,10 @@ function loop(){
       moon.target.updateMatrixWorld();
     }
   }
-  if(!playing) lobbyTick(dt);
+  /* !playing is also true on the win and death screens, so finishing a run
+     snapped the camera 900 m back to the lobby stage and popped the lobby
+     dolls into the world behind the card. */
+  if(!playing && phase!=='win' && phase!=='dead') lobbyTick(dt);
   netTick(dt,now);
   if(window.fxRender&&SETTINGS.fx&&!location.hash.includes('nfx')) fxRender(dt);
   else {
