@@ -2630,10 +2630,23 @@ function buildHighway(){
   const FAC=[[0x3e4448,14,9],[0x52483c,16,7],[0x454a50,13,11],
              [0x4a453e,18,6.5],[0x40464a,15,8.5],[0x50443a,12,10]]
     .map(([c,w,h])=>facadeMat(new THREE.Color(c).multiplyScalar(1.7),w,h));
-  const MAT_RIB =new THREE.MeshStandardMaterial({color:0x6d7176,roughness:.82,metalness:.25});
-  const MAT_WALL=new THREE.MeshStandardMaterial({color:0xa89b86,roughness:.96});
-  const MAT_ROOF=new THREE.MeshStandardMaterial({color:0x8a8177,roughness:.95});
-  const MAT_DOOR=new THREE.MeshStandardMaterial({color:0x5a5f63,roughness:.7,metalness:.35});
+  /* These three cover most of the surface area out here, and flat colour on a
+     40 m shed wall reads as untextured plastic. Each gets its own repeat, so
+     they need their own texture objects rather than the shared TEX entries.
+     wall.jpg is photographed dark (mean rgb 68,60,49) and needs the same
+     relevel the store exterior uses or it renders as a black slab. */
+  const MAT_RIB =new THREE.MeshStandardMaterial({color:0x9aa0a6,roughness:.7,metalness:.34,
+    map:surfaceTex('assets/tex/metal.jpg', 7, 2.2)});
+  const MAT_WALL=new THREE.MeshStandardMaterial({color:0xc6b69c,roughness:.95,
+    map       :surfaceTex('assets/tex/wall.jpg',   5, 1.4, true, {gain:1.5,lift:30}),
+    normalMap :surfaceTex('assets/tex/wall_n.jpg', 5, 1.4, false),
+    normalScale:new THREE.Vector2(.8,.8)});
+  const MAT_ROOF=new THREE.MeshStandardMaterial({color:0x9a8f82,roughness:.95,
+    map:surfaceTex('assets/tex/ground2_c.jpg', 3, 3),
+    normalMap:surfaceTex('assets/tex/ground2_n.jpg', 3, 3, false),
+    normalScale:new THREE.Vector2(.6,.6)});
+  const MAT_DOOR=new THREE.MeshStandardMaterial({color:0x6b7075,roughness:.62,metalness:.42,
+    map:surfaceTex('assets/tex/metal.jpg', 2, 1.4)});
   const MAT_POLE=new THREE.MeshStandardMaterial({color:0x6b5f4e,roughness:.98});
   const MAT_WIRE=new THREE.MeshBasicMaterial({color:0x1a1a1a});
   const MAT_TRUNK=new THREE.MeshStandardMaterial({color:0x6a5a44,roughness:1});
