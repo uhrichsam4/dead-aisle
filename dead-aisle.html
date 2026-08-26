@@ -1167,7 +1167,12 @@ const MAT = {
     g.strokeStyle='rgba(0,0,0,.25)'; g.strokeRect(i*64,j*64,64,64); }
   g.fillStyle='rgba(30,20,10,.18)';
   for(let k=0;k<300;k++){ g.fillRect(Math.random()*256, Math.random()*256, Math.random()*22, Math.random()*5); }
-  const f=new THREE.Mesh(new THREE.PlaneGeometry(44,30), new THREE.MeshStandardMaterial({
+  /* 44x30 is exactly the shell span, so the floor stopped at the wall
+     centrelines and the exterior grass showed as a green seam along the
+     inside of the front wall. Oversize it so it tucks under the walls; the
+     overhang sits at y=0, below the lot and grass planes outside, so it is
+     hidden from the other side. */
+  const f=new THREE.Mesh(new THREE.PlaneGeometry(47,33), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR,
     color:0x8d8b86, roughness:.72, metalness:.04 }));
   f.rotation.x=-Math.PI/2; f.receiveShadow=true; scene.add(f);
@@ -2438,6 +2443,105 @@ phLoad('map2','assets/map2.glb',(lib)=>{
   /* ---- mosque: iron railing along the courtyard frontage ---- */
   for(let i=-6;i<=6;i++)
     P('ironfence', MOSQUE_X+i*2.55, 32.4, {h:2.0, ry:0, cull:230});
+});
+
+/* ===================== EXTRA PROP PACK =====================
+   55 more Poly Haven CC0 props (scratchpad/packextra.py: decimated to 2.5k
+   tris each, textures capped at 256 since none of them is more than about a
+   metre across). Store clutter goes through floorSpot() so nothing lands in
+   an aisle or on a checkout, and everything outdoors is cull-registered. */
+phLoad('extra','assets/ph_extra.glb',(lib)=>{
+  const P=(n,x,z,o)=>phPlace('extra',n,x,z,o);
+  const spot=(minX,maxX,minZ,maxZ,pad)=>floorSpot(minX,maxX,minZ,maxZ,pad==null?.9:pad);
+
+  /* ---- supermarket: the things a shop floor actually has on it ---- */
+  const shopFloor=[
+    ['plastic_crate_01',.42],['plastic_crate_02',.42],['plastic_crate_03',.40],
+    ['plastic_container',.44],['industrial_pastic_container',.52],
+    ['metal_trash_can',.62],['plastic_broom',1.18],['dustpan',.30],
+    ['plastic_monobloc_chair_01',.82],['hand_truck',1.24],['cement_bag',.26],
+  ];
+  for(const [nm,h] of shopFloor){
+    for(let i=0;i<3;i++){
+      const s=spot(-19,19,-12.5,12.5);
+      if(s) P(nm, s[0], s[1], {h, solid:true, brk:'crate', cull:95});
+    }
+  }
+  /* stacked crates in the back corners, where a stockroom run would be */
+  for(let k=0;k<4;k++){
+    const cx=(k<2?-17.6:17.6), cz=-11.4+(k%2)*1.5;
+    for(let s2=0;s2<2+((Math.random()*2)|0);s2++)
+      P('plastic_crate_0'+(1+(s2%3)), cx, cz, {h:.42, y:s2*.42, ry:rand(-.3,.3), solid:!s2, cull:95});
+  }
+  /* cleaning aisle and checkout dressing */
+  for(let i=0;i<5;i++){
+    const s=spot(-19,19,-12,12);
+    if(s) P(['multi_cleaner_5_litre','multi_cleaner_bottle','drain_cleaner','lubricant_spray',
+             'plastic_bottle_gallon'][i], s[0], s[1], {h:[.30,.24,.24,.20,.30][i], cull:80});
+  }
+  for(const [cx,cz] of [[-13,10.4],[-4.5,10.4],[4.5,10.4],[13,10.4]]){
+    P('office_notepads', cx+rand(-.5,.5), cz, {h:.05, y:.96, cull:70});
+    if(Math.random()<.5) P('clipboard', cx+rand(-.6,.6), cz, {h:.32, y:.95, cull:70});
+  }
+  /* safety kit by the doors and the back wall */
+  P('korean_fire_extinguisher_01', -2.6, 12.9, {h:.62, cull:90});
+  P('korean_fire_extinguisher_01',  2.6, 12.9, {h:.62, cull:90});
+  P('medical_box', -20.0, -6.0, {h:.34, y:1.5, ry:Math.PI/2, cull:80});
+  for(const [fx,fz] of [[-20.2,4],[20.2,4],[0,-13.4]])
+    P('fire_alarm', fx, fz, {h:.22, y:2.3, cull:80});
+  /* a back office in the corner the shelving does not reach */
+  P('metal_office_desk', 16.4, -12.6, {h:.76, ry:.2, solid:true, cull:95});
+  P('metal_stool_01',    15.0, -12.0, {h:.68, solid:true, brk:'wood', cull:95});
+  /* extra groceries on the end caps */
+  for(let i=0;i<8;i++){
+    const s=spot(-18,18,-11,9, .7);
+    if(s) P(['long_life_food','lemon','hamburger_buns'][i%3], s[0], s[1],
+            {h:[.16,.07,.11][i%3], y:.02, cull:70});
+  }
+
+  /* ---- the lot and the town frontage ---- */
+  for(const [hx,hz] of [[-24,17.4],[24,17.4],[-46,44.2],[18,44.2]])
+    P('fire_hydrant', hx, hz, {h:.78, solid:true, cull:130});
+  for(const [bx,bz] of [[-30,43.4],[-8,43.4],[14,43.4],[36,43.4]]){
+    P('painted_wooden_bench', bx, bz, {h:.86, ry:Math.PI, solid:true, brk:'wood', cull:130});
+    if(Math.random()<.6) P('metal_trash_can', bx+2.6, bz, {h:.62, solid:true, cull:130});
+  }
+  for(const [px,pz] of [[-19,44.0],[27,44.0]])
+    P('planter_box_01', px, pz, {h:.52, solid:true, cull:130});
+  P('modular_street_seating', 5, 43.8, {h:.8, ry:Math.PI, solid:true, cull:130});
+  P('korean_public_payphone_01', -37, 43.6, {h:1.5, ry:Math.PI, solid:true, cull:130});
+  for(const [ax,az,ay] of [[-28,43.2,3.4],[10,43.2,5.1],[40,43.2,3.0]])
+    P('exterior_aircon_unit', ax, az, {h:.62, y:ay, ry:Math.PI, cull:130});
+
+  /* ---- industrial belt: yards, pipes, fuel stop ---- */
+  for(let x=-330; x>-575; x-=44){
+    P('modular_industrial_pipes_01', x+8, 44.6, {h:2.2, ry:rand(0,6.2), solid:true, cull:150});
+    P('old_tyre', x-6, rand(28.4,29.6), {h:.28, ry:rand(0,6.2), cull:130});
+    P('old_tyre', x-9, rand(28.4,29.6), {h:.28, y:.28, ry:rand(0,6.2), cull:130});
+    if(Math.random()<.7) P('old_military_crate', x-14, 28.8, {h:.62, ry:rand(0,6.2), solid:true, brk:'crate', cull:150});
+    if(Math.random()<.6) P('cement_bag', x+16, 44.2, {h:.26, ry:rand(0,6.2), cull:130});
+    if(Math.random()<.5) P('industrial_storage_cart', x+22, 44.0, {h:1.0, ry:rand(0,6.2), solid:true, cull:150});
+  }
+  for(const [jx,jz] of [[-397,25.4],[-399.5,25.4],[-406,25.4]])
+    P(['metal_jerrycan','metal_jerrycan_green','plastic_jerrycan'][(jx|0)%3], jx, jz, {h:.42, cull:130});
+  P('ladder_sectioned_01', -412, 26.2, {h:2.4, ry:.3, cull:150});
+  P('metal_tool_chest',    -415, 26.6, {h:.9, solid:true, cull:150});
+  P('metal_toolbox',       -418, 26.4, {h:.28, cull:130});
+  P('compost_bags',        -352, 44.4, {h:.5, cull:130});
+  for(let x=-336; x>-570; x-=88)
+    P('modular_chainlink_fence', x, 27.2, {h:2.0, cull:150});
+
+  /* ---- mosque ---- */
+  const MX=MOSQUE_X;
+  for(const [ox,oz] of [[-6.5,15.5],[6.5,15.5],[-6.5,28],[6.5,28]])
+    P('planter_pot_clay', MX+ox, oz, {h:.66, solid:true, brk:'pottery', cull:150});
+  for(let i=0;i<4;i++) P('jug_01',  MX-17+i*1.9, 2.4, {h:.32, brk:'pottery', cull:120});
+  for(let i=0;i<3;i++) P('metal_jug', MX+15+i*1.6, 2.4, {h:.30, cull:120});
+  for(let i=0;i<4;i++) P('painted_wooden_stool', MX+7.5+(i%2)*2.4, 5.0+((i/2)|0)*2.2,
+                         {h:.5, solid:true, brk:'wood', brkScale:.5, cull:130});
+  for(const cz of [-6,-12]) P('lantern_chandelier_01', MX, cz, {h:1.3, y:6.4, cull:150});
+  P('ornate_mirror_01', MX-22.6, -6, {h:1.4, y:1.9, ry:Math.PI/2, cull:130});
+  P('korean_fire_extinguisher_01', MX+3.2, 12.4, {h:.62, cull:130});
 });
 
 /* ===================== STREET / FACADES =====================
