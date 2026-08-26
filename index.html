@@ -109,6 +109,25 @@
     cursor:pointer; transition:all .15s; box-shadow:0 6px 20px rgba(246,212,52,.22); }
   #btn-play:hover { background:#ffe75c; transform:translateY(-1px); }
   #btn-play:disabled { background:#4a4a42; color:#8b8b80; cursor:default; box-shadow:none; transform:none; }
+  #loadbar { position:relative; margin-top:8px; height:14px; font:600 10px/14px ui-monospace,monospace;
+             letter-spacing:.09em; color:#8b8b80; text-align:center; transition:opacity .5s; }
+  #loadbar i { position:absolute; left:0; bottom:0; height:2px; width:0%; background:#f6d434;
+               transition:width .25s ease-out; }
+  #loadbar.done { opacity:0; pointer-events:none; }
+  #lobby-skins { position:absolute; left:50%; transform:translateX(-50%); bottom:128px;
+                 width:min(760px,88vw); text-align:center; }
+  #lobby-skins h3 { margin:0 0 7px; font:700 10px/1 ui-monospace,monospace;
+                    letter-spacing:.22em; color:#8b8b80; }
+  #skin-row { display:flex; gap:7px; justify-content:center; flex-wrap:wrap; }
+  .skin-card { display:flex; flex-direction:column; align-items:center; gap:5px;
+    width:74px; padding:7px 4px 6px; cursor:pointer;
+    background:rgba(16,18,20,.72); border:1px solid #2c3036; border-radius:7px;
+    color:#8b8b80; font:700 9px/1 ui-monospace,monospace; letter-spacing:.08em;
+    transition:border-color .15s, transform .15s, color .15s; }
+  .skin-card i { width:30px; height:30px; border-radius:50%; display:block;
+                 box-shadow:inset 0 -6px 10px rgba(0,0,0,.45); }
+  .skin-card:hover { border-color:#4a5058; transform:translateY(-2px); color:#cfcfc4; }
+  .skin-card.on { border-color:#f6d434; color:#f6d434; }
 
   #lobby-party { position:absolute; right:26px; bottom:30px; width:308px;
     background:rgba(9,12,17,.85); border:1px solid rgba(255,255,255,.10); border-radius:10px; padding:14px 16px; }
@@ -141,7 +160,7 @@
   .slot.filled { border-color:rgba(246,212,52,.45); }
   .slot.filled .dot { background:linear-gradient(135deg,#c8352b,#6a1a14); color:#fff; }
   .slot.filled .nm { color:#d6d3c6; }
-  #lobby-hint { position:absolute; left:50%; transform:translateX(-50%); bottom:132px;
+  #lobby-hint { position:absolute; left:50%; transform:translateX(-50%); bottom:224px;
     color:#6f7565; font-size:10px; letter-spacing:3px; }
   /* a client's run starts from a network message, not a click, and browsers
      refuse pointer lock without a user gesture - so ask for one */
@@ -455,7 +474,10 @@
       <div class="modesub">PARK AT TOPS &middot; CLEAR THE STORE &middot; GET ALL 4 SURVIVORS OUT</div>
     </div>
     <button id="btn-play">PLAY</button>
+    <div id="loadbar"><span id="loadbar-txt">LOADING WORLD</span><i id="loadbar-fill"></i></div>
   </div>
+
+  <div id="lobby-skins"><h3>OUTFIT</h3></div>
 
   <div id="lobby-party">
     <h3>PARTY</h3>
@@ -517,6 +539,94 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ---- asset load queue ----
+   The module asks for 12 GLBs totalling ~64 MB the moment it runs. Chrome
+   allows 6 connections per host; under that much contention some loads stall
+   with headers received and a body that never arrives, and GLTFLoader then
+   calls NEITHER onLoad nor onError - that asset is silently missing for the
+   whole session. Which one loses the race varies per run, which is why the
+   shelves were sometimes unstocked, the street pack sometimes absent and the
+   extra props sometimes gone. Loaded one at a time in isolation every file
+   parses in under 100 ms, so the files were never the problem.
+
+   Cap how many are in flight, and put a watchdog on each so a stalled body
+   cannot hold a slot for ever and wedge the queue behind it.
+   Signature matches GLTFLoader.load(url,onLoad,onProgress,onError) so call
+   sites are unchanged apart from the name. */
+const GLTF_MAX=3, GLTF_TIMEOUT=45000;
+let _gltfActive=0, _gltfSeen=0, _gltfDone=0, _gltfIdleT=null;
+const _gltfQ=[];
+function gltfLoad(url,onLoad,onProgress,onError){
+  _gltfSeen++;
+  _gltfQ.push({url,onLoad,onError,tries:0});
+  _gltfProgress();
+  _gltfPump();
+}
+/* Assets are enqueued over time - some chain off others - so the total is not
+   known up front and the readout shows done/seen-so-far. It hides itself once
+   the queue has been empty for a moment rather than at a fixed count. */
+function _gltfProgress(){
+  const el=document.getElementById('loadbar');
+  if(!el)return;
+  const txt=document.getElementById('loadbar-txt'), fill=document.getElementById('loadbar-fill');
+  const pct=_gltfSeen? Math.round(_gltfDone/_gltfSeen*100):0;
+  if(txt) txt.textContent='LOADING WORLD  '+_gltfDone+'/'+_gltfSeen;
+  if(fill) fill.style.width=pct+'%';
+  clearTimeout(_gltfIdleT);
+  if(!_gltfActive && !_gltfQ.length){
+    _gltfIdleT=setTimeout(()=>{
+      if(!_gltfActive && !_gltfQ.length){
+        if(txt) txt.textContent='WORLD READY';
+        el.classList.add('done');
+      }
+    }, 900);
+  }else{
+    el.classList.remove('done');
+  }
+}
+function _gltfPump(){
+  while(_gltfActive<GLTF_MAX && _gltfQ.length) _gltfStart(_gltfQ.shift());
+}
+/* so a stuck load can be identified from the console instead of guessed at */
+window.__assets=()=>({active:_gltfActive, seen:_gltfSeen, done:_gltfDone,
+                      queued:_gltfQ.map(j=>j.url)});
+function _gltfStart(j){
+  _gltfActive++;
+  let settled=false;
+  const release=()=>{ settled=true; clearTimeout(j.guard); _gltfActive--; };
+  const finish=(fn,arg)=>{
+    if(settled)return;
+    release(); _gltfDone++;
+    /* a throw in a handler must not leak the slot, or the queue stalls */
+    /* the stack matters: a handler that throws leaves that asset's content
+       missing for the session, and the message alone does not say where */
+    try{ fn&&fn(arg); }
+    catch(e){ console.warn('asset handler failed',j.url,(e&&e.stack)||e); }
+    _gltfProgress(); _gltfPump();
+  };
+  /* Watch for a STALL, not for elapsed time: a big file on a slow link, or a
+     slow texture decode, is not a failure. Every progress event rearms the
+     timer, so it only fires when nothing has arrived for GLTF_TIMEOUT. */
+  const arm=()=>{
+    clearTimeout(j.guard);
+    j.guard=setTimeout(onStall, GLTF_TIMEOUT);
+  };
+  const onStall=()=>{
+    if(settled)return;
+    release();
+    if(j.tries<1){ j.tries++; console.warn('asset stalled, retrying:',j.url); _gltfQ.push(j); }
+    else{ console.warn('asset gave up after retry:',j.url); _gltfDone++;
+          try{ j.onError&&j.onError(new Error('timeout')); }catch(e){} }
+    _gltfProgress(); _gltfPump();
+  };
+  arm();
+  new GLTFLoader().load(j.url,
+    (g)=>finish(j.onLoad,g),
+    ()=>{ if(!settled) arm(); },
+    (e)=>finish(j.onError,e));
+}
+
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 window.onerror = (m,s,l,c)=>{ document.getElementById('err').textContent = `ERR ${m} @${l}:${c}`; };
@@ -533,6 +643,12 @@ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+/* Every renderer.render() rebuilds the shadow map. There are two scene passes
+   per frame - the world, then the view model through its own camera - so the
+   map was being rebuilt TWICE for one frame's worth of shadows, and the view
+   model's pass does not even light the world. Drive it manually: mark it dirty
+   once, before the world pass. */
+renderer.shadowMap.autoUpdate = false;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -584,19 +700,32 @@ function settingsApply(){
        the browser downsample. Hard-capped at 4x so a slider drag cannot ask
        for a buffer the GPU refuses to allocate. */
     renderer.setPixelRatio(Math.min(Math.min(devicePixelRatio,2)*(SETTINGS.res/100), 4));
+    /* The scene renders into the postfx target, not straight to the canvas.
+       fxResize was only wired to the window resize event, so moving the
+       quality slider changed the canvas and left the target at its old size -
+       the setting did nothing to the actual render resolution. Harmless
+       before fxInit, hence the guard. */
+    try{ window.fxResize&&window.fxResize(); }catch(e){}
     scene.traverse(o=>{ if(o.isMesh&&o.material){ const m=[].concat(o.material); m.forEach(x=>{ if(x)x.needsUpdate=true; }); } });
   }catch(e){}
-  try{ Audio.setVolume&&Audio.setVolume(SETTINGS.master/100); }catch(e){}
-  try{ parkSong.volume=Math.min(parkSong.volume, SETTINGS.music/100); }catch(e){}
-  try{ radioAudio.volume=SETTINGS.music/100; }catch(e){}
-  try{ SFX.setVolumeScale&&SFX.setVolumeScale(SETTINGS.sfx/100); }catch(e){}
-  try{ HV.setVolumeScale&&HV.setVolumeScale(SETTINGS.sfx/100); }catch(e){}
-  try{ Steps.setVolumeScale&&Steps.setVolumeScale(SETTINGS.sfx/100); }catch(e){}
+  /* MASTER used to reach only the procedural WebAudio bus, so gunshots,
+     hostile voices, footsteps and music ignored it entirely. Fold it into
+     every channel instead of leaving it on one. */
+  const volM=SETTINGS.master/100, volS=(SETTINGS.sfx/100)*volM, volMus=(SETTINGS.music/100)*volM;
+  try{ Audio.setVolume&&Audio.setVolume(volM); }catch(e){}
+  /* Math.min against the LIVE volume latched: turning the slider down pinned
+     the track low and turning it back up could never restore it. Scale the
+     fade's own target instead, which is what radioAudio already does. */
+  try{ parkSong.volume=(parkSongTarget||0)*(SETTINGS.music/100); }catch(e){}
+  try{ radioAudio.volume=volMus; }catch(e){}
+  try{ SFX.setVolumeScale&&SFX.setVolumeScale(volS); }catch(e){}
+  try{ HV.setVolumeScale&&HV.setVolumeScale(volS); }catch(e){}
+  try{ Steps.setVolumeScale&&Steps.setVolumeScale(volS); }catch(e){}
   settingsSave();
 }
 window.__settings=SETTINGS;
 
-const camera = new THREE.PerspectiveCamera(88, innerWidth/innerHeight, 0.05, 320);
+const camera = new THREE.PerspectiveCamera(88, innerWidth/innerHeight, 0.05, 230);
 camera.rotation.order = 'YXZ';
 
 /* The world runs at a GoPro-wide 88 deg, which makes anything held near the
@@ -678,7 +807,7 @@ addEventListener('resize', ()=>{
     return;
   }
 
-  const FX_RES_SCALE = 1;
+  let FX_RES_SCALE = 1;   /* driven by the adaptive-resolution controller */
 
   const VERT = `
     varying vec2 vUv;
@@ -859,6 +988,7 @@ addEventListener('resize', ()=>{
     u.exposure.value = renderer.toneMappingExposure;
 
     /* PASS 1: scene -> RT (linear HDR, no tonemap/OETF per r160 RT rules) */
+    renderer.shadowMap.needsUpdate = true;      /* exactly one rebuild a frame */
     renderer.setRenderTarget(rt);
     renderer.render(scene, camera);
     /* PASS 1b: view model over the top, own narrower FOV, fresh depth */
@@ -901,9 +1031,19 @@ addEventListener('resize', ()=>{
              vignette: look.vignette, grain: look.grain, flicker: look.flicker };
   }
 
+  /* Dynamic resolution. Only the offscreen scene buffer shrinks - pass 2
+     still presents at full drawing-buffer size, so the HUD and the final
+     image stay sharp while the shaded pixels get cheaper. */
+  function fxSetResScale(s){
+    const v = Math.max(0.45, Math.min(1, s || 1));
+    if (Math.abs(v - FX_RES_SCALE) < 0.001) return FX_RES_SCALE;
+    FX_RES_SCALE = v; fxResize();
+    return FX_RES_SCALE;
+  }
+
   if (typeof addEventListener === 'function') addEventListener('resize', fxResize);
 
-  Object.assign(window, { fxInit, fxRender, fxResize, fxSetLook, __fxDebug:()=>({rt}) });
+  Object.assign(window, { fxInit, fxRender, fxResize, fxSetLook, fxSetResScale, __fxDebug:()=>({rt}) });
   window.__fxMat=()=>quadMat;
   fxInit();
 })();
@@ -954,7 +1094,10 @@ function makeTube(x,z,on=true){
     g.add(tube);
     const pt = new THREE.PointLight(0xcfe8d8, 44, 22, 1.7);
     pt.position.y=-.4; g.add(pt);
-    tubeLights.push({mat:tubeMat, light:pt, base:44, t:rand(0,10), state:1});
+    /* hand the flicker entry its MANAGED_LIGHTS record so it can honour the
+       distance cull instead of writing over it every frame */
+    tubeLights.push({mat:tubeMat, light:pt, base:44, t:rand(0,10), state:1,
+                     managed:lightRegister(pt,70)&&MANAGED_LIGHTS[MANAGED_LIGHTS.length-1]});
   } else {
     const tube = new THREE.Mesh(new THREE.BoxGeometry(2.2,.05,.2),
       new THREE.MeshStandardMaterial({color:0x2c302c, roughness:.9}));
@@ -971,6 +1114,60 @@ emergency.position.set(0,3.6,0); scene.add(emergency);
    Supermarket hall: 44 x 30 m, shelf rows, checkout front, freezer back */
 const colliders = []; // {minX,maxX,minZ,maxZ}
 const worldHits = []; // solid meshes bullets should stop on
+
+/* ===================== DISTANCE CULLING =====================
+   The scene carries ~6000 meshes. three.js frustum-tests every one of them
+   every frame even when the whole room is 900 m away, so the cost is paid
+   before a single triangle is drawn. Registering a GROUP lets one visibility
+   flag skip its entire subtree. */
+const CULL=[];
+function cullRegister(obj, cx, cz, radius){
+  if(!obj)return obj;
+  CULL.push({obj, cx, cz, r:radius});
+  return obj;
+}
+let _cullT=0;
+function cullUpdate(dt){
+  _cullT-=dt; if(_cullT>0)return;
+  _cullT=.2;                                   /* 5 Hz is plenty for this */
+  const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
+  const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  for(const c of CULL){
+    const d=Math.hypot(px-c.cx, pz-c.cz);
+    const on=d<c.r;
+    if(c.obj.visible!==on) c.obj.visible=on;
+  }
+}
+
+/* ---- point lights are per-fragment on every lit material in range; keep
+   only the handful near the player switched on ---- */
+const MANAGED_LIGHTS=[];
+function lightRegister(l,radius){
+  if(!l) return l;
+  /* l.position is local, and the store tubes hang off groups, so the distance
+     test was comparing the player's world position against a local offset and
+     effectively never culled them. None of these lights move, so resolve the
+     world position once, here. */
+  l.updateWorldMatrix(true,false);
+  const w=l.getWorldPosition(new THREE.Vector3());
+  MANAGED_LIGHTS.push({l, base:l.intensity, r:radius||40, wx:w.x, wz:w.z, on:true});
+  return l;
+}
+let _lightT=0;
+function managedLightsUpdate(dt){
+  _lightT-=dt; if(_lightT>0)return;
+  _lightT=.25;
+  const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
+  const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  for(const m of MANAGED_LIGHTS){
+    const d=Math.hypot(px-m.wx, pz-m.wz);
+    const on=d<m.r;
+    m.on=on;                       /* the tube flicker loop reads this */
+    if(on && m.l.intensity===0) m.l.intensity=m.base;
+    else if(!on && m.l.intensity!==0) m.l.intensity=0;
+  }
+}
+
 
 /* --- breakables --- */
 const DEBRIS=[];
@@ -992,9 +1189,16 @@ let lightMix = 1;
 function addBox(w,h,d,x,y,z, mat, rotY=0, collide=true){
   const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat);
   m.position.set(x,y,z); m.rotation.y=rotY;
-  m.castShadow=true; m.receiveShadow=true;
+  /* the shadow map re-draws every caster, so only geometry big enough to
+     throw a shadow you would actually notice earns the second pass */
+  m.castShadow = Math.max(w,h,d) >= 1.6;
+  m.receiveShadow=true;
   scene.add(m);
-  if(collide && rotY===0){
+  /* collide==='solid': stop bullets but add no AABB. The shell used to pass
+     plain false, which skipped worldHits too - so rounds went straight
+     through the supermarket's walls and ceiling and hit the town outside.
+     Movement there is handled by the BOUNDS clamp, not by colliders. */
+  if(collide && collide!=='solid' && rotY===0){
     const col={minX:x-w/2,maxX:x+w/2,minZ:z-d/2,maxZ:z+d/2,h};
     colliders.push(col);
     m.userData.collider=col;   /* so a mesh that is later retired can drop it */
@@ -1019,6 +1223,23 @@ function retireMesh(m){
 const WORLD_X0=-1030, WORLD_X1=170;
 const WORLD_CX=(WORLD_X0+WORLD_X1)/2;
 const MOSQUE_X=-900;
+/* The mosque was authored at roughly 2.4x life size: a 50 x 29 m prayer hall
+   under a 12 m ceiling, a 23 m dome and 26 m minarets. Beside a 1.7 m player
+   that reads as a cathedral, not the neighbourhood mosque it is meant to be.
+   0.46 brings it to a 23 x 13 m hall with a 5.5 m ceiling, a 3.2 m corridor,
+   a 2.1 m courtyard wall and 12 m minarets.
+
+   Scaling alone would pull the courtyard 17 m back off the road, so the group
+   is also offset in z to pin its frontage at z=32 where the street is. Every
+   table of mosque-local coordinates therefore goes through mqz()/mqo(). */
+const MQ_S=0.46;
+const MQ_Z=32*(1-MQ_S);            /* keeps the courtyard wall on the road */
+const mqo=(x)=>x*MQ_S;             /* local x -> offset from MOSQUE_X/ACT_OFF */
+const mqx=(x)=>MOSQUE_X+x*MQ_S;    /* local x -> world x */
+const mqz=(z)=>z*MQ_S+MQ_Z;        /* local z -> world z */
+/* exposed so probes and tools can address the mosque in its own local
+   coordinates instead of hardcoding post-scale world numbers */
+window.__mq={S:MQ_S, Z:MQ_Z, o:mqo, x:mqx, z:mqz};
 
 /* ACT 1 is TOPS at x=0; ACT 2 is the mosque 900 m west. Rather than
    duplicate every bound, spawn table and nav clamp, the whole act is shifted
@@ -1103,29 +1324,40 @@ const MAT = {
     g.strokeStyle='rgba(0,0,0,.25)'; g.strokeRect(i*64,j*64,64,64); }
   g.fillStyle='rgba(30,20,10,.18)';
   for(let k=0;k<300;k++){ g.fillRect(Math.random()*256, Math.random()*256, Math.random()*22, Math.random()*5); }
-  const f=new THREE.Mesh(new THREE.PlaneGeometry(44,30), new THREE.MeshStandardMaterial({
+  /* 44x30 is exactly the shell span, so the floor stopped at the wall
+     centrelines and the exterior grass showed as a green seam along the
+     inside of the front wall. Oversize it so it tucks under the walls; the
+     overhang sits at y=0, below the lot and grass planes outside, so it is
+     hidden from the other side. */
+  const f=new THREE.Mesh(new THREE.PlaneGeometry(47,33), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR,
     color:0x8d8b86, roughness:.72, metalness:.04 }));
-  f.rotation.x=-Math.PI/2; f.receiveShadow=true; scene.add(f);
+  f.rotation.x=-Math.PI/2; f.receiveShadow=true;
+  /* Oversizing this to tuck under the walls put it in the same plane as the
+     1240x46 town ground, and coplanar surfaces z-fight - grass flickered
+     through the shop floor along the front wall. 6 mm down is invisible
+     indoors and lets the ground win everywhere outside. */
+  f.position.y=-0.006;
+  scene.add(f);
 })();
 
 /* ceiling */
-addBox(44,.3,30, 0,4.5,0, MAT.ceil, 0,false);
+addBox(44,.3,30, 0,4.5,0, MAT.ceil, 0,'solid');
 
 /* perimeter walls */
-addBox(.4,5,30,-22,2.5,0,MAT.wall,0,false);
-addBox(.4,5,30, 22,2.5,0,MAT.wall,0,false);
-addBox(44,5,.4, 0,2.5,-15,MAT.wall,0,false);
+addBox(.4,5,30,-22,2.5,0,MAT.wall,0,'solid');
+addBox(.4,5,30, 22,2.5,0,MAT.wall,0,'solid');
+addBox(44,5,.4, 0,2.5,-15,MAT.wall,0,'solid');
 /* front wall with CENTER DOOR GAP x -2..2 */
-addBox(20,5,.4,-12,2.5,15,MAT.wallIn,0,false);
-addBox(20,5,.4,12,2.5,15,MAT.wallIn,0,false);
-addBox(4.6,1.6,.45,0,4.2,15,MAT.wallIn,0,false);
+addBox(20,5,.4,-12,2.5,15,MAT.wallIn,0,'solid');
+addBox(20,5,.4,12,2.5,15,MAT.wallIn,0,'solid');
+addBox(4.6,1.6,.45,0,4.2,15,MAT.wallIn,0,'solid');
 for(const dx of[-2.1,2.1]) addBox(.25,3.4,.5,dx,1.7,15,MAT.metalD);
 for(const wx of [-16,-8,0,8,16]){
   /* wx=0 is the ENTRANCE. Building the window frame there put piers at
      x=-1.8/+1.8 and a 5 m sill across the floor, bricking up the doorway. */
   if(wx!==0){
-    addBox(5,1.2,.45, wx,4.4,15, MAT.wallIn,0,false);          // header
+    addBox(5,1.2,.45, wx,4.4,15, MAT.wallIn,0,'solid');          // header
     addBox(1.4,3.8,.45, wx-1.8,1.9,15, MAT.wallIn,0,false);     // pier
     addBox(1.4,3.8,.45, wx+1.8,1.9,15, MAT.wallIn,0,false);
     addBox(5,.5,.45, wx,.25,15, MAT.wallIn,0,false);
@@ -1268,6 +1500,8 @@ function makeShelfRow(z){
   return grp;
 }
 const shelfRows=[makeShelfRow(-8.2), makeShelfRow(-2.9), makeShelfRow(2.9), makeShelfRow(8.2)];
+/* the store's stock is ~1000 tiny meshes; skip the lot unless you are there */
+for(const r of shelfRows) cullRegister(r, 0, r.position.z, 70);
 /* shelf tiers of the props.glb gondola (2.92 x 2.17 x 0.89) and how far its
    shelf face stands off the row spine. The stock is placed against these. */
 const SHELF_TIERS=[.38,.95,1.52];
@@ -1280,9 +1514,56 @@ const WALL_TIERS=[.30,.78,1.26,1.74];
 let WALL_FACE_Z=.10;
 window.__wallFace=v=>{ WALL_FACE_Z=v; };
 let SHELF_ITEMS=null;
+
+/* ---- shelf stock instancing ----
+   The stock used to be one cloned object per item: ~440 in the gondola rows
+   plus ~590 across the wall units, each its own draw call for a thing a few
+   centimetres across. They are all copies of 24 source objects, so batch them
+   by source into InstancedMesh instead - same pixels, ~24 calls instead of
+   ~1030. Instances are parented to the row/unit they sit on, so the existing
+   distance culling still applies to them. */
+const _instTmp=new THREE.Matrix4(), _instInv=new THREE.Matrix4(), _instLocal=new THREE.Matrix4();
+/* Bucketing per shelf was a mistake: 28 wall units x ~21 source objects gave
+   437 batches holding barely one instance each, which costs MORE than the
+   plain meshes it replaced. Stock is static, so bake the placements into
+   world space and bucket by source across the whole store - ~21 batches for
+   all 700 wall items instead of 437. */
+function stockWorld(parent, local){
+  parent.updateMatrixWorld(true);
+  return new THREE.Matrix4().multiplyMatrices(parent.matrixWorld, local);
+}
+function instanceStock(src, mats, parent){
+  if(!src||!mats.length)return 0;
+  src.updateWorldMatrix(true,true);
+  _instInv.copy(src.matrixWorld).invert();
+  let made=0;
+  src.traverse(m=>{
+    if(!m.isMesh||!m.geometry)return;
+    /* a source may be a Group of sub-meshes; each keeps its offset from the
+       source root so the instanced copy is assembled the same way */
+    _instLocal.multiplyMatrices(_instInv, m.matrixWorld);
+    const im=new THREE.InstancedMesh(m.geometry, m.material, mats.length);
+    for(let i=0;i<mats.length;i++){
+      _instTmp.multiplyMatrices(mats[i], _instLocal);
+      im.setMatrixAt(i, _instTmp);
+    }
+    im.instanceMatrix.needsUpdate=true;
+    im.castShadow=false; im.receiveShadow=true; im.frustumCulled=true;
+    parent.add(im); made++;
+  });
+  return made;
+}
+/* position + Y rotation + uniform scale -> matrix, the only transform stock uses */
+const _instQ=new THREE.Quaternion(), _instE=new THREE.Euler(), _instV=new THREE.Vector3();
+function stockMatrix(x,y,z,ry,sc){
+  _instE.set(0,ry,0); _instQ.setFromEuler(_instE); _instV.set(sc,sc,sc);
+  return new THREE.Matrix4().compose(new THREE.Vector3(x,y,z), _instQ, _instV);
+}
+
 function stockWallUnits(){
   if(!SHELF_ITEMS||!SHELF_ITEMS.length||!WALL_UNITS.length)return;
-  let n=0;
+  let n=0, batches=0;
+  const wallMats=new Map();
   for(const u of WALL_UNITS){
     if(u.userData.stocked)continue;
     u.userData.stocked=true;
@@ -1290,18 +1571,20 @@ function stockWallUnits(){
       if(Math.random()<.10)continue;                 /* the odd bare shelf */
       let x=-1.05;
       while(x<1.0){
-        const src=SHELF_ITEMS[(Math.random()*SHELF_ITEMS.length)|0];
-        const it=src.clone(true);
-        it.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; o.frustumCulled=true; } });
-        it.scale.setScalar((src.userData.shelfScale||1)*rand(1.4,2.1));
-        it.position.set(x, ty, WALL_FACE_Z+rand(-.03,.03));
-        it.rotation.y=rand(0,Math.PI*2);
-        u.add(it); n++;
+        const si=(Math.random()*SHELF_ITEMS.length)|0;
+        const src=SHELF_ITEMS[si];
+        let bucket=wallMats.get(si);
+        if(!bucket){ bucket=[]; wallMats.set(si,bucket); }
+        bucket.push(stockWorld(u, stockMatrix(x, ty, WALL_FACE_Z+rand(-.03,.03),
+          rand(0,Math.PI*2), (src.userData.shelfScale||1)*rand(1.4,2.1))));
+        n++;
         x+=rand(.24,.42);
       }
     }
   }
-  console.info('wall shelving stocked:',n,'items across',WALL_UNITS.length,'units');
+  for(const [si,mats] of wallMats) batches+=instanceStock(SHELF_ITEMS[si], mats, scene);
+  console.info('wall shelving stocked:',n,'items across',WALL_UNITS.length,
+               'units in',batches,'instanced batches');
 }
 
 /* ===================== SHELF STOCK =====================
@@ -1311,7 +1594,7 @@ function stockWallUnits(){
 /* grocery boxes from the convenience-store pack, mixed in with the food so
    the shelves carry packaged goods as well as loose produce */
 const shelfExtras=[];
-new GLTFLoader().load('assets/cstore.glb', (g3)=>{
+gltfLoad('assets/cstore.glb', (g3)=>{
   for(const o of g3.scene.children.slice()){
     if(/^box_|^can_/.test(o.name)){
       o.userData.shelfScale = /^can_/.test(o.name) ? .30 : .26;
@@ -1337,11 +1620,12 @@ new GLTFLoader().load('assets/cstore.glb', (g3)=>{
    Whichever finished first won, so on roughly half of all loads every boxed
    good was silently dropped. Chained instead - both cstore paths call it. */
 function loadFood(){
-new GLTFLoader().load('assets/food.glb', (gltf)=>{
+gltfLoad('assets/food.glb', (gltf)=>{
   const base=gltf.scene.children.filter(o=>o.isMesh||o.children.length);
   const items=base.concat(shelfExtras);
   if(!items.length)return;
-  let swapped=0;
+  let swapped=0, batches=0;
+  const allMats=new Map();                 /* source index -> world matrices */
   for(const row of shelfRows){
     for(const child of row.children.slice()){
       if(!child.userData||!child.userData.product)continue;
@@ -1350,12 +1634,9 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
          used to be - fill the slot with a small cluster instead */
       const n=2+((Math.random()*3)|0);
       for(let k=0;k<n;k++){
-        const src=items[(Math.random()*items.length)|0];
-        const it=src.clone(true);
-        /* ~440 clones: casting a shadow from each one doubled the shadow pass
-           for objects a few cm across. They still receive. */
-        it.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; o.frustumCulled=true; } });
-        it.scale.setScalar((src.userData.shelfScale||1)*rand(1.5,2.3));
+        const si=(Math.random()*items.length)|0;
+        const src=items[si];
+        const sc=(src.userData.shelfScale||1)*rand(1.5,2.3);
         /* Sit them on the GONDOLA's tiers. The heights baked into
            userData.product.y (0.59/1.34/2.09) belong to the block planks that
            props.glb hides, and the top tier floated 0.47 m above the 2.17 m
@@ -1363,20 +1644,23 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
            the shelf faces, which point outward at dz +/-0.30. */
         const tier=SHELF_TIERS[clamp(Math.round((child.userData.product.y-.59)/.75),0,SHELF_TIERS.length-1)];
         const face=child.position.z>=0?1:-1;
-        it.position.set(
+        let bucket=allMats.get(si);
+        if(!bucket){ bucket=[]; allMats.set(si,bucket); }
+        bucket.push(stockWorld(row, stockMatrix(
           child.position.x+(k-(n-1)/2)*rand(.13,.2),
           tier,
-          face*(SHELF_FACE_Z+rand(-.05,.05)));
-        it.rotation.y=rand(0,Math.PI*2);
-        row.add(it);
+          face*(SHELF_FACE_Z+rand(-.05,.05)),
+          rand(0,Math.PI*2), sc)));
         swapped++;
       }
       child.visible=false;
     }
   }
+  for(const [si,mats] of allMats) batches+=instanceStock(items[si], mats, scene);
   SHELF_ITEMS=items;
   stockWallUnits();
-  console.info('shelf stock:',swapped,'food items from',items.length,'types');
+  console.info('shelf stock:',swapped,'food items from',items.length,
+               'types in',batches,'instanced batches');
 }, undefined, ()=>console.info('assets/food.glb not reachable - block products stay'));
 }
 
@@ -1384,7 +1668,7 @@ new GLTFLoader().load('assets/food.glb', (gltf)=>{
    Real retail furniture replaces the block shelving. The colliders and the
    product boxes stay exactly where they were, so navigation and the colour
    of the aisles are unchanged - only the grey frame/planks are swapped. */
-new GLTFLoader().load('assets/props.glb', (gltf)=>{
+gltfLoad('assets/props.glb', (gltf)=>{
   const lib={};
   gltf.scene.children.slice().forEach(o=>{ lib[o.name]=o; });
   /* the pack's retail orange is very saturated and blows out under the
@@ -1465,13 +1749,13 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
   place('case_b',    -18.5,   6.0,  Math.PI/2);
   place('shelf_tall', 20.6, -8.0, -Math.PI/2);   /* was inside the back-wall run */
   /* the industrial shelving + cashier desk pack */
-  new GLTFLoader().load('assets/storeprops.glb', (g2)=>{
+  gltfLoad('assets/storeprops.glb', (g2)=>{
     const lib2={}; for(const o of g2.scene.children.slice()) lib2[o.name]=o;
     const put2=(nm,x,z,ry,sc)=>{
       const src=lib2[nm]; if(!src)return null;
       const c=src.clone(true);
       c.position.set(x,0,z); c.rotation.y=ry||0; if(sc)c.scale.setScalar(sc);
-      c.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+      c.traverse(o=>{ if(o.isMesh){ o.castShadow=false; o.receiveShadow=true; } });
       scene.add(c); solidify(c);
       return c;
     };
@@ -1482,6 +1766,7 @@ new GLTFLoader().load('assets/props.glb', (gltf)=>{
       const a=put2('shelf0', -21.2, z, Math.PI/2);  if(a)WALL_UNITS.push(a);
       const b2=put2('shelf0',  21.2, z, -Math.PI/2); if(b2)WALL_UNITS.push(b2);
     }
+    for(const u of WALL_UNITS) cullRegister(u, u.position.x, u.position.z, 70);
     stockWallUnits();          /* no-op if food.glb has not landed yet */
     /* checkout line - retire the primitive counters first so the lanes are
        not three interpenetrating desks deep */
@@ -1519,9 +1804,23 @@ const fzCv=document.createElement('canvas'); fzCv.width=1024; fzCv.height=64;
   for(let i=0;i<16;i++){ g.fillStyle='#2e4a52'; g.fillRect(i*64+4,0,56,64); g.fillStyle='#1b2c31'; g.fillRect(i*64+30,0,4,64); }
 }
 const fzTex=new THREE.CanvasTexture(fzCv); fzTex.colorSpace=THREE.SRGBColorSpace;
-const fz=new THREE.Mesh(new THREE.PlaneGeometry(41,2.1), new THREE.MeshBasicMaterial({map:fzTex}));
-fz.position.set(0,1.5,-14.05); scene.add(fz);
-worldHits.push(fz); makeBreakable(fz,'glass',2.4);
+/* This was ONE 41 m plane registered as a single breakable, so a couple of
+   rounds deleted the entire freezer run at once - and shatter sizes its chips
+   from the mesh bounds, so it threw 8-metre "glass shards" across the shop.
+   The texture already draws 16 doors; make each door its own pane, with UVs
+   sliced to its own section of the shared bitmap so no texture is cloned. */
+const FZ_N=16, FZ_W=41/FZ_N;
+const fzMat=new THREE.MeshBasicMaterial({map:fzTex});
+for(let i=0;i<FZ_N;i++){
+  const g=new THREE.PlaneGeometry(FZ_W,2.1);
+  const uv=g.attributes.uv;
+  for(let k=0;k<uv.count;k++) uv.setX(k, (uv.getX(k)+i)/FZ_N);
+  uv.needsUpdate=true;
+  const pane=new THREE.Mesh(g,fzMat);
+  pane.position.set(-41/2+FZ_W*(i+.5), 1.5, -14.05);
+  scene.add(pane);
+  worldHits.push(pane); makeBreakable(pane,'glass',2.4);
+}
 
 /* debris: scattered paper / boxes / carts.
    Placed by rejection sampling - dropping them at pure random buried boxes
@@ -1617,9 +1916,9 @@ const ambRef=scene.children.find(o=>o.isAmbientLight);
 ambRef.intensity=LIGHT_DAY.ambI; ambRef.color.copy(LIGHT_DAY.ambC);
 hemi.intensity=LIGHT_DAY.hemiI;
 moon.color.copy(LIGHT_DAY.sunC); moon.intensity=LIGHT_DAY.sunI;
-const blue=new THREE.PointLight(0x5a7fae,12,20,1.8); blue.position.set(0,3,-13); scene.add(blue);
-const green=new THREE.PointLight(0x6a8a5a,9,13,1.8); green.position.set(-17,3,8); scene.add(green);
-const exitGlow=new THREE.PointLight(0x44ff66,2.2,5.5); exitGlow.position.set(0,3.9,14); scene.add(exitGlow);
+const blue=new THREE.PointLight(0x5a7fae,12,20,1.8); blue.position.set(0,3,-13); scene.add(blue); lightRegister(blue,60);
+const green=new THREE.PointLight(0x6a8a5a,9,13,1.8); green.position.set(-17,3,8); scene.add(green); lightRegister(green,60);
+const exitGlow=new THREE.PointLight(0x44ff66,2.2,5.5); exitGlow.position.set(0,3.9,14); scene.add(exitGlow); lightRegister(exitGlow,50);
 if(scene.background&&scene.background.isColor) scene.background.copy(LIGHT_DAY.bg);
 scene.fog.color.copy(LIGHT_DAY.fog);
 scene.fog.density=LIGHT_DAY.fogD;
@@ -1756,6 +2055,7 @@ function buildTown(){
        band, the awning and the AC unit floating in the sky. */
     const bg=new THREE.Group(); scene.add(bg);
     (window.__boxBuildings=window.__boxBuildings||[]).push(bg);
+    cullRegister(bg, b.x, 48, 210);
 
     const bm=new THREE.Mesh(new THREE.BoxGeometry(b.w,b.h,b.d),
       facadeMat(new THREE.Color(b.c).multiplyScalar(1.7),b.w,b.h));
@@ -1869,11 +2169,18 @@ function buildTown(){
      - the DOME sits over the bay in front of the mihrab, not over the middle
      - the MINARETS stand at the outer courtyard corners
    Local origin is the centre of the prayer hall; +z is back toward the road. */
-const M_HALL={minX:-25, maxX:25, minZ:-16, maxZ:13};   /* prayer hall interior */
-const M_YARD={minX:-26, maxX:26, minZ:14, maxZ:32};    /* sahn */
+/* documentation only - nothing reads these - but keep them truthful */
+const M_HALL={minX:mqo(-25), maxX:mqo(25), minZ:mqz(-16), maxZ:mqz(13)};
+const M_YARD={minX:mqo(-26), maxX:mqo(26), minZ:mqz(14),  maxZ:mqz(32)};
+/* act-2 extents derived from the same local box, so they follow the scale */
+const MQ_B={ inMinX:mqo(-25), inMaxX:mqo(25), outMinX:mqo(-26), outMaxX:mqo(26),
+             minZ:mqz(-16),   inMaxZ:mqz(12.4), yardMaxZ:mqz(31) };
 function buildMosque(){
   const X=MOSQUE_X;
-  const G=new THREE.Group(); G.position.x=X; scene.add(G);
+  const G=new THREE.Group();
+  G.position.set(X, 0, MQ_Z);
+  G.scale.setScalar(MQ_S);
+  scene.add(G);
   window.__mosque=G;
 
   const sand =new THREE.MeshStandardMaterial({color:0xd8c9a8, roughness:.92, map:TEX.wall, normalMap:TEX.wallN});
@@ -1891,9 +2198,14 @@ function buildMosque(){
      invisible full-height wall across the room. */
   const box=(w,h,d,x,y,z,m,collide)=>{
     const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
-    b.position.set(x,y,z); b.castShadow=true; b.receiveShadow=true; G.add(b);
+    b.position.set(x,y,z);
+    b.castShadow = Math.max(w,h,d) >= 1.6;
+    b.receiveShadow=true; G.add(b);
     if(collide==='solid'){ worldHits.push(b); }
-    else if(collide){ colliders.push({minX:X+x-w/2,maxX:X+x+w/2,minZ:z-d/2,maxZ:z+d/2,h:y+h/2});
+    else if(collide){ /* the group is scaled and shifted, so the AABB must be too */
+                      colliders.push({minX:X+(x-w/2)*MQ_S, maxX:X+(x+w/2)*MQ_S,
+                                      minZ:(z-d/2)*MQ_S+MQ_Z, maxZ:(z+d/2)*MQ_S+MQ_Z,
+                                      h:(y+h/2)*MQ_S});
                       worldHits.push(b); }
     return b;
   };
@@ -2007,13 +2319,13 @@ function buildMosque(){
   box(1.2,.6,.8,  20.6,.3,4.0, carpet, 'solid');
 
   /* lighting per space, or the new rooms are pitch black */
-  const vestLight=new THREE.PointLight(0xffdca8, 20, 34, 2); vestLight.position.set(X,7,11); scene.add(vestLight);
-  const corrLight=new THREE.PointLight(0xffd6a0, 12, 18, 2); corrLight.position.set(X,5.4,4.8); scene.add(corrLight);
+  const vestLight=new THREE.PointLight(0xffdca8, 20, 34, 2); vestLight.position.set(X,7,11); scene.add(vestLight); lightRegister(vestLight,70);
+  const corrLight=new THREE.PointLight(0xffd6a0, 12, 18, 2); corrLight.position.set(X,5.4,4.8); scene.add(corrLight); lightRegister(corrLight,55);
   for(const cx of [-13,13]){
-    const cl=new THREE.PointLight(0xffe0b4, 14, 26, 2); cl.position.set(X+cx,4.4,4.8); scene.add(cl);
+    const cl=new THREE.PointLight(0xffe0b4, 14, 26, 2); cl.position.set(X+cx,4.4,4.8); scene.add(cl); lightRegister(cl,55);
   }
   for(const cx of [-22.2,22.2]){
-    const sl=new THREE.PointLight(0xffcf90, 6, 11, 2); sl.position.set(X+cx,3.4,3.0); scene.add(sl);
+    const sl=new THREE.PointLight(0xffcf90, 6, 11, 2); sl.position.set(X+cx,3.4,3.0); scene.add(sl); lightRegister(sl,40);
   }
 
   /* mihrab: niche dead centre of the qibla wall */
@@ -2040,7 +2352,7 @@ function buildMosque(){
   for(const cx of [-8.6,8.6]) for(const cz of [-16.6,-1.4]){
     const col=new THREE.Mesh(new THREE.CylinderGeometry(.72,.8,12,14), stone);
     col.position.set(cx,6,cz); col.castShadow=true; G.add(col);
-    colliders.push({minX:X+cx-.8,maxX:X+cx+.8,minZ:cz-.8,maxZ:cz+.8,h:12});
+    colliders.push({minX:mqx(cx-.8),maxX:mqx(cx+.8),minZ:mqz(cz-.8),maxZ:mqz(cz+.8),h:mqo(12)});
     worldHits.push(col);
   }
   /* hanging lamps down the hall */
@@ -2053,9 +2365,9 @@ function buildMosque(){
     lp.position.set(lx,8.5,lz); G.add(lp);
   }
   const hallLight=new THREE.PointLight(0xffdca8, 26, 46, 2);
-  hallLight.position.set(X,8,-6); scene.add(hallLight);
+  hallLight.position.set(X,8,-6); scene.add(hallLight); lightRegister(hallLight,90);
   const mihrabLight=new THREE.PointLight(0xffe0b0, 12, 20, 2);
-  mihrabLight.position.set(X,5,-12); scene.add(mihrabLight);
+  mihrabLight.position.set(X,5,-12); scene.add(mihrabLight); lightRegister(mihrabLight,60);
 
   /* shoe racks either side of the central arch, where they really are */
   for(const sx of [-6.4,6.4]){
@@ -2075,7 +2387,7 @@ function buildMosque(){
       const cz=16.4+i*3.9;
       const col=new THREE.Mesh(new THREE.CylinderGeometry(.5,.56,5.4,12), stone);
       col.position.set(sx,2.7,cz); col.castShadow=true; G.add(col);
-      colliders.push({minX:X+sx-.6,maxX:X+sx+.6,minZ:cz-.6,maxZ:cz+.6,h:5.4});
+      colliders.push({minX:mqx(sx-.6),maxX:mqx(sx+.6),minZ:mqz(cz-.6),maxZ:mqz(cz+.6),h:mqo(5.4)});
       if(i<4) arch(sx,cz+1.95,1.85,.7,5.2,stone,'x');
     }
     box(1.6,1.4,19, sx,6.1,23, sand, false);
@@ -2088,7 +2400,7 @@ function buildMosque(){
   water.position.set(0,1.08,23); G.add(water);
   const spout=new THREE.Mesh(new THREE.CylinderGeometry(.22,.3,2.2,10), stone);
   spout.position.set(0,2.1,23); G.add(spout);
-  colliders.push({minX:X-3.4,maxX:X+3.4,minZ:19.6,maxZ:26.4,h:1.1});
+  colliders.push({minX:mqx(-3.4),maxX:mqx(3.4),minZ:mqz(19.6),maxZ:mqz(26.4),h:mqo(1.1)});
 
   /* street wall + gate, with AL-SALAAM over it */
   box(19,4.6,.8, -17.5,2.3,32, sand, true);
@@ -2113,7 +2425,7 @@ function buildMosque(){
     cap.position.set(mx,27.8,31.5); cap.castShadow=true; G.add(cap);
     const tip=new THREE.Mesh(new THREE.CylinderGeometry(.1,.1,1.7,8), gold);
     tip.position.set(mx,30.3,31.5); G.add(tip);
-    colliders.push({minX:X+mx-1.8,maxX:X+mx+1.8,minZ:29.7,maxZ:33.3,h:26});
+    colliders.push({minX:mqx(mx-1.8),maxX:mqx(mx+1.8),minZ:mqz(29.7),maxZ:mqz(33.3),h:mqo(26)});
   }
 
   /* AL-SALAAM in big letters over the gate, both faces */
@@ -2141,7 +2453,8 @@ function buildMosque(){
     lamp.position.set(lx,4.7,lz); G.add(lamp);
   }
   const yardLight=new THREE.PointLight(0xffd9a0, 16, 34, 2);
-  yardLight.position.set(X,6,24); scene.add(yardLight);
+  yardLight.position.set(X,6,24); scene.add(yardLight); lightRegister(yardLight,80);
+  cullRegister(G, X, 8, 300);
   console.info('Al-Salaam mosque built at x='+X);
 }
 
@@ -2160,24 +2473,35 @@ function phPlace(pack, name, x, z, opts){
   const h=Math.max(.001, b.max.y-b.min.y);
   const sc=(opts&&opts.h) ? (opts.h/h) : 1;
   o.scale.setScalar(sc);
-  o.position.set(x, (opts&&opts.y)||0, z);
+  /* Packs vary: some models have their origin on the base, others at the
+     centre of the bounding box. Placing by origin buried every centre-origin
+     prop to half its height. Seat the BASE at the requested y instead, which
+     is a no-op for the base-origin ones (b.min.y is already 0). */
+  o.position.set(x, ((opts&&opts.y)||0) - b.min.y*sc, z);
   o.rotation.y=(opts&&opts.ry!==undefined)?opts.ry:rand(0,Math.PI*2);
-  o.traverse(m=>{ if(m.isMesh){ m.castShadow=true; m.receiveShadow=true; m.frustumCulled=true; } });
+  const tall=(opts&&opts.h)?opts.h>=1.2:false;
+  o.traverse(m=>{ if(m.isMesh){ m.castShadow=tall; m.receiveShadow=true; m.frustumCulled=true; } });
   scene.add(o);
   o.updateWorldMatrix(true,true);
   const wb=new THREE.Box3().setFromObject(o);
   if(opts&&opts.solid){
     o.traverse(m=>{ if(m.isMesh) worldHits.push(m); });
     if(opts.collide!==false && (wb.max.y-wb.min.y)>1.0){
-      colliders.push({minX:wb.min.x+.1,maxX:wb.max.x-.1,minZ:wb.min.z+.1,maxZ:wb.max.z-.1,
-                      h:Math.max(.6,wb.max.y)});
+      /* retireMesh() removes userData.collider when a breakable shatters;
+         without the back-reference the AABB stayed behind as an invisible
+         wall where the prop used to be. */
+      const col={minX:wb.min.x+.1,maxX:wb.max.x-.1,minZ:wb.min.z+.1,maxZ:wb.max.z-.1,
+                 h:Math.max(.6,wb.max.y)};
+      colliders.push(col);
+      o.userData.collider=col;
     }
   }
   if(opts&&opts.brk) makeBreakable(o, opts.brk, opts.brkScale||1);
+  if(opts&&opts.cull) cullRegister(o, x, z, opts.cull);
   return o;
 }
 function phLoad(pack, url, then){
-  new GLTFLoader().load(url,(g)=>{
+  gltfLoad(url,(g)=>{
     const lib={};
     for(const c of g.scene.children.slice()) if(c.name) lib[c.name]=c;
     PH_PACKS[pack]=lib;
@@ -2194,24 +2518,25 @@ phLoad('mosque','assets/ph_mosque.glb',(lib)=>{
   const vases=pick(/vase|pot|goblet|ceramic/i), shelf=pick(/Shelf|Cabinet|Commode/i);
   const books=pick(/book|binder/i);
   /* chandeliers down the prayer hall */
-  chand.forEach((n,i)=>{ for(const cz of [-12,-6]) phPlace('mosque',n, X+(i-1)*13, cz, {h:1.6,y:7.2}); });
+  chand.forEach((n,i)=>{ for(const cz of [-12,-6])
+    phPlace('mosque',n, mqx((i-1)*13), mqz(cz), {h:1.6,y:3.6}); });  /* under a 5.5 m ceiling now */
   /* lanterns along the corridor and the vestibule */
   lant.forEach((n,i)=>{ for(const [lx,lz] of [[-3.1,3.0],[3.1,3.0],[-3.1,6.8],[3.1,6.8]])
-    phPlace('mosque',n, X+lx, lz, {h:.5,y:1.15,solid:true,brk:'pottery'}); });
+    phPlace('mosque',n, mqx(lx), mqz(lz), {h:.5,y:1.15,solid:true,brk:'pottery'}); });
   /* brass on the wudu trough, and pots along the west chamber */
   vases.slice(0,6).forEach((n,i)=>
-    phPlace('mosque',n, X-17+i*1.9, 3.1, {h:.42,solid:true,brk:'pottery'}));
+    phPlace('mosque',n, mqx(-17+i*1.9), mqz(3.1), {h:.42,solid:true,brk:'pottery'}));
   /* madrasa shelving and books */
   /* keep clear of the corner-store door at (22.2, 5.0): shelving lines the
      madrasa's own outer wall, north of it */
   shelf.slice(0,3).forEach((n,i)=>
-    phPlace('mosque',n, X+8.0+i*3.4, 7.6, {h:2.1,ry:Math.PI,solid:true}));
+    phPlace('mosque',n, mqx(8.0+i*3.4), mqz(7.6), {h:2.1,ry:Math.PI,solid:true}));
   books.slice(0,4).forEach((n,i)=>
-    phPlace('mosque',n, X+9.0+i*2.6, 7.0, {h:.28,y:.84,solid:true,brk:'crate',brkScale:.5}));
+    phPlace('mosque',n, mqx(9.0+i*2.6), mqz(7.0), {h:.28,y:.84,solid:true,brk:'crate',brkScale:.5}));
   /* corner stores: crates and pots */
   vases.slice(0,4).forEach((n,i)=>{
-    phPlace('mosque',n, X-22.2+rand(-.8,.8), 2.2+rand(-.8,.8), {h:.4,solid:true,brk:'pottery'});
-    phPlace('mosque',n, X+22.2+rand(-.8,.8), 2.2+rand(-.8,.8), {h:.4,solid:true,brk:'pottery'});
+    phPlace('mosque',n, mqx(-22.2+rand(-.8,.8)), mqz(2.2+rand(-.8,.8)), {h:.4,solid:true,brk:'pottery'});
+    phPlace('mosque',n, mqx( 22.2+rand(-.8,.8)), mqz(2.2+rand(-.8,.8)), {h:.4,solid:true,brk:'pottery'});
   });
 });
 
@@ -2227,7 +2552,8 @@ phLoad('store','assets/ph_store.glb',(lib)=>{
   boxes.slice(0,5).forEach((n,i)=>
     phPlace('store',n, 12+i*1.7, -12.2, {h:.42,solid:true,brk:'crate'}));
   bottles.slice(0,8).forEach((n,i)=>
-    phPlace('store',n, -6+i*1.7, 6.0, {h:.26,y:.98,solid:true,brk:'glass',brkScale:.8}));
+    /* y:.98 hovered them in mid-air over the aisle; stand them on the floor */
+    phPlace('store',n, -6+i*1.7, 6.0, {h:.26,solid:true,brk:'glass',brkScale:.8}));
 });
 
 /* ---- street dressing ---- */
@@ -2251,11 +2577,186 @@ phLoad('furn','assets/ph_furn.glb',(lib)=>{
   const chairs=pick(/Chair|Stool|stool/i), tables=pick(/Table|Desk|table/i);
   /* reading room sits in the open half of the madrasa, x 6..17 */
   chairs.slice(0,4).forEach((n,i)=>
-    phPlace('furn',n, X+7.5+(i%2)*2.2, 2.6+Math.floor(i/2)*2.6, {h:.95,solid:true,brk:'wood',brkScale:.5}));
+    phPlace('furn',n, mqx(7.5+(i%2)*2.2), mqz(2.6+Math.floor(i/2)*2.6), {h:.95,solid:true,brk:'wood',brkScale:.5}));
   tables.slice(0,2).forEach((n,i)=>
-    phPlace('furn',n, X+13.5, 2.8+i*3.0, {h:.76,solid:true,brk:'wood'}));
+    phPlace('furn',n, mqx(13.5), mqz(2.8+i*3.0), {h:.76,solid:true,brk:'wood'}));
   chairs.slice(0,3).forEach((n,i)=>
     phPlace('furn',n, -18+i*1.9, -11.0, {h:.95,solid:true,brk:'wood',brkScale:.5}));
+});
+
+/* ===================== SUPPLIED MODEL PACK (map2) =====================
+   The MAP / ENIMIS drops were unusable as delivered: every one of them is an
+   unrigged single mesh in the 150k-1.4M triangle range (the liquor store
+   alone was 1,376,705 tris - more than the whole frame budget) with 2k-4k
+   textures. scratchpad/pack2.py decimates each to a game budget, normalises
+   scale and origin, caps textures at 512 and packs the lot into one 6.8MB
+   GLB. What lands here is 18 props totalling ~98k tris.
+
+   The two figures are placed as motionless background civilians only, well
+   clear of any combat area: they have no skeleton, so they cannot be
+   animated, and standing them in a fight would read as broken. */
+phLoad('map2','assets/map2.glb',(lib)=>{
+  const P=(n,x,z,o)=>phPlace('map2',n,x,z,o);
+
+  /* ---- the liquor store: a real building on the way out of town ---- */
+  /* z=52.5 buried it inside the zone-1 frontage block, whose bodies run from
+     ZN=41.8 back to 54.3. Sit it ON the frontage line instead (its scaled
+     footprint is ~8.5 m deep), and buildHighway skips its own building at
+     this x so the two do not occupy the same ground. */
+  P('liquorstore', -268, 46.1, {h:9.2, ry:Math.PI, solid:true, cull:230});
+  for(let i=-3;i<=3;i++) P('ironfence', -268+i*2.55, 41.2, {h:2.0, ry:0, cull:200});
+
+  /* ---- verge dressing the length of the drive ---- */
+  /* side was keyed on (x%74===0), which never holds once x steps by 37 from
+     -150, so all 19 trees lined the south verge. Alternate on the index. */
+  for(let x=-150, ti=0; x>-840; x-=37, ti++){
+    P('deadtree', x, (ti%2)?42.6:29.4, {h:rand(5.4,7.2), cull:200});
+  }
+  for(let x=-146; x>-840; x-=23){
+    P(Math.random()<.5?'grasstuft':'grasstuft2', x+rand(-4,4), rand(41.2,43.2), {h:rand(.3,.5), cull:130});
+    P(Math.random()<.5?'grasstuft':'grasstuft2', x+rand(-4,4), rand(28.8,30.8), {h:rand(.3,.5), cull:130});
+  }
+  for(let x=-160; x>-830; x-=61){
+    P('boulder',     x,        rand(43.5,45.5), {h:rand(.8,1.5), cull:170});
+    P('rockscatter', x-24,     rand(26.5,28.5), {h:rand(.5,.9),  cull:170});
+  }
+  /* rubble and culverts read as industry, so keep them to the industrial belt */
+  for(let x=-330; x>-575; x-=52){
+    P('rubblestack', x,    rand(43.8,45.2), {h:rand(1.3,1.9), solid:true, cull:190});
+    P('culvert',     x-26, rand(26.8,28.2), {h:rand(1.1,1.5), solid:true, cull:190});
+  }
+  for(const cx of [-200,-402,-486,-640,-790]) P('cobblepatch', cx, 41.6, {h:.16, cull:150});
+
+  /* ---- background civilians: street corners and the fuel stop ---- */
+  const FOLK2=[[-176,42.2,'man_hoodie',-2.3],[-241,29.2,'man_kurta',1.1],
+               [-402,26.6,'man_hoodie',0.4],[-455,42.4,'man_kurta',-1.9],
+               [-612,29.0,'man_kurta',2.6],[-742,42.6,'man_hoodie',-0.7]];
+  for(const [fx,fz,nm,fr] of FOLK2) P(nm, fx, fz, {h:1.79, ry:fr, cull:150});
+
+  /* ---- supermarket: the shelving and stock that came in the drop ---- */
+  /* end caps face the aisle mouths, clear of the walkway at z=11 */
+  P('shelfdisp',  -13.5, 5.4, {h:1.86, ry:Math.PI/2, solid:true, brk:'crate'});
+  P('shelfdisp',   13.5, 5.4, {h:1.86, ry:-Math.PI/2, solid:true, brk:'crate'});
+  P('shelfdisp',    0.0,-12.4,{h:1.86, ry:0,          solid:true, brk:'crate'});
+  P('shelfangled',-19.4,-6.2, {h:1.60, ry:Math.PI/2, solid:true, brk:'crate'});
+  P('shelfangled', 19.4,-6.2, {h:1.60, ry:-Math.PI/2,solid:true, brk:'crate'});
+  P('shelfempty', -19.4, 1.4, {h:1.36, ry:Math.PI/2, solid:true, brk:'crate'});
+  P('shelfempty',  19.4, 1.4, {h:1.36, ry:-Math.PI/2,solid:true, brk:'crate'});
+  /* loose stock on the floor and the checkout run */
+  for(const [sx,sz] of [[-6.4,10.2],[7.1,9.6],[-15.2,-9.4],[16.0,-10.1],[2.4,-13.6]])
+    P('steaktray', sx, sz, {h:.06, y:.02, cull:90});
+  for(let i=0;i<14;i++)
+    P('sodacan', rand(-19,19), rand(-13,10), {h:.13, y:.01, cull:80});
+  P('cartboxes', -9.2, 12.4, {h:1.0, ry:.6, solid:true});
+  P('cartboxes',  10.6, 13.1, {h:1.0, ry:-1.9, solid:true});
+  P('cartboxes',  22.0, 24.5, {h:1.0, ry:2.4, solid:true, cull:140});
+
+  /* ---- mosque: iron railing along the courtyard frontage ---- */
+  /* leave the middle three panels out: they were fencing off the gateway */
+  for(let i=-6;i<=6;i++){
+    if(Math.abs(i)<2) continue;
+    P('ironfence', mqx(i*2.55), mqz(32.4), {h:2.0, ry:0, cull:230});
+  }
+});
+
+/* ===================== EXTRA PROP PACK =====================
+   55 more Poly Haven CC0 props (scratchpad/packextra.py: decimated to 2.5k
+   tris each, textures capped at 256 since none of them is more than about a
+   metre across). Store clutter goes through floorSpot() so nothing lands in
+   an aisle or on a checkout, and everything outdoors is cull-registered. */
+phLoad('extra','assets/ph_extra.glb',(lib)=>{
+  const P=(n,x,z,o)=>phPlace('extra',n,x,z,o);
+  const spot=(minX,maxX,minZ,maxZ,pad)=>floorSpot(minX,maxX,minZ,maxZ,pad==null?.9:pad);
+
+  /* ---- supermarket: the things a shop floor actually has on it ---- */
+  const shopFloor=[
+    ['plastic_crate_01',.42],['plastic_crate_02',.42],['plastic_crate_03',.40],
+    ['plastic_container',.44],['industrial_pastic_container',.52],
+    ['metal_trash_can',.62],['plastic_broom',1.18],['dustpan',.30],
+    ['plastic_monobloc_chair_01',.82],['hand_truck',1.24],['cement_bag',.26],
+  ];
+  for(const [nm,h] of shopFloor){
+    for(let i=0;i<3;i++){
+      const s=spot(-19,19,-12.5,12.5);
+      if(s) P(nm, s[0], s[1], {h, solid:true, brk:'crate', cull:95});
+    }
+  }
+  /* stacked crates in the back corners, where a stockroom run would be */
+  for(let k=0;k<4;k++){
+    const cx=(k<2?-17.6:17.6), cz=-11.4+(k%2)*1.5;
+    for(let s2=0;s2<2+((Math.random()*2)|0);s2++)
+      P('plastic_crate_0'+(1+(s2%3)), cx, cz, {h:.42, y:s2*.42, ry:rand(-.3,.3), solid:!s2, cull:95});
+  }
+  /* cleaning aisle and checkout dressing */
+  /* these used to carry y:.98, which floated them in mid-air over the aisle */
+  for(let i=0;i<5;i++){
+    const s=spot(-19,19,-12,12);
+    if(s) P(['multi_cleaner_5_litre','multi_cleaner_bottle','drain_cleaner','lubricant_spray',
+             'plastic_bottle_gallon'][i], s[0], s[1], {h:[.30,.24,.24,.20,.30][i], cull:80});
+  }
+  for(const [cx,cz] of [[-13,10.4],[-4.5,10.4],[4.5,10.4],[13,10.4]]){
+    P('office_notepads', cx+rand(-.5,.5), cz, {h:.05, y:.96, cull:70});
+    if(Math.random()<.5) P('clipboard', cx+rand(-.6,.6), cz, {h:.32, y:.95, cull:70});
+  }
+  /* safety kit by the doors and the back wall */
+  P('korean_fire_extinguisher_01', -2.6, 12.9, {h:.62, cull:90});
+  P('korean_fire_extinguisher_01',  2.6, 12.9, {h:.62, cull:90});
+  P('medical_box', -20.0, -6.0, {h:.34, y:1.5, ry:Math.PI/2, cull:80});
+  for(const [fx,fz] of [[-20.2,4],[20.2,4],[0,-13.4]])
+    P('fire_alarm', fx, fz, {h:.22, y:2.3, cull:80});
+  /* a back office in the corner the shelving does not reach */
+  P('metal_office_desk', 16.4, -12.6, {h:.76, ry:.2, solid:true, cull:95});
+  P('metal_stool_01',    15.0, -12.0, {h:.68, solid:true, brk:'wood', cull:95});
+  /* extra groceries on the end caps */
+  for(let i=0;i<8;i++){
+    const s=spot(-18,18,-11,9, .7);
+    if(s) P(['long_life_food','lemon','hamburger_buns'][i%3], s[0], s[1],
+            {h:[.16,.07,.11][i%3], y:.02, cull:70});
+  }
+
+  /* ---- the lot and the town frontage ---- */
+  for(const [hx,hz] of [[-24,17.4],[24,17.4],[-46,44.2],[18,44.2]])
+    P('fire_hydrant', hx, hz, {h:.78, solid:true, cull:130});
+  for(const [bx,bz] of [[-30,43.4],[-8,43.4],[14,43.4],[36,43.4]]){
+    P('painted_wooden_bench', bx, bz, {h:.86, ry:Math.PI, solid:true, brk:'wood', cull:130});
+    if(Math.random()<.6) P('metal_trash_can', bx+2.6, bz, {h:.62, solid:true, cull:130});
+  }
+  for(const [px,pz] of [[-19,44.0],[27,44.0]])
+    P('planter_box_01', px, pz, {h:.52, solid:true, cull:130});
+  P('modular_street_seating', 5, 43.8, {h:.8, ry:Math.PI, solid:true, cull:130});
+  P('korean_public_payphone_01', -37, 43.6, {h:1.5, ry:Math.PI, solid:true, cull:130});
+  for(const [ax,az,ay] of [[-28,43.2,3.4],[10,43.2,5.1],[40,43.2,3.0]])
+    P('exterior_aircon_unit', ax, az, {h:.62, y:ay, ry:Math.PI, cull:130});
+
+  /* ---- industrial belt: yards, pipes, fuel stop ---- */
+  for(let x=-330; x>-575; x-=44){
+    P('modular_industrial_pipes_01', x+8, 44.6, {h:2.2, ry:rand(0,6.2), solid:true, cull:150});
+    P('old_tyre', x-6, rand(28.4,29.6), {h:.28, ry:rand(0,6.2), cull:130});
+    P('old_tyre', x-9, rand(28.4,29.6), {h:.28, y:.28, ry:rand(0,6.2), cull:130});
+    if(Math.random()<.7) P('old_military_crate', x-14, 28.8, {h:.62, ry:rand(0,6.2), solid:true, brk:'crate', cull:150});
+    if(Math.random()<.6) P('cement_bag', x+16, 44.2, {h:.26, ry:rand(0,6.2), cull:130});
+    if(Math.random()<.5) P('industrial_storage_cart', x+22, 44.0, {h:1.0, ry:rand(0,6.2), solid:true, cull:150});
+  }
+  for(const [jx,jz] of [[-397,25.4],[-399.5,25.4],[-406,25.4]])
+    P(['metal_jerrycan','metal_jerrycan_green','plastic_jerrycan'][(jx|0)%3], jx, jz, {h:.42, cull:130});
+  P('ladder_sectioned_01', -412, 26.2, {h:2.4, ry:.3, cull:150});
+  P('metal_tool_chest',    -415, 26.6, {h:.9, solid:true, cull:150});
+  P('metal_toolbox',       -418, 26.4, {h:.28, cull:130});
+  P('compost_bags',        -352, 44.4, {h:.5, cull:130});
+  for(let x=-336; x>-570; x-=88)
+    P('modular_chainlink_fence', x, 27.2, {h:2.0, cull:150});
+
+  /* ---- mosque ---- */
+  const MX=MOSQUE_X;
+  for(const [ox,oz] of [[-6.5,15.5],[6.5,15.5],[-6.5,28],[6.5,28]])
+    P('planter_pot_clay', mqx(ox), mqz(oz), {h:.66, solid:true, brk:'pottery', cull:150});
+  for(let i=0;i<4;i++) P('jug_01',  mqx(-17+i*1.9), mqz(2.4), {h:.32, brk:'pottery', cull:120});
+  for(let i=0;i<3;i++) P('metal_jug', mqx(15+i*1.6), mqz(2.4), {h:.30, cull:120});
+  for(let i=0;i<4;i++) P('painted_wooden_stool', mqx(7.5+(i%2)*2.4), mqz(5.0+((i/2)|0)*2.2),
+                         {h:.5, solid:true, brk:'wood', brkScale:.5, cull:130});
+  for(const cz of [-6,-12]) P('lantern_chandelier_01', mqx(0), mqz(cz), {h:1.3, y:3.4, cull:150});
+  P('ornate_mirror_01', mqx(-22.6), mqz(-6), {h:1.4, y:1.9, ry:Math.PI/2, cull:130});
+  P('korean_fire_extinguisher_01', mqx(3.2), mqz(12.4), {h:.62, cull:130});
 });
 
 /* ===================== STREET / FACADES =====================
@@ -2263,7 +2764,7 @@ phLoad('furn','assets/ph_furn.glb',(lib)=>{
    furniture. The pack's trees (2.3k polys) replace the scanned cypress,
    which shredded under decimation. */
 const STREET_FIT={facadeY:0, ry:0};
-new GLTFLoader().load('assets/street.glb', (gltf)=>{
+gltfLoad('assets/street.glb', (gltf)=>{
   const lib={};
   for(const o of gltf.scene.children.slice()) lib[o.name]=o;
   const put=(name,x,z,ry,sc,collide,y)=>{
@@ -2277,6 +2778,7 @@ new GLTFLoader().load('assets/street.glb', (gltf)=>{
       const b=new THREE.Box3().setFromObject(m);
       colliders.push({minX:b.min.x,maxX:b.max.x,minZ:b.min.z,maxZ:b.max.z,h:Math.max(2,b.max.y)});
     }
+    cullRegister(m, x, z, 210);
     return m;
   };
   /* hide the block buildings on the main strip - facades take over */
@@ -2416,7 +2918,338 @@ function makePlayerCar(){
   return car;
 }
 
+/* ===================== HIGHWAY: TOPS -> AL-SALAAM =====================
+   The ~700 m between the supermarket frontage (ends at x=-130) and the mosque
+   (x=-900) was bare road with nothing either side of it. This fills it as one
+   continuous drive that reads as leaving town:
+
+     -140 .. -320   outer commercial strip, thinning out
+     -320 .. -580   industrial belt: sheds, yards, fuel stop, water tower
+     -580 .. -846   walled compounds and palms on the approach to the mosque
+
+   Cost control: every body reuses ONE unit BoxGeometry (scaled per mesh) and
+   one of six shared facade materials, and every building is its own group
+   registered with cullRegister, so 700 m of frontage costs nothing to draw
+   until you are within ~210 m of it. Bodies go into worldHits so they take
+   bullet holes and sparks like the rest of the world. */
+function buildHighway(){
+  const X_NEAR=-140, X_FAR=-846;
+  /* The town's own facades sit at z=46.6, which is 10.6 m off the road centre
+     and reads fine there because that row is dense and tall. Out here the
+     buildings are sparser, and at 43.5/28.5 they fell outside the in-car view
+     entirely - you drove down a corridor of empty verge. Pulling the frontage
+     in to ~5.5 m from the road edge puts it back in frame. */
+  const ZN=41.8, ZS=30.2;              /* road occupies z 32..40 - stay clear */
+  const unitBox=new THREE.BoxGeometry(1,1,1);
+  const grp=(cx,cz,r)=>{ const g=new THREE.Group(); scene.add(g);
+    cullRegister(g,cx,cz,r||210); return g; };
+  /* six buckets instead of one clone per building: facadeMat clones a texture
+     on every call, and 40+ of those is a lot of texture memory for tiling
+     nobody looks at closely at 60 km/h. */
+  const FAC=[[0x3e4448,14,9],[0x52483c,16,7],[0x454a50,13,11],
+             [0x4a453e,18,6.5],[0x40464a,15,8.5],[0x50443a,12,10]]
+    .map(([c,w,h])=>facadeMat(new THREE.Color(c).multiplyScalar(1.7),w,h));
+  /* These three cover most of the surface area out here, and flat colour on a
+     40 m shed wall reads as untextured plastic. Each gets its own repeat, so
+     they need their own texture objects rather than the shared TEX entries.
+     wall.jpg is photographed dark (mean rgb 68,60,49) and needs the same
+     relevel the store exterior uses or it renders as a black slab. */
+  const MAT_RIB =new THREE.MeshStandardMaterial({color:0x9aa0a6,roughness:.7,metalness:.34,
+    map:surfaceTex('assets/tex/metal.jpg', 7, 2.2)});
+  const MAT_WALL=new THREE.MeshStandardMaterial({color:0xc6b69c,roughness:.95,
+    map       :surfaceTex('assets/tex/wall.jpg',   5, 1.4, true, {gain:1.5,lift:30}),
+    normalMap :surfaceTex('assets/tex/wall_n.jpg', 5, 1.4, false),
+    normalScale:new THREE.Vector2(.8,.8)});
+  const MAT_ROOF=new THREE.MeshStandardMaterial({color:0x9a8f82,roughness:.95,
+    map:surfaceTex('assets/tex/ground2_c.jpg', 3, 3),
+    normalMap:surfaceTex('assets/tex/ground2_n.jpg', 3, 3, false),
+    normalScale:new THREE.Vector2(.6,.6)});
+  const MAT_DOOR=new THREE.MeshStandardMaterial({color:0x6b7075,roughness:.62,metalness:.42,
+    map:surfaceTex('assets/tex/metal.jpg', 2, 1.4)});
+  const MAT_POLE=new THREE.MeshStandardMaterial({color:0x6b5f4e,roughness:.98});
+  const MAT_WIRE=new THREE.MeshBasicMaterial({color:0x1a1a1a});
+  const MAT_TRUNK=new THREE.MeshStandardMaterial({color:0x6a5a44,roughness:1});
+  const MAT_FROND=new THREE.MeshStandardMaterial({color:0x46632f,roughness:.94,side:THREE.DoubleSide,flatShading:true});
+  const MAT_SCRUB=new THREE.MeshStandardMaterial({color:0x5f6644,roughness:1,flatShading:true});
+  const poleGeo=new THREE.CylinderGeometry(.16,.22,9,6);
+  const armGeo=new THREE.BoxGeometry(2.4,.14,.14);
+  const trunkGeo=new THREE.CylinderGeometry(.19,.30,6.2,6);
+  /* A flat rectangle reads as a green paper strip, not a palm. Build the
+     frond once as a tapered strip that droops along its length, then share
+     that one geometry across every tree on the road. */
+  const frondGeo=(()=>{
+    const SEG=4, L=3.3, pos=[], idx=[];
+    for(let i=0;i<=SEG;i++){
+      const t=i/SEG;
+      const halfW=.30*(1-t)+.045;         /* wide at the base, thin at the tip */
+      const drop=-1.15*t*t;               /* accelerating droop, not a straight line */
+      pos.push(t*L,drop, halfW,  t*L,drop,-halfW);
+    }
+    for(let i=0;i<SEG;i++){
+      const a=i*2;
+      idx.push(a,a+1,a+2, a+1,a+3,a+2);
+    }
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setIndex(idx); g.computeVertexNormals();
+    return g;
+  })();
+  const bushGeo=new THREE.IcosahedronGeometry(.62,0);
+
+  const solid=(m,x0,x1,z0,z1,h)=>{ colliders.push({minX:x0,maxX:x1,minZ:z0,maxZ:z1,h:h}); worldHits.push(m); };
+
+  /* --- a plain street building: body, window grid, optional band + awning --- */
+  const bld=(g,x,zf,w,h,d,facing,o)=>{
+    o=o||{};
+    const zc = facing<0 ? zf+d/2 : zf-d/2;      /* facing -1 => front looks -z */
+    const b=new THREE.Mesh(unitBox,FAC[o.m|0]);
+    b.scale.set(w,h,d); b.position.set(x,h/2,zc);
+    b.castShadow=true; b.receiveShadow=true; g.add(b);
+    solid(b, x-w/2, x+w/2, Math.min(zf,zc-d/2), Math.max(zf,zc+d/2), h);
+    const zFace = zf + facing*0.06;
+    if(o.band!==false){
+      const band=new THREE.Mesh(unitBox,townMats.store);
+      band.scale.set(w-1.2,2.5,.18); band.position.set(x,1.35,zFace); g.add(band);
+    }
+    const cols=Math.max(3,Math.floor((w-3.4)/2.1));
+    const x0=x-((cols-1)*2.1)/2, rows=o.rows||Math.max(2,Math.round((h-3)/2.4));
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+      if(3.2+r*2.25 > h-1) continue;                  /* no windows above the roof */
+      const wm=new THREE.Mesh(townWinGeo,Math.random()<.34?townMats.winLit:townMats.winDark);
+      wm.position.set(x0+c*2.1, 3.2+r*2.25, zFace+facing*.02);
+      if(facing>0) wm.rotation.y=Math.PI;
+      g.add(wm);
+    }
+    if(o.awn){
+      const aw=new THREE.Mesh(unitBox,new THREE.MeshStandardMaterial({color:o.awn,roughness:.9}));
+      aw.scale.set(w*.5,.14,1.6); aw.position.set(x,2.9,zf+facing*.55);
+      aw.rotation.x=-.32*facing; g.add(aw);
+    }
+    return b;
+  };
+
+  /* --- long industrial shed: ribbed walls, roller door, roof vents --- */
+  const shed=(g,x,zf,w,h,d,facing)=>{
+    const zc = facing<0 ? zf+d/2 : zf-d/2;
+    const b=new THREE.Mesh(unitBox,MAT_RIB);
+    b.scale.set(w,h,d); b.position.set(x,h/2,zc);
+    b.castShadow=true; b.receiveShadow=true; g.add(b);
+    solid(b, x-w/2, x+w/2, Math.min(zf,zc-d/2), Math.max(zf,zc+d/2), h);
+    for(let rx=-w/2+1.6; rx<w/2-1; rx+=2.8){        /* vertical corrugation ribs */
+      const rib=new THREE.Mesh(unitBox,MAT_DOOR);
+      rib.scale.set(.13,h*.94,.1); rib.position.set(x+rx,h*.47,zf+facing*.07); g.add(rib);
+    }
+    const dw=Math.min(6.5,w*.42);
+    const door=new THREE.Mesh(unitBox,MAT_DOOR);
+    door.scale.set(dw,Math.min(4.4,h*.62),.16);
+    door.position.set(x, Math.min(4.4,h*.62)/2, zf+facing*.12); g.add(door);
+    for(let i=0;i<3;i++){
+      const v=new THREE.Mesh(unitBox,MAT_DOOR);
+      v.scale.set(1.5,.5,1.5); v.position.set(x-w/4+i*(w/4), h+.25, zc+rand(-d/5,d/5)); g.add(v);
+    }
+  };
+
+  /* --- walled compound: perimeter wall, gate, one or two flat-roof houses --- */
+  const compound=(g,x,zf,w,d,facing)=>{
+    const zc = facing<0 ? zf+d/2 : zf-d/2, wh=2.5;
+    const seg=(sx,sz,sw,sd)=>{
+      const m=new THREE.Mesh(unitBox,MAT_WALL);
+      m.scale.set(sw,wh,sd); m.position.set(sx,wh/2,sz);
+      m.castShadow=true; m.receiveShadow=true; g.add(m);
+      solid(m,sx-sw/2,sx+sw/2,sz-sd/2,sz+sd/2,wh);
+    };
+    const gate=3.2, side=(w-gate)/2;
+    seg(x-w/2+side/2, zf, side, .3);               /* front wall, split for a gate */
+    seg(x+w/2-side/2, zf, side, .3);
+    seg(x-w/2, zc, .3, d); seg(x+w/2, zc, .3, d);
+    seg(x, zf-facing*d, w, .3);
+    for(const p of [-1,1]){
+      const pier=new THREE.Mesh(unitBox,MAT_WALL);
+      pier.scale.set(.5,3.1,.5); pier.position.set(x+p*gate/2,1.55,zf); g.add(pier);
+    }
+    const nh=Math.random()<.5?2:1;
+    for(let i=0;i<nh;i++){
+      const hw=rand(6,9), hh=rand(3.2,5.4), hd=rand(6,8);
+      const hx=x+(nh===1?rand(-2,2):(i?w/4:-w/4)), hz=zc-facing*rand(0,d/6);
+      const hm=new THREE.Mesh(unitBox,MAT_WALL);
+      hm.scale.set(hw,hh,hd); hm.position.set(hx,hh/2,hz);
+      hm.castShadow=true; hm.receiveShadow=true; g.add(hm);
+      solid(hm,hx-hw/2,hx+hw/2,hz-hd/2,hz+hd/2,hh);
+      const rf=new THREE.Mesh(unitBox,MAT_ROOF);
+      rf.scale.set(hw+.5,.22,hd+.5); rf.position.set(hx,hh+.1,hz); g.add(rf);
+      for(let r=0;r<2;r++){                          /* two shuttered windows */
+        const wm=new THREE.Mesh(townWinGeo,townMats.winDark);
+        wm.position.set(hx-1.5+r*3, hh*.55, hz+facing*(hd/2+.03));
+        if(facing>0) wm.rotation.y=Math.PI; g.add(wm);
+      }
+    }
+  };
+
+  /* --- roadside furniture --- */
+  const palm=(g,x,z)=>{
+    const t=new THREE.Mesh(trunkGeo,MAT_TRUNK);
+    const hgt=rand(.85,1.3); t.scale.setScalar(hgt);
+    t.position.set(x,3.1*hgt,z); t.rotation.z=rand(-.09,.09);
+    t.castShadow=true; g.add(t);
+    /* alternate a raised and a drooping ring so the crown has depth instead
+       of every frond sitting on one plane */
+    for(let i=0;i<9;i++){
+      const f=new THREE.Mesh(frondGeo,MAT_FROND);
+      f.position.set(x,6.05*hgt,z);
+      f.rotation.y=i*(Math.PI*2/9)+rand(-.12,.12);
+      f.rotation.z=(i%2?-.06:.30)+rand(-.07,.07);
+      f.scale.setScalar(hgt*rand(.88,1.12));
+      g.add(f);
+    }
+    const nut=new THREE.Mesh(bushGeo,MAT_TRUNK);
+    nut.scale.set(.5,.38,.5); nut.position.set(x,6.0*hgt,z); g.add(nut);
+  };
+  /* Flat planes lying in the verge read as painted rectangles from a moving
+     car. Squashed icosahedra in a loose clump read as scrub at any angle. */
+  const scrub=(g,x,z)=>{
+    const n=2+(Math.random()<.5?1:0);
+    for(let i=0;i<n;i++){
+      const s=new THREE.Mesh(bushGeo,MAT_SCRUB);
+      const sc=rand(.55,1.05);
+      s.scale.set(sc,sc*rand(.42,.62),sc);
+      s.position.set(x+rand(-.9,.9), .19*sc, z+rand(-.7,.7));
+      s.rotation.set(rand(0,.4),rand(0,Math.PI),rand(0,.4));
+      s.castShadow=true; g.add(s);
+    }
+  };
+  const billboard=(g,x,z,facing,line1,line2)=>{
+    const cv=document.createElement('canvas'); cv.width=512; cv.height=256;
+    const c=cv.getContext('2d');
+    c.fillStyle='#d9d3c4'; c.fillRect(0,0,512,256);
+    c.fillStyle='#b23a2e'; c.fillRect(0,0,512,44);
+    c.textAlign='center'; c.fillStyle='#f2efe6'; c.font='700 30px Arial';
+    c.fillText(line1,256,33);
+    c.fillStyle='#2d2f2b'; c.font='900 62px Arial'; c.fillText(line2,256,150);
+    c.font='500 22px Arial'; c.fillStyle='#63615a'; c.fillText('NEXT EXIT',256,205);
+    const tx=new THREE.CanvasTexture(cv); tx.colorSpace=THREE.SRGBColorSpace;
+    const p=new THREE.Mesh(new THREE.PlaneGeometry(7.4,3.7),
+      new THREE.MeshBasicMaterial({map:tx}));
+    p.position.set(x,6.4,z); if(facing>0) p.rotation.y=Math.PI; g.add(p);
+    for(const px of [-2.6,2.6]){
+      const leg=new THREE.Mesh(unitBox,MAT_POLE);
+      leg.scale.set(.28,4.6,.28); leg.position.set(x+px,2.3,z); g.add(leg);
+    }
+  };
+  const waterTower=(g,x,z)=>{
+    const tank=new THREE.Mesh(new THREE.CylinderGeometry(4.2,4.2,5.2,12),MAT_RIB);
+    tank.position.set(x,15.6,z); tank.castShadow=true; g.add(tank);
+    const cone=new THREE.Mesh(new THREE.ConeGeometry(4.3,1.6,12),MAT_RIB);
+    cone.position.set(x,19,z); g.add(cone);
+    for(let i=0;i<4;i++){
+      const a=i*Math.PI/2+.79, lx=x+Math.cos(a)*3.1, lz=z+Math.sin(a)*3.1;
+      const leg=new THREE.Mesh(unitBox,MAT_POLE);
+      leg.scale.set(.34,13,.34); leg.position.set(lx,6.5,lz); g.add(leg);
+      colliders.push({minX:lx-.4,maxX:lx+.4,minZ:lz-.4,maxZ:lz+.4,h:13});
+    }
+    worldHits.push(tank);
+  };
+  const fuelStop=(g,x,z,facing)=>{
+    const canopy=new THREE.Mesh(unitBox,MAT_ROOF);
+    canopy.scale.set(17,.55,9); canopy.position.set(x,5.1,z);
+    canopy.castShadow=true; g.add(canopy); worldHits.push(canopy);
+    for(const px of [-7,7]) for(const pz of [-3.4,3.4]){
+      const c=new THREE.Mesh(unitBox,MAT_DOOR);
+      c.scale.set(.42,5,.42); c.position.set(x+px,2.5,z+pz); g.add(c);
+      colliders.push({minX:x+px-.5,maxX:x+px+.5,minZ:z+pz-.5,maxZ:z+pz+.5,h:5});
+    }
+    for(const px of [-3.4,3.4]){                    /* pumps */
+      const p=new THREE.Mesh(unitBox,MAT_RIB);
+      p.scale.set(1.1,1.9,.7); p.position.set(x+px,.95,z);
+      p.castShadow=true; g.add(p);
+      solid(p,x+px-.6,x+px+.6,z-.4,z+.4,1.9);
+    }
+    bld(g,x+13.5,z-facing*7.5,11,4.6,8,facing,{m:1,rows:1,band:false});
+  };
+  const yard=(g,x,z,w)=>{                            /* fenced lot with containers */
+    const CONT=[0x8a4a3c,0x3f5a78,0x4a5c40,0x8a7a4a,0x6a5a7a];
+    for(let i=0;i<5;i++){
+      const cw=rand(5.8,6.2), cx=x+rand(-w/2+4,w/2-4), cz=z+rand(-5,5);
+      const stack=Math.random()<.35?2:1;
+      for(let s=0;s<stack;s++){
+        const c=new THREE.Mesh(unitBox,new THREE.MeshStandardMaterial(
+          {color:CONT[(i+s)%CONT.length],roughness:.9,metalness:.15}));
+        c.scale.set(cw,2.5,2.4); c.position.set(cx,1.25+s*2.55,cz);
+        c.rotation.y=Math.random()<.5?0:Math.PI/2;
+        c.castShadow=true; c.receiveShadow=true; g.add(c);
+        if(!s) solid(c,cx-cw/2,cx+cw/2,cz-1.4,cz+1.4,2.5+2.55*(stack-1));
+      }
+    }
+    for(let fx=-w/2; fx<=w/2; fx+=3){                /* chain-link posts */
+      const p=new THREE.Mesh(unitBox,MAT_POLE);
+      p.scale.set(.12,2.2,.12); p.position.set(x+fx,1.1,z-8.5); g.add(p);
+    }
+  };
+
+  /* ---------------- zone 1: outer commercial, -140 .. -320 ---------------- */
+  let mi=0;
+  for(let x=X_NEAR; x>-320; x-=17.5){
+    /* the map2 liquor store owns this frontage - see the map2 pack */
+    if(Math.abs(x+268)<11) continue;
+    const g=grp(x,ZN,200);
+    bld(g,x,ZN,rand(13,17),rand(6,11),12.5,-1,
+        {m:(mi++)%6, awn: Math.random()<.4 ? [0x7a3a30,0x3f5a44,0x54502f][mi%3] : 0});
+    if(Math.random()<.72){
+      const g2=grp(x-6,ZS,200);
+      bld(g2,x-6,ZS,rand(12,16),rand(5.5,9),12,1,{m:(mi++)%6});
+    }
+  }
+  /* ---------------- zone 2: industrial belt, -320 .. -580 ---------------- */
+  for(let x=-322; x>-580; x-=44){
+    const g=grp(x,ZN,240);
+    shed(g,x,ZN+2,rand(30,40),rand(7.5,9.5),20,-1);
+    const g2=grp(x-20,ZS,240);
+    if(Math.random()<.55) yard(g2,x-20,ZS-9,34);
+    else shed(g2,x-20,ZS-2,rand(24,34),rand(7,9),18,1);
+  }
+  { const g=grp(-402,ZS,260); fuelStop(g,-402,ZS-6,1); }
+  { const g=grp(-486,ZN+26,300); waterTower(g,-486,ZN+26); }
+  { const g=grp(-360,ZN,240); billboard(g,-360,ZN-1.5,-1,'AL-SALAAM','MASJID'); }
+  { const g=grp(-540,ZS,240); billboard(g,-540,ZS+1.5,1,'TOPS','SUPERMARKET'); }
+  /* ---------------- zone 3: compounds + palms, -580 .. -846 ---------------- */
+  for(let x=-584; x>X_FAR; x-=34){
+    const g=grp(x,ZN,220);
+    compound(g,x,ZN,rand(24,30),rand(18,24),-1);
+    if(Math.random()<.8){
+      const g2=grp(x-15,ZS,220);
+      compound(g2,x-15,ZS,rand(22,28),rand(16,22),1);
+    }
+  }
+  /* ---------------- continuous roadside dressing ---------------- */
+  let prevN=null, prevS=null;
+  for(let x=X_NEAR; x>X_FAR; x-=46){
+    const g=grp(x,36,230);
+    for(const [z,side] of [[40.9,'n'],[31.1,'s']]){   /* verge edge, clear of the 32..40 lane */
+      const p=new THREE.Mesh(poleGeo,MAT_POLE);
+      p.position.set(x,4.5,z); p.castShadow=true; g.add(p);
+      const arm=new THREE.Mesh(armGeo,MAT_POLE); arm.position.set(x,8.4,z); g.add(arm);
+      colliders.push({minX:x-.3,maxX:x+.3,minZ:z-.3,maxZ:z+.3,h:9});
+      const prev = side==='n'?prevN:prevS;
+      if(prev!==null){                               /* slack wire back to the last pole */
+        const w=new THREE.Mesh(unitBox,MAT_WIRE);
+        w.scale.set(prev-x,.05,.05); w.position.set((prev+x)/2,8.1,z); g.add(w);
+      }
+      if(side==='n') prevN=x; else prevS=x;
+    }
+  }
+  for(let x=X_NEAR; x>X_FAR; x-=11){                 /* scrub along both verges */
+    const g=grp(x,36,150);
+    scrub(g,x+rand(-3,3),rand(41,42.8));
+    scrub(g,x+rand(-3,3),rand(29.4,31));
+  }
+  for(let x=-560; x>X_FAR; x-=17){                   /* palm avenue into the mosque */
+    const g=grp(x,36,190);
+    palm(g,x,41.4); palm(g,x-8,30.6);
+  }
+  console.info('highway: filled x '+X_NEAR+' .. '+X_FAR);
+}
+
 buildTown();
+buildHighway();
 buildMosque();
 /* mod_town2.js — Main Street extension for dead-aisle.html
    Defines extendTown(); call ONCE after buildTown().
@@ -2431,31 +3264,38 @@ function extendTown(){
 
   /* ---------- 1 & 2: facades (east fill 45->125, west strip -130..-45) ---------- */
   function t2_facade(b){
+    /* one group per building so distance culling is a single flag rather than
+       a frustum test on every window quad */
+    /* was t2_g.add(t2_g) - a self-add, which three.js rejects with a console
+       error, so none of these 11 buildings was ever in the scene */
+    const t2_g=new THREE.Group(); scene.add(t2_g);
+    cullRegister(t2_g, b.x, b.f, 210);
+    const scene_add=(o)=>t2_g.add(o);
     const t2_bm=new THREE.Mesh(new THREE.BoxGeometry(b.w,b.h,b.d),
       facadeMat(new THREE.Color(b.c).multiplyScalar(1.7),b.w,b.h));
     t2_bm.position.set(b.x,b.h/2,b.f+b.d/2);
-    t2_bm.castShadow=true; t2_bm.receiveShadow=true; scene.add(t2_bm);
+    t2_bm.castShadow=true; t2_bm.receiveShadow=true; scene_add(t2_bm);
     colliders.push({minX:b.x-b.w/2,maxX:b.x+b.w/2,minZ:b.f-.1,maxZ:b.f+b.d,h:b.h});
 
     const t2_band=new THREE.Mesh(new THREE.BoxGeometry(b.w-1.2,2.5,.18),townMats.store);
-    t2_band.position.set(b.x,1.35,b.f-.08); scene.add(t2_band);
+    t2_band.position.set(b.x,1.35,b.f-.08); t2_g.add(t2_band);
 
     const t2_cols=Math.max(3,Math.floor((b.w-3.4)/2.1));
     const t2_x0=b.x-((t2_cols-1)*2.1)/2;
     for(let t2_r=0;t2_r<b.rows;t2_r++)for(let t2_c=0;t2_c<t2_cols;t2_c++){
       const t2_w=new THREE.Mesh(townWinGeo,Math.random()<.38?townMats.winLit:townMats.winDark);
       t2_w.position.set(t2_x0+t2_c*2.1,3.2+t2_r*2.25,b.f-.02);
-      t2_w.rotation.y=t2_winRot; scene.add(t2_w);
+      t2_w.rotation.y=t2_winRot; t2_g.add(t2_w);
     }
     if(b.awn){
       const t2_aw=new THREE.Mesh(new THREE.BoxGeometry(b.w*.5,.14,1.6),
         new THREE.MeshStandardMaterial({color:b.awn,roughness:.9}));
-      t2_aw.position.set(b.x,2.9,b.f-.5); t2_aw.rotation.x=-.32; scene.add(t2_aw);
+      t2_aw.position.set(b.x,2.9,b.f-.5); t2_aw.rotation.x=-.32; t2_g.add(t2_aw);
     }
     if(b.acRow){
       for(let t2_i=0;t2_i<3;t2_i++){
         const t2_ac=new THREE.Mesh(new THREE.BoxGeometry(1.8,.7,1.4),MAT.metalD);
-        t2_ac.position.set(b.x-2.6+t2_i*2.6,b.h+.35,b.f+b.d/2); scene.add(t2_ac);
+        t2_ac.position.set(b.x-2.6+t2_i*2.6,b.h+.35,b.f+b.d/2); t2_g.add(t2_ac);
       }
     }
   }
@@ -2871,7 +3711,7 @@ function applyCarFit(){
   carModel.position.set(CAR_FIT.x,CAR_FIT.y,CAR_FIT.z);
   carModel.rotation.set(0,CAR_FIT.ry,0);
 }
-new GLTFLoader().load('assets/car.glb',(gltf)=>{
+gltfLoad('assets/car.glb',(gltf)=>{
   const m=gltf.scene;
   m.traverse(o=>{
     if(!o.isMesh)return;
@@ -2952,7 +3792,7 @@ function carWheelsBind(m){
 }
 
 function buildWrecks(){
-  new GLTFLoader().load('assets/car-lod.glb',(g2)=>{
+  gltfLoad('assets/car-lod.glb',(g2)=>{
     const src=g2.scene;
     const WRECK_TINT=[0x4a4a50,0x6a4038,0x39424e,0x555046,0x3e4a3e];
     const sites=window.__wreckSites||[];
@@ -3153,6 +3993,9 @@ function carCamera(dt){
    so there is no hard cut at either end. */
 const parkSong=new window.Audio('assets/park-song.mp3');
 parkSong.loop=true; parkSong.preload='auto'; parkSong.volume=0;
+/* the level the fade is aiming at, so settingsApply can rescale rather than
+   clamp against whatever the volume happens to be mid-fade */
+let parkSongTarget=0;
 let parkFade=null;
 /* N toggles just the park track, independently of the global M mute */
 let parkMuted=false, allMuted=false;
@@ -3171,7 +4014,8 @@ function parkSongStart(target, secs=3.4){
   const t0=performance.now();
   parkFade=setInterval(()=>{
     const k=Math.min(1,(performance.now()-t0)/(secs*1000));
-    parkSong.volume=target*(k*k*(3-2*k));
+    parkSongTarget=target;
+    parkSong.volume=target*(k*k*(3-2*k))*(SETTINGS.music/100);
     if(k>=1)clearInterval(parkFade);
   },40);
 }
@@ -3473,7 +4317,13 @@ addEventListener('keyup',e=>keys[e.code]=false);
 let locked=false, playing=false, paused=false;
 const menuEl=document.getElementById('menu'), deadEl=document.getElementById('dead'), pauseEl=document.getElementById('pause');
 
-document.getElementById('btn-retry').onclick=()=>startGame(true);   /* retry the same round */
+/* The win screen's REDEPLOY tells clients to restart too; this one did not,
+   so a host who died restarted alone and the party desynced for good. Same
+   round number, so clients just re-run endReset()+startGame(true). */
+document.getElementById('btn-retry').onclick=()=>{
+  if(NET.mode==='host'&&NET.conns.length) netSend({t:'round',n:mission.round});
+  startGame(true);
+};
 document.getElementById('btn-resume').onclick=()=>document.body.requestPointerLock();
 /* The lobby is a UI, not a click-anywhere splash - it has a PLAY button, a
    name field and a party panel, so a blanket click handler would fire while
@@ -3483,7 +4333,13 @@ let everLocked=false, pausedAt=0;
 document.addEventListener('pointerlockchange',()=>{
   locked = document.pointerLockElement===document.body;
   if(locked){ everLocked=true; }
-  if(!locked && playing && player.alive && everLocked){ paused=true; pauseEl.classList.remove('hidden'); }
+  if(!locked && playing && player.alive && everLocked){
+    paused=true; pauseEl.classList.remove('hidden');
+    /* these are looping sources driven from the frame loop, which stops
+       ticking while paused - so they held their last state and droned on */
+    try{ Steps.stop(); }catch(e){}
+    try{ Audio.engineStop(); Audio.skidSet(0); }catch(e){}
+  }
   if(locked){
     /* wall-clock weapon timers would otherwise tick down while paused */
     if(paused&&pausedAt){
@@ -3491,6 +4347,7 @@ document.addEventListener('pointerlockchange',()=>{
       weapon.lastShot+=gap; weapon.reloadEnd+=gap; vmOneShotEnd+=gap;
     }
     pausedAt=0;
+    if(paused && (phase==='drive'||phase==='parking')){ try{ Audio.engineStart(); }catch(e){} }
     paused=false; pauseEl.classList.add('hidden');
   } else if(paused&&!pausedAt){ pausedAt=performance.now()/1000; }
 });
@@ -3854,12 +4711,29 @@ function selectWeapon(i){
   if(el) el.textContent=w.name;
   if(typeof Audio!=='undefined'&&Audio.reload) try{ Audio.reload(); }catch(e){}
 }
-new GLTFLoader().load('assets/guns.glb', (gltf)=>{
+gltfLoad('assets/guns.glb', (gltf)=>{
   for(const w of WEAPONS){
     const src=gltf.scene.children.find(o=>o.name===w.id);
     if(!src)continue;
-    src.traverse(o=>{ if(o.isMesh){ o.frustumCulled=false; o.castShadow=false; o.receiveShadow=false;
-      if(o.material&&o.material.map) o.material.map.anisotropy=4; } });
+    src.traverse(o=>{ if(!o.isMesh)return;
+      o.frustumCulled=false; o.castShadow=false; o.receiveShadow=false;
+      /* The scene environment is a sky PMREM at .55 intensity. Submeshes that
+         ship metalness=1 over a white albedo - the optic housing and lens -
+         are then lit almost entirely by reflected sky and render as a
+         blown-out white blob right in the middle of the sight picture. The
+         viewmodel sits under its own camera and does not need environment
+         reflection at that strength. */
+      const mats=[].concat(o.material);
+      o.material=mats.map(m=>{
+        if(!m)return m;
+        const c=m.clone();
+        c.envMapIntensity=.15;
+        if(c.metalness!==undefined && c.metalness>.85) c.metalness=.65;
+        if(c.map) c.map.anisotropy=4;
+        return c;
+      });
+      if(o.material.length===1) o.material=o.material[0];
+    });
     src.scale.setScalar(AK_FIT.scale);
     src.position.set(AK_FIT.x,AK_FIT.y,AK_FIT.z);
     src.rotation.set(AK_FIT.rx,AK_FIT.ry,AK_FIT.rz);
@@ -4117,7 +4991,10 @@ function shatter(mesh, dir){
   for(let i=0;i<n;i++){
     const m=new THREE.Mesh(debrisGeo,new THREE.MeshStandardMaterial({
       color:new THREE.Color(d.col).multiplyScalar(rand(.7,1.15)), roughness:.9}));
-    m.scale.set(Math.max(.04,sz.x*rand(.06,.2)), Math.max(.04,sz.y*rand(.06,.2)), Math.max(.04,sz.z*rand(.06,.2)));
+    /* clamp absolutely: a chip off a wall panel is still a chip, not a
+       half-metre slab of geometry flying across the room */
+    const chip=(e)=>clamp(e*rand(.06,.2), .04, .34);
+    m.scale.set(chip(sz.x), chip(sz.y), chip(sz.z));
     m.position.set(c.x+rand(-1,1)*sz.x*.4, c.y+rand(-1,1)*sz.y*.4, c.z+rand(-1,1)*sz.z*.4);
     m.rotation.set(rand(0,6.3),rand(0,6.3),rand(0,6.3));
     m.castShadow=false; scene.add(m);
@@ -4208,6 +5085,201 @@ function smokeUpdate(dt){
     if(p.t<=0){ scene.remove(p.sp); p.sp.material.dispose(); SMOKE.splice(i,1); }
   }
 }
+/* ---- static ground decals ----
+   1200 m of road was one clean unbroken surface. This lays cracks, oil
+   stains, resurfacing patches and old tyre tracks over it, plus grime in the
+   lot and at the mosque forecourt.
+
+   Every mark of a given type shares one InstancedMesh, so the whole set costs
+   four draw calls no matter how many marks there are. The geometry is
+   pre-rotated flat, so each instance matrix is just translate + yaw + scale.
+   polygonOffset keeps them off the road surface without z-fighting, and they
+   sit below the dynamic skid marks at y=.03 so fresh rubber reads on top. */
+const DECAL_KINDS={};
+function decalTex(kind){
+  const cv=document.createElement('canvas'); cv.width=cv.height=128;
+  const g=cv.getContext('2d');
+  g.clearRect(0,0,128,128);
+  if(kind==='crack'){
+    /* a branching fracture: walk a main line, spawn shorter offshoots */
+    g.strokeStyle='rgba(18,17,16,.85)'; g.lineCap='round';
+    const walk=(x,y,ang,len,w,depth)=>{
+      g.lineWidth=w; g.beginPath(); g.moveTo(x,y);
+      let cx=x, cy=y, a=ang;
+      for(let i=0;i<len;i++){
+        a+=(Math.random()-.5)*.55; cx+=Math.cos(a)*4; cy+=Math.sin(a)*4;
+        g.lineTo(cx,cy);
+      }
+      g.stroke();
+      if(depth>0&&len>4){
+        walk(cx,cy,a+rand(.5,1.2),(len*.55)|0,Math.max(.6,w*.6),depth-1);
+        walk(cx,cy,a-rand(.5,1.2),(len*.5)|0, Math.max(.6,w*.6),depth-1);
+      }
+    };
+    walk(12,64,0,20,2.2,2);
+  }else if(kind==='oil'){
+    const r=g.createRadialGradient(64,64,4,64,64,58);
+    r.addColorStop(0,'rgba(12,11,14,.72)');
+    r.addColorStop(.55,'rgba(20,18,22,.34)');
+    r.addColorStop(1,'rgba(20,18,22,0)');
+    g.fillStyle=r; g.beginPath();
+    /* an irregular blob, not a perfect disc */
+    for(let i=0;i<=24;i++){
+      const a=i/24*Math.PI*2, rr=42+Math.sin(a*3.1)*9+Math.cos(a*5.3)*6;
+      i?g.lineTo(64+Math.cos(a)*rr,64+Math.sin(a)*rr):g.moveTo(64+Math.cos(a)*rr,64+Math.sin(a)*rr);
+    }
+    g.closePath(); g.fill();
+  }else if(kind==='patch'){
+    /* a resurfacing patch: darker rectangle with a ragged sealed edge */
+    g.fillStyle='rgba(38,36,34,.6)';
+    g.beginPath();
+    for(let i=0;i<=20;i++){
+      const t=i/20, a=t*Math.PI*2;
+      const rx=52+Math.sin(a*4)*5, ry=34+Math.cos(a*3)*5;
+      i?g.lineTo(64+Math.cos(a)*rx,64+Math.sin(a)*ry):g.moveTo(64+Math.cos(a)*rx,64+Math.sin(a)*ry);
+    }
+    g.closePath(); g.fill();
+    g.strokeStyle='rgba(16,15,14,.5)'; g.lineWidth=3; g.stroke();
+  }else{ /* track: two faded parallel bands */
+    for(const bx of [40,88]){
+      const lg=g.createLinearGradient(bx-11,0,bx+11,0);
+      lg.addColorStop(0,'rgba(26,24,22,0)');
+      lg.addColorStop(.5,'rgba(26,24,22,.42)');
+      lg.addColorStop(1,'rgba(26,24,22,0)');
+      g.fillStyle=lg; g.fillRect(bx-11,0,22,128);
+    }
+  }
+  const t=new THREE.CanvasTexture(cv);
+  t.colorSpace=THREE.SRGBColorSpace;
+  t.anisotropy=8;
+  return t;
+}
+function decalBuild(){
+  const geo=new THREE.PlaneGeometry(1,1); geo.rotateX(-Math.PI/2);
+  const spec=[
+    ['crack', .55],
+    ['oil',   .60],
+    ['patch', .48],
+    ['track', .40],
+  ];
+  for(const [kind,op] of spec){
+    DECAL_KINDS[kind]={
+      geo,
+      mat:new THREE.MeshBasicMaterial({map:decalTex(kind),transparent:true,opacity:op,
+        depthWrite:false,polygonOffset:true,polygonOffsetFactor:-3,polygonOffsetUnits:-3}),
+      mats:[],
+    };
+  }
+}
+function decalAdd(kind,x,z,size,yaw){
+  const d=DECAL_KINDS[kind]; if(!d)return;
+  const m=new THREE.Matrix4();
+  m.compose(new THREE.Vector3(x,.028,z),
+            new THREE.Quaternion().setFromEuler(new THREE.Euler(0,yaw===undefined?rand(0,Math.PI*2):yaw,0)),
+            new THREE.Vector3(size,1,size*rand(.7,1.4)));
+  d.mats.push(m);
+}
+function decalCommit(){
+  let n=0;
+  for(const k in DECAL_KINDS){
+    const d=DECAL_KINDS[k];
+    if(!d.mats.length)continue;
+    const im=new THREE.InstancedMesh(d.geo,d.mat,d.mats.length);
+    for(let i=0;i<d.mats.length;i++) im.setMatrixAt(i,d.mats[i]);
+    im.instanceMatrix.needsUpdate=true;
+    im.receiveShadow=false; im.castShadow=false;
+    /* one mesh spanning 1200 m: frustum-culling it as a unit would pop the
+       whole road's wear in and out, so leave it always submitted - it is a
+       single call either way */
+    im.frustumCulled=false;
+    im.renderOrder=1;
+    scene.add(im); n+=d.mats.length;
+  }
+  console.info('ground decals:',n,'marks in',Object.keys(DECAL_KINDS).length,'batches');
+}
+function decalScatter(){
+  decalBuild();
+  /* the road, all 1200 m of it */
+  for(let x=WORLD_X0+20; x<WORLD_X1-20; x+=rand(9,26)){
+    const lane=rand(33.2,38.8);
+    const r=Math.random();
+    if(r<.34)      decalAdd('crack', x, lane, rand(2.2,5.0));
+    else if(r<.56) decalAdd('patch', x, lane, rand(2.4,4.6));
+    else if(r<.78) decalAdd('track', x, lane, rand(3.0,6.5), rand(-.12,.12));
+    else           decalAdd('oil',   x, lane, rand(1.1,2.4));
+  }
+  /* heavier wear where cars actually stop and turn: the store lot */
+  for(let i=0;i<30;i++)
+    decalAdd(Math.random()<.45?'oil':'crack', rand(-22,22), rand(17,30), rand(1.0,3.0));
+  for(let i=0;i<10;i++)
+    decalAdd('track', rand(-20,20), rand(18,29), rand(2.6,5.0), rand(-.3,.3));
+  /* mosque forecourt */
+  for(let i=0;i<18;i++)
+    decalAdd(Math.random()<.5?'crack':'patch', mqx(rand(-24,24)), mqz(rand(15,31)), rand(1.4,3.6));
+  /* fuel stop apron and the industrial yards leak */
+  for(let i=0;i<14;i++)
+    decalAdd('oil', -402+rand(-12,12), rand(24,30), rand(1.2,2.8));
+  decalCommit();
+}
+
+/* ---- ambient dust ----
+   A slow drift of motes so outdoor air is not perfectly empty. One Points
+   cloud of 260 sprites, recentred on the camera each frame, so it costs a
+   single draw call and never needs more particles to cover more ground. */
+let dustPts=null, dustVel=null;
+const DUST_N=260, DUST_BOX=46;
+function dustInit(){
+  if(dustPts)return;
+  const pos=new Float32Array(DUST_N*3);
+  dustVel=new Float32Array(DUST_N*3);
+  for(let i=0;i<DUST_N;i++){
+    pos[i*3]  =rand(-DUST_BOX,DUST_BOX);
+    pos[i*3+1]=rand(.4,9);
+    pos[i*3+2]=rand(-DUST_BOX,DUST_BOX);
+    dustVel[i*3]  =rand(-.32,.32);
+    dustVel[i*3+1]=rand(-.05,.09);
+    dustVel[i*3+2]=rand(-.32,.32);
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  const cv=document.createElement('canvas'); cv.width=cv.height=32;
+  const c=cv.getContext('2d');
+  const r=c.createRadialGradient(16,16,0,16,16,15);
+  r.addColorStop(0,'rgba(255,246,226,.9)'); r.addColorStop(1,'rgba(255,246,226,0)');
+  c.fillStyle=r; c.fillRect(0,0,32,32);
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace;
+  dustPts=new THREE.Points(g,new THREE.PointsMaterial({
+    map:t, size:.075, sizeAttenuation:true, transparent:true, opacity:.34,
+    depthWrite:false, blending:THREE.AdditiveBlending, fog:true }));
+  dustPts.frustumCulled=false;
+  scene.add(dustPts);
+}
+function dustUpdate(dt){
+  if(!dustPts)return;
+  /* indoors there is no wind and the motes would sit in the walls */
+  const want = (phase!=='inside'&&phase!=='menu');
+  if(dustPts.visible!==want) dustPts.visible=want;
+  if(!want)return;
+  const p=dustPts.geometry.attributes.position, a=p.array;
+  const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z;
+  for(let i=0;i<DUST_N;i++){
+    const j=i*3;
+    a[j]  +=dustVel[j]  *dt;
+    a[j+1]+=dustVel[j+1]*dt;
+    a[j+2]+=dustVel[j+2]*dt;
+    /* wrap around the camera so the same 260 motes cover wherever you are */
+    if(a[j]-cx> DUST_BOX) a[j]-=DUST_BOX*2; else if(a[j]-cx<-DUST_BOX) a[j]+=DUST_BOX*2;
+    if(a[j+2]-cz> DUST_BOX) a[j+2]-=DUST_BOX*2; else if(a[j+2]-cz<-DUST_BOX) a[j+2]+=DUST_BOX*2;
+    if(a[j+1]>cy+11) a[j+1]=cy-1.5; else if(a[j+1]<cy-2.5) a[j+1]=cy+9;
+  }
+  p.needsUpdate=true;
+}
+/* Built here rather than up with the rest of the world: DECAL_KINDS and
+   dustPts are declared just above, and calling from buildTown() would read
+   them in their temporal dead zone. */
+decalScatter();
+dustInit();
+
 let _skidT=0;
 function skidFX(dt){
   if(!townCar||carSkid<.22){ return; }
@@ -4227,14 +5299,23 @@ function skidFX(dt){
 
 /* impact sparks */
 const sparks=[];
+/* Every impact used to allocate 5 BoxGeometries + 5 materials for the sparks
+   and another geometry + material for the hole, and sparksUpdate only did
+   scene.remove - so a firefight leaked thousands of GPU buffers that were
+   never disposed. They are all identical, so share one of each. */
+const sparkGeo=new THREE.BoxGeometry(.02,.02,.02);
+const sparkMats=[new THREE.MeshBasicMaterial({color:0x888877}),
+                 new THREE.MeshBasicMaterial({color:0xcccccc})];
+const scorchGeo=new THREE.CircleGeometry(.03,6);
+const scorchMat=new THREE.MeshBasicMaterial({color:0x111111});
 function impactSpark(p,n){
   for(let i=0;i<5;i++){
-    const s=new THREE.Mesh(new THREE.BoxGeometry(.02,.02,.02), new THREE.MeshBasicMaterial({color:i%2?0xcccccc:0x888877}));
+    const s=new THREE.Mesh(sparkGeo, sparkMats[i&1]);
     s.position.copy(p);
     const v=n.clone().multiplyScalar(rand(1,3)).add(V3(rand(-1,1),rand(0,2),rand(-1,1)));
     sparks.push({m:s,v,t:rand(.2,.4)}); scene.add(s);
   }
-  const hole=new THREE.Mesh(new THREE.CircleGeometry(.03,6), new THREE.MeshBasicMaterial({color:0x111111}));
+  const hole=new THREE.Mesh(scorchGeo, scorchMat);
   hole.position.copy(p).add(n.clone().multiplyScalar(.005)); hole.lookAt(p.clone().add(n)); scene.add(hole);
   setTimeout(()=>scene.remove(hole),9000);
 }
@@ -4410,7 +5491,18 @@ function attachHostileModel(gltf){
     variantI++;
     m.traverse(o=>{
       if(!o.isMesh)return;
-      o.frustumCulled=false; o.castShadow=true; o.receiveShadow=false;
+      /* frustumCulled=false is the usual workaround for a skinned mesh whose
+         bind-space bounds are wrong - but it means every visible hostile is
+         drawn even when it is behind you or through a wall, which was
+         ~1.4M triangles a frame inside the store. Cull them properly and give
+         the geometry a bounding sphere big enough that no animation pops it. */
+      o.frustumCulled=true;
+      if(o.geometry){
+        if(!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+        if(o.geometry.boundingSphere) o.geometry.boundingSphere.radius=Math.max(
+          o.geometry.boundingSphere.radius, 1.6);
+      }
+      o.castShadow=true; o.receiveShadow=false;
       const src=Array.isArray(o.material)?o.material:[o.material];
       o.material=src.map(mat=>{
         if(!mat)return mat;
@@ -4446,7 +5538,11 @@ function attachHostileModel(gltf){
    so there is no extra rigging cost and no extra draw-call class.
    They are ambience only: they never chase and never damage. */
 const TOWN_FOLK=[];
-const FOLK_DRAW=150;          /* only animate the ones you can actually see */
+const FOLK_DRAW=88;           /* only animate the ones you can actually see */
+/* 69 civilians x 6 sub-meshes was 414 skinned draw calls on its own. Fewer
+   bodies, a shorter draw distance, and the face/hair sub-meshes stripped -
+   nobody reads an eyebrow on a pedestrian 60 m away. */
+const FOLK_STRIP=/eyebrow|low_poly|short04/i;
 function buildTownFolk(proto, clips, fit){
   if(TOWN_FOLK.length) return;
   const SHIRT=[0xb8b2a4,0x7d6a58,0x4c5a6b,0x6b5560,0x8a7f5e,0x3f4a44,0x93745a,0x5d6470];
@@ -4454,7 +5550,7 @@ function buildTownFolk(proto, clips, fit){
   const walk = clips['run'] || clips['idle'] || Object.values(clips)[0];
   /* spread them along the whole road, both pavements, both directions */
   let i=0;
-  for(let x=WORLD_X0+60; x<WORLD_X1-40; x+=26){
+  for(let x=WORLD_X0+60; x<WORLD_X1-40; x+=64){
     /* keep them off the TOPS forecourt and out of the mosque courtyard */
     if(Math.abs(x)<34 || Math.abs(x-MOSQUE_X)<40) continue;
     for(const side of [0,1]){
@@ -4463,9 +5559,18 @@ function buildTownFolk(proto, clips, fit){
       m.scale.setScalar(fit);
       const shirt=SHIRT[i%SHIRT.length], pant=PANT[(i*3)%PANT.length];
       const skinK=.74+((i*29)%9)/9*.5;
+      for(const kid of [...m.children]) if(FOLK_STRIP.test(kid.name||'')) kid.removeFromParent();
+      /* Object3D.traverse caches l=children.length before it loops, so calling
+         removeFromParent() from inside the callback shortens the array under
+         it and children[i] comes back undefined - "Cannot read properties of
+         undefined (reading 'traverse')". That threw partway through the very
+         first NPC, so most of the town crowd was never built. Collect the
+         strays and detach them after the walk instead. */
+      const strip=[];
       m.traverse(o=>{
         if(!o.isMesh)return;
-        o.frustumCulled=true; o.castShadow=true; o.receiveShadow=false;
+        if(FOLK_STRIP.test(o.name||'')){ strip.push(o); return; }
+        o.frustumCulled=true; o.castShadow=false; o.receiveShadow=false;
         const src=Array.isArray(o.material)?o.material:[o.material];
         o.material=src.map(mat=>{
           if(!mat)return mat;
@@ -4477,6 +5582,7 @@ function buildTownFolk(proto, clips, fit){
         });
         if(o.material.length===1)o.material=o.material[0];
       });
+      for(const dead of strip) dead.removeFromParent();
       const root=new THREE.Group();
       /* north pavement is z 40.1..42.6; the south verge sits below the road at z<32 */
       const z = side ? 41.4+rand(-.6,.6) : 30.6+rand(-.7,.7);
@@ -4522,7 +5628,7 @@ function hostilePlay(z,name,fade){
   next.fadeIn(fade===undefined?.18:fade).play();
   z.clipName=name;
 }
-new GLTFLoader().load('assets/hostile.glb',
+gltfLoad('assets/hostile.glb',
   attachHostileModel,
   undefined,
   ()=>console.info('assets/hostile.glb not reachable (file:// blocks it) - using block figures'));
@@ -4719,9 +5825,16 @@ const cinematicDeath=(z,dt)=>{
   /* Clamp to whichever region the body is ALREADY in. The old fixed
      z -14..14 was the store interior, so the first frame of every
      parking-lot kill snapped the corpse 5-15 m through the storefront. */
-  const cdIn = rp.z < 15.5;
-  rp.x=clamp(rp.x+cd.slide.x*dt, cdIn?-21:LC_LOT.minX, cdIn?21:LC_LOT.maxX);
-  rp.z=clamp(rp.z+cd.slide.z*dt, cdIn?-14:LC_LOT.minZ, cdIn?14:LC_LOT.maxZ);
+  /* These were the act-1 interior bounds as literals, so any hostile killed
+     inside the mosque was clamped to x in [-21,21] and snapped ~900 m east to
+     the supermarket. Mirror the act-aware interior extents setPhase uses, and
+     key the inside/outside test off the act's own lot edge. */
+  const cd_a2 = (mission.act===2);
+  const cdInMinX = ACT_OFF+(cd_a2?MQ_B.inMinX:-21), cdInMaxX = ACT_OFF+(cd_a2?MQ_B.inMaxX:21);
+  const cdInMinZ = cd_a2?MQ_B.minZ:-14,             cdInMaxZ = cd_a2?MQ_B.inMaxZ:15.2;
+  const cdIn = rp.z < LC_LOT.minZ;
+  rp.x=clamp(rp.x+cd.slide.x*dt, cdIn?cdInMinX:LC_LOT.minX, cdIn?cdInMaxX:LC_LOT.maxX);
+  rp.z=clamp(rp.z+cd.slide.z*dt, cdIn?cdInMinZ:LC_LOT.minZ, cdIn?cdInMaxZ:LC_LOT.maxZ);
   /* ease-out-back fall with overshoot bounce */
   const p=clamp(cd.t/.7,0,1), e=zv_eob(p);
   if(!cd.thud && p>.72){                       /* the moment the body lands */
@@ -5148,14 +6261,37 @@ function dropHeld(){
 
 /* Every melon that bursts is removed from the scene for good, so without this
    run 2 had no throwables at all and carts stayed wherever they landed. */
+/* Act-2 homes. Throwables spawn once at load with act-1 coordinates, so the
+   whole second half of the game had no carts, melons or axes - the axe is the
+   secondary weapon, so it was simply unobtainable after TOPS. These are points
+   inside the prayer hall and out in the courtyard, offset by ACT_OFF. */
+const THROW_SPOTS2=[[-16,10],[16,10],[-20,-6],[20,-6],[0,-13],[-11,6],[11,6],
+                    [-6,-9],[6,-9],[0,4],[-18,2],[18,2],[8,20],[-8,22],[13,24]]
+  .map(([x,z])=>[mqo(x), mqz(z)]);
 function throwablesReset(){
   dropHeld();
+  let ti2=0;
   for(const t of THROWABLES){
     if(t.state==='held'){ camera.remove(t.mesh); }
     if(!t.mesh.parent) scene.add(t.mesh);
     t.mesh.traverse(o=>o.layers.set(0));
     t.mesh.visible=true;
-    t.mesh.position.set(t.home.x,t.home.y,t.home.z);
+    if(mission.act===2){
+      /* Only the axe belongs here. Re-homing everything put shopping carts
+         and watermelons in the middle of the prayer hall, which reads as a
+         bug rather than set dressing - but the axe is the secondary weapon
+         and has to be obtainable, so it moves and the rest stays parked. */
+      if(t.type!=='axe'){
+        t.mesh.visible=false; t.state='ground';
+        t.mesh.position.set(t.home.x,-50,t.home.z);
+        t.vel.set(0,0,0); t.spin.set(0,0,0); t.life=0;
+        continue;
+      }
+      const sp=THROW_SPOTS2[ti2++%THROW_SPOTS2.length];
+      t.mesh.position.set(ACT_OFF+sp[0], t.home.y, sp[1]);
+    }else{
+      t.mesh.position.set(t.home.x,t.home.y,t.home.z);
+    }
     t.mesh.rotation.set(0,rand(0,Math.PI*2),0);
     t.mesh.scale.setScalar(t.def.scale);
     t.vel.set(0,0,0); t.spin.set(0,0,0); t.life=0; t.state='ground';
@@ -5270,7 +6406,7 @@ function throwablesUpdate(dt,now){
     }
   }
 }
-new GLTFLoader().load('assets/throwables.glb', (gltf)=>{
+gltfLoad('assets/throwables.glb', (gltf)=>{
   for(const o of gltf.scene.children.slice()){
     throwProto[o.name]=o;
     /* the exporter renamed the joined cart, so alias whatever looks like one */
@@ -5289,7 +6425,7 @@ new GLTFLoader().load('assets/throwables.glb', (gltf)=>{
 
 /* The axe ships as its own file. It is the secondary weapon: fewer of them,
    scattered where you would actually find one, and lethal in one hit. */
-new GLTFLoader().load('assets/axe.glb', (gltf)=>{
+gltfLoad('assets/axe.glb', (gltf)=>{
   const src=gltf.scene;
   src.updateWorldMatrix(true,true);
   const b=new THREE.Box3().setFromObject(src);
@@ -5498,8 +6634,16 @@ window.__phase='menu';
 const INSIDE_PTS=[[-19,-12],[19,-12],[-19,-6],[19,-6],[-8,-11],[8,-11],[-16,0],[16,0],[-19,5],[19,5],[-10,9],[10,9],[-17,13],[17,13],[0,-9.4],[3,-12]];
 /* the mosque has rooms, so its wave spawns are spread across hall, chambers,
    corridor and vestibule rather than reusing the supermarket's aisle ends */
-const INSIDE_PTS2=[[-20.5,-2.5],[20.5,-2.5],[-11,-9],[11,-9],[0,-13],[-21,7],[21,7],
-                   [-14.5,3],[14.5,3],[-7.5,6.6],[7.5,6.6],[0,7.4],[0,2.2],[-18,11],[18,11]];
+/* Hand-authored against the old 50x29 hall; at 0.46 several landed in the
+   side chambers and vestibule corners, which are sealed or too tight to
+   thread - a hostile spawning there could never reach the player. These are
+   flood-fill verified reachable from the portal with >=1.5 m clearance
+   (scratchpad/harness/openspots.mjs). */
+const INSIDE_PTS2=([
+  [-21.7,-12.7],[-12.6,-12.7],[-3.5,-12.7],[5.7,-12.7],[14.8,-12.7],
+  [-17.2,-4.9],[-8,-4.9],[1.1,-4.9],[10.2,-4.9],[22,-6.9],
+  [-16.5,4.2],[-7.4,4.2],[7,4.2],[16.1,4.2]
+  ]).map(([x,z])=>[mqo(x), mqz(z)]);   /* mosque-local */
 function insidePts(){ return mission.act===2 ? INSIDE_PTS2 : INSIDE_PTS; }
 const OUTSIDE_PTS=[[-20,28],[20,27],[-8,26],[24,23.5],[-24,22],[14,29]];
 const LINE_SUB='Remember lads, subscribe to PewDiePie.';
@@ -5514,14 +6658,16 @@ function setPhase(p){
   { const h=document.getElementById('hint'); if(h) h.dataset.thr=''; }
   const A=ACT_OFF, act2=(mission.act===2);
   if(p==='outside'){
-    BOUNDS.minX=A+(act2?-25:-23); BOUNDS.maxX=A+(act2?25:23);
-    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?31:30.5;
+    BOUNDS.minX=A+(act2?MQ_B.outMinX:-23); BOUNDS.maxX=A+(act2?MQ_B.outMaxX:23);
+    /* act 2 parks out on the street, past the courtyard wall, so the walk in
+       through the gate is real - hence the 37 rather than the yard edge. */
+    BOUNDS.minZ=act2?MQ_B.minZ:-14;        BOUNDS.maxZ=act2?37:30.5;
   } else {
-    BOUNDS.minX=A+(act2?-24:-21); BOUNDS.maxX=A+(act2?24:21);
-    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?12.4:15.2;
+    BOUNDS.minX=A+(act2?MQ_B.inMinX:-21);  BOUNDS.maxX=A+(act2?MQ_B.inMaxX:21);
+    BOUNDS.minZ=act2?MQ_B.minZ:-14;        BOUNDS.maxZ=act2?MQ_B.inMaxZ:15.2;
   }
-  ZBOUNDS.minX=A+(act2?-25:-23); ZBOUNDS.maxX=A+(act2?25:23);
-  ZBOUNDS.minZ=act2?-15:-14;     ZBOUNDS.maxZ=act2?31:30.5;
+  ZBOUNDS.minX=A+(act2?MQ_B.outMinX:-23);  ZBOUNDS.maxX=A+(act2?MQ_B.outMaxX:23);
+  ZBOUNDS.minZ=act2?MQ_B.minZ:-14;         ZBOUNDS.maxZ=act2?MQ_B.yardMaxZ:30.5;
   const hint=document.getElementById('hint');
   const lab=document.getElementById('wave-label');
   if(p==='drive'){ hint.textContent='W/S DRIVE · A/D STEER · E RADIO'; lab.textContent='OBJECTIVE'; document.getElementById('wave-num').textContent='TOPS'; xh.style.opacity=0; }
@@ -5604,7 +6750,6 @@ function setAct(n){
 }
 window.__setAct=setAct;
 window.__act2=()=>actTwoBegin();
-window.__act2=()=>actTwoBegin();
 
 function actTwoBegin(){
   setAct(2);
@@ -5616,12 +6761,20 @@ function actTwoBegin(){
   setPhase('drive');
   survivorsReset&&survivorsReset();
   lotCrowdReset&&lotCrowdReset();
+  /* a cart still in hand across the transition left the player holding an
+     act-1 prop 900 m away and unable to fire */
+  throwablesReset&&throwablesReset();
   for(const z of zombies){ z.state='idle'; z.root.visible=false; z.__lot=false; ragReset(z); }
+  /* These carried ids drive2/clear2/rescue2/extract2, but every
+     setObjectiveState call in the game addresses the act-1 ids, so the whole
+     act-2 panel sat inert for the entire second half. Same ids, act-2 text. */
   setObjectives&&setObjectives([
-    {id:'drive2',text:'DRIVE WEST TO THE AL-SALAAM MOSQUE'},
-    {id:'clear2',text:'CLEAR THE COURTYARD'},
-    {id:'rescue2',text:'FIND 4 SURVIVORS IN THE PRAYER HALL'},
-    {id:'extract2',text:'WALK THEM OUT THROUGH THE GATE'}]);
+    {id:'drive',  text:'DRIVE WEST TO THE AL-SALAAM MOSQUE'},
+    {id:'park',   text:'PARK AT THE GATE'},
+    {id:'enter',  text:'GET INSIDE THE MOSQUE'},
+    {id:'clear',  text:'CLEAR EVERY THREAT'},
+    {id:'rescue', text:'FIND THE 4 SURVIVORS'},
+    {id:'extract',text:'WALK THEM OUT THROUGH THE GATE'}]);
   banner('NEW OBJECTIVE','AL-SALAAM MOSQUE \u2014 DRIVE WEST');
   Audio.waveSting();
 }
@@ -5664,7 +6817,9 @@ function missionUpdate(dt){
   /* the way in: TOPS front doors in act 1, the mosque's central arch in act 2 */
   if(phase==='outside'){
     const A=ACT_OFF;
-    const gate = mission.act===2 ? (player.pos.z<12.6 && Math.abs(player.pos.x-A)<3.0)
+    /* these were the mosque's PRE-SCALE local numbers; the portal now sits at
+       mqz(12.6) with a 2 m opening, so the old threshold could never be met */
+    const gate = mission.act===2 ? (player.pos.z<mqz(12.6) && Math.abs(player.pos.x-A)<mqo(3.0))
                                  : (player.pos.z<14.7 && Math.abs(player.pos.x-A)<2.1);
     if(gate) enterStore();
   }
@@ -6050,16 +7205,18 @@ function netSendTo(c,obj){ try{ if(c.open)c.send(JSON.stringify(obj)); }catch(e)
 
 function netAvatarFor(pl){
   if(pl.obj||!vmModel)return pl.obj;
-  const a=lobbyAvatar(); if(!a)return null;
+  const made=skinMake(skinIndexOf(pl.skin||'operator')) || skinMake(0);
+  const a=made&&made.obj; if(!a)return null;
   scene.add(a);
   pl.obj=a;
   pl.mixer=new THREE.AnimationMixer(a);
-  const names=Object.keys(vmActions);
-  const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
-  if(idle&&vmMixer){
-    const clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
-    if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
+  let clip=skinIdleClip(made.clips);
+  if(!clip&&vmMixer){
+    const names=Object.keys(vmActions);
+    const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
+    clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
   }
+  if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
   netTagFor(pl);
   return a;
 }
@@ -6116,7 +7273,7 @@ function netHost(){
   NET.peer.on('connection',c=>{
     c.on('open',()=>{
       NET.conns.push(c);
-      netSendTo(c,{t:'hello',name:NET.name,id:NET.id});
+      netSendTo(c,{t:'hello',name:NET.name,id:NET.id,skin:SKINS[SKIN_I].id});
       netStatus('<b>'+NET.conns.length+'</b> player(s) joined room '+NET.code+'.');
     });
     c.on('data',d=>netOnData(c,d));
@@ -6150,7 +7307,7 @@ function netJoin(code){
     c.on('open',()=>{
       opened=true;
       NET.mode='client'; NET.hostConn=c; NET.code=code; NET.ready=true;
-      netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id});
+      netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id,skin:SKINS[SKIN_I].id});
       netStatus('Joined room <b>'+code+'</b>. Waiting for the host to start.');
       const btn=document.getElementById('btn-play');
       if(btn){ btn.disabled=true; btn.textContent='WAITING'; }
@@ -6191,22 +7348,63 @@ function netOnData(c,raw){
       const id=c.peer;
       NET.players[id]=NET.players[id]||{x:0,y:0,z:0,yaw:0,hp:100};
       NET.players[id].name=(d.name||'PLAYER').slice(0,12);
+      if(d.skin) NET.players[id].skin=d.skin;
       netAvatarFor(NET.players[id]);
       netSyncLobby();
       if(NET.mode==='host'&&NET.started) netSendTo(c,{t:'start'});
+      break;
+    }
+    case 'skin': {                                /* someone changed outfit */
+      const pl=NET.players[c.peer];
+      if(pl){ pl.skin=d.s;
+              /* may swap the rig, not just the colours - rebuild */
+              if(pl.obj){ pl.obj.removeFromParent(); pl.obj=null; pl.mixer=null; pl.act=null;
+                          netAvatarFor(pl); } }
       break;
     }
     case 'in': {                                  /* client -> host: my state */
       const pl=NET.players[c.peer]; if(!pl)break;
       pl.x=d.p[0]; pl.y=d.p[1]; pl.z=d.p[2]; pl.yaw=d.y; pl.hp=d.hp; pl.dead=!!d.dead;
       pl.t=performance.now();
+      /* netRenderTick only moves an avatar when p0/p1 are present, and those
+         were written in netApplySnap, which returns early unless we are the
+         client. So the host had x/z but never the buffers, and every
+         team-mate's body sat at world origin for the whole match. Feed the
+         same buffers here. */
+      const tNow=performance.now()/1000, np={x:pl.x,y:pl.y,z:pl.z,yaw:pl.yaw};
+      pl.p0=pl.p1||np; pl.p1=np;
+      pl.t0=(pl.t1===undefined?tNow:pl.t1); pl.t1=tNow;
+      netAvatarFor(pl);
       break;
     }
     case 'hit': {                                 /* client -> host: I shot one */
       if(NET.mode!=='host')break;
       const z=zombies[d.i];
-      if(z&&z.state!=='idle'&&z.state!=='dead')
+      if(z&&z.state!=='idle'&&z.state!=='dead'){
+        /* hitZombie credits whoever is local, so on the host every client
+           kill was scored to the host and the shooter's HUD stayed at 0 kills
+           and 500 points for the whole match. Echo the outcome back. */
+        const wasDead=(z.state==='dead');
         hitZombie(z, d.dmg, V3(d.d[0],0,d.d[1]), V3(d.p[0],d.p[1],d.p[2]), !!d.h);
+        const killed=(!wasDead && z.state==='dead');
+        try{ c.send(JSON.stringify({t:'cred', h:!!d.h, k:killed, i:d.i|0})); }catch(e){}
+      }
+      break;
+    }
+    case 'cred': {                                /* host -> client: your shot landed */
+      if(NET.mode!=='client')break;
+      /* mirror exactly what hitZombie/killZombie award locally on the host */
+      addPoints(d.h?15:10,null);
+      if(d.k){
+        stats.kills++; if(d.h) stats.headshots++;
+        adren=1;
+        const base=d.h?90:55;
+        addPoints(base, d.h?'HEADSHOT +'+base:'+'+base, !!d.h);
+        showHitmarker(true);
+        const kz=zombies[d.i|0];
+        try{ if(kz&&kz.root) Audio.killGroan(kz.root.position); }catch(e){}
+        try{ SFX.kill.play(1); }catch(e){}
+      }
       break;
     }
     case 'start': {                               /* host -> client */
@@ -6380,7 +7578,7 @@ function netFollowPhase(p){
   }
   if(p==='inside'&&phase!=='inside'){
     setPhase('inside');
-    player.pos.set(ACT_OFF, 1.7, mission.act===2?10.5:13.5);
+    player.pos.set(ACT_OFF, 1.7, mission.act===2?mqz(10.5):13.5);
     return;
   }
   if(p==='win'&&phase!=='win'){ setPhase('win'); playing=false; document.exitPointerLock(); showWin(window.__runStats||{}); }
@@ -6482,6 +7680,179 @@ const LOBBY={
   camPos:V3(2.1,1.5,26.6), camLook:V3(-.35,1.05,20.6),
   slots:[{name:'',you:true},{name:''},{name:''},{name:''}],
 };
+
+/* ===================== PLAYER SKINS =====================
+   Every character model supplied so far arrives unrigged - no skeleton, no
+   animations - so none of them can be an avatar: they would slide around the
+   map frozen in a T-pose. The operator rig is the only skinned humanoid in
+   the build, so a "skin" here is a palette applied to a clone of it. It
+   animates correctly, costs no extra draw calls, and a rigged model dropped
+   in later becomes just another entry in this list.
+
+   The operator GLB ships its materials unnamed, so they cannot be addressed
+   as "jacket" or "boots". Instead they are ranked by luminance and painted in
+   that order, with the skin-tone material picked out by hue so a recolour
+   never paints someone's face green. */
+const SKINS=[
+  {id:'operator', name:'OPERATOR', pal:['#23262a','#3f444a','#6b5b43'], skin:'#ffd9a0', chip:'#3f444a'},
+  {id:'ranger',   name:'RANGER',   pal:['#1b2a18','#3c5233','#7d7a4a'], skin:'#e8b98a', chip:'#3c5233'},
+  {id:'medic',    name:'MEDIC',    pal:['#d9dbd8','#b5322c','#8f9295'], skin:'#f0c49a', chip:'#b5322c'},
+  {id:'nightfall',name:'NIGHTFALL',pal:['#14161b','#242a35','#3d4756'], skin:'#d9a97e', chip:'#242a35'},
+  {id:'hazard',   name:'HAZARD',   pal:['#c9922a','#2c2a26','#8a6a2a'], skin:'#e6bd93', chip:'#c9922a'},
+  {id:'coastal',  name:'COASTAL',  pal:['#e6e2d6','#2f6f78','#9a9384'], skin:'#c98f60', chip:'#2f6f78'},
+  {id:'ember',    name:'EMBER',    pal:['#3a1d16','#8a3a1e','#c4652c'], skin:'#b3805a', chip:'#8a3a1e'},
+  {id:'arctic',   name:'ARCTIC',   pal:['#eceef0','#b9c3cc','#6f7d88'], skin:'#f2cfa8', chip:'#b9c3cc'},
+  /* A supplied model rather than a palette. It arrived unrigged;
+     scratchpad/rig2.py fits it to the hostile skeleton's real body (1.84 m,
+     1.94 m arm span) and binds with bone heat, so it carries that rig's own
+     idle/run clips. See SKIN_MODELS below. */
+  {id:'suit', name:'SUIT', glb:'assets/skin_suit.glb', chip:'#2b3038'},
+];
+/* loaded prototypes for model skins, keyed by id */
+const SKIN_MODELS={};
+SKINS.filter(s=>s.glb).forEach(sk=>{
+  gltfLoad(sk.glb,(g)=>{
+    const proto=g.scene;
+    proto.traverse(o=>{ if(o.isMesh||o.isSkinnedMesh){
+      o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+    SKIN_MODELS[sk.id]={proto, clips:g.animations||[]};
+    console.info('skin model ready:', sk.id, (g.animations||[]).map(c=>c.name).join(','));
+  }, undefined, ()=>console.info(sk.glb+' not reachable - skin unavailable'));
+});
+let SKIN_I=0;
+try{ const v=localStorage.getItem('deadaisle.skin');
+     if(v!=null){ const k=SKINS.findIndex(s=>s.id===v); if(k>=0) SKIN_I=k; } }catch(e){}
+
+/* is this material the character's own skin rather than clothing? */
+function skinIsFlesh(c){
+  const hsl={}; c.getHSL(hsl);
+  return hsl.l>.42 && hsl.s>.12 && hsl.s<.72 && (hsl.h<.13 || hsl.h>.94);
+}
+/* Paint a cloned avatar. Materials are shared across clones, so each one gets
+   its own copies - without that, changing one player's skin would repaint
+   everybody, including the lobby dolls standing next to them. */
+function skinApply(root, idx){
+  const sk=SKINS[((idx|0)%SKINS.length+SKINS.length)%SKINS.length];
+  const uniq=new Map();                       /* original material -> clone */
+  const order=[];
+  root.traverse(o=>{
+    if(!o.isMesh&&!o.isSkinnedMesh)return;
+    const ms=[].concat(o.material);
+    ms.forEach(m=>{ if(m&&!uniq.has(m)){ uniq.set(m,null); order.push(m); } });
+  });
+  /* rank the clothing materials dark -> light so the palette lands
+     consistently whatever order the GLB happens to list them in */
+  const lum=(m)=>{ const c=m.color||new THREE.Color(0x808080);
+                   return .2126*c.r+.7152*c.g+.0722*c.b; };
+  const cloth=order.filter(m=>!(m.color&&skinIsFlesh(m.color))).sort((a,b)=>lum(a)-lum(b));
+  const pal=sk.pal.map(h=>new THREE.Color(h));
+  const fleshC=new THREE.Color(sk.skin);
+  cloth.forEach((m,i)=>{
+    const c=m.clone();
+    c.color.copy(pal[Math.min(pal.length-1, Math.floor(i*pal.length/Math.max(1,cloth.length)))]);
+    uniq.set(m,c);
+  });
+  order.forEach(m=>{
+    if(uniq.get(m))return;
+    const c=m.clone(); c.color.copy(fleshC); uniq.set(m,c);
+  });
+  root.traverse(o=>{
+    if(!o.isMesh&&!o.isSkinnedMesh)return;
+    if(Array.isArray(o.material)) o.material=o.material.map(m=>uniq.get(m)||m);
+    else o.material=uniq.get(o.material)||o.material;
+  });
+  root.userData.skin=sk.id;
+  return sk;
+}
+
+/* ---- lobby picker ---- */
+function skinBuildUI(){
+  const host=document.getElementById('lobby-skins');
+  if(!host||host.dataset.built)return;
+  host.dataset.built='1';
+  const row=document.createElement('div'); row.id='skin-row';
+  SKINS.forEach((s,i)=>{
+    const b=document.createElement('button');
+    b.className='skin-card'+(i===SKIN_I?' on':'');
+    b.dataset.i=i;
+    b.innerHTML='<i style="background:'+s.chip+'"></i><span>'+s.name+'</span>';
+    b.addEventListener('click',()=>skinSelect(i));
+    row.appendChild(b);
+  });
+  host.appendChild(row);
+}
+function skinSelect(i){
+  SKIN_I=((i|0)%SKINS.length+SKINS.length)%SKINS.length;
+  try{ localStorage.setItem('deadaisle.skin', SKINS[SKIN_I].id); }catch(e){}
+  const row=document.getElementById('skin-row');
+  if(row) [...row.children].forEach((c,k)=>c.classList.toggle('on', k===SKIN_I));
+  /* A palette change can just repaint, but switching to or from a model skin
+     swaps the whole rig, so pad 0 has to be rebuilt in that case. */
+  const cur=LOBBY.dolls&&LOBBY.dolls[0];
+  if(cur){
+    const wasModel=!!SKINS[skinIndexOf(cur.userData.skin||'operator')].glb;
+    const isModel=!!SKINS[SKIN_I].glb;
+    if(!wasModel&&!isModel){ skinApply(cur, SKIN_I); }
+    else{
+      const made=skinMake(SKIN_I);
+      if(made&&made.obj){
+        const parent=cur.parent;
+        made.obj.position.copy(cur.position);
+        made.obj.rotation.copy(cur.rotation);
+        parent&&parent.add(made.obj);
+        cur.removeFromParent();
+        LOBBY.dolls[0]=made.obj;
+        const slot=LOBBY.avatars.find(a=>a.i===0);
+        if(slot){
+          const k=LOBBY.mixers.indexOf(slot.mixer);
+          if(k>=0) LOBBY.mixers.splice(k,1);
+          slot.obj=made.obj;
+          const mx=new THREE.AnimationMixer(made.obj);
+          let clip=skinIdleClip(made.clips);
+          if(!clip&&vmMixer){
+            const names=Object.keys(vmActions);
+            const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
+            clip=vmMixer._actions.map(a=>a._clip).find(c=>c.name===idle);
+          }
+          if(clip) mx.clipAction(clip).play();
+          slot.mixer=mx; LOBBY.mixers.push(mx);
+        }
+      }
+    }
+  }
+  /* and tell the party, so they see it too */
+  try{ if(NET.mode==='host'||NET.mode==='client') netSend({t:'skin', s:SKINS[SKIN_I].id}); }catch(e){}
+}
+function skinIndexOf(id){ const k=SKINS.findIndex(s=>s.id===id); return k<0?0:k; }
+/* Build the avatar mesh for a skin. Model skins clone their own rig and hand
+   back their own clips; palette skins are a recoloured operator, and a null
+   clip list means "use the operator's vmActions". Returns null if the model
+   has not landed yet, so callers fall back to the operator. */
+function skinMake(idx){
+  const sk=SKINS[((idx|0)%SKINS.length+SKINS.length)%SKINS.length];
+  if(sk.glb){
+    const M=SKIN_MODELS[sk.id];
+    if(!M||!M.proto) return null;
+    const a=skeletonClone(M.proto);
+    a.traverse(o=>{ o.visible=true; o.layers.set(0);
+      if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+    a.userData.skin=sk.id;
+    return {obj:a, clips:M.clips};
+  }
+  if(!vmModel) return null;
+  const a=lobbyAvatar();
+  if(!a) return null;
+  skinApply(a, idx);
+  return {obj:a, clips:null};
+}
+/* pick an idle-ish clip out of whatever the skin brought with it */
+function skinIdleClip(clips){
+  if(!clips||!clips.length) return null;
+  return clips.find(c=>/idle/i.test(c.name)) || clips.find(c=>/aim/i.test(c.name)) || clips[0];
+}
+/* the markup is above this script, so the row can be built immediately */
+skinBuildUI();
+
 function lobbyAvatar(){
   if(!vmModel)return null;
   const a=skeletonClone(vmModel);
@@ -6493,6 +7864,7 @@ function lobbyAvatar(){
   return a;
 }
 function lobbyBuild(){
+  skinBuildUI();                 /* independent of vmModel - do it first */
   if(LOBBY.built||!vmModel)return;
   LOBBY.built=true;
   const g=new THREE.Group(); scene.add(g); LOBBY.group=g;
@@ -6522,6 +7894,10 @@ function lobbyBuild(){
       }
       LOBBY.mixers.push(mx);
       LOBBY.avatars.push({obj:av,ring,pad,i});
+      (LOBBY.dolls=LOBBY.dolls||[]).push(av);
+      /* pad 0 is you; the rest are stand-ins, given different outfits so the
+         line-up does not read as four clones */
+      skinApply(av, i===0 ? SKIN_I : (i*3)%SKINS.length);
     }
   }
   lobbySlotsRender();
@@ -6534,6 +7910,7 @@ function lobbyStageApply(){
   camera.fov=52; camera.updateProjectionMatrix();
 }
 function lobbyTick(dt){
+  window.LOBBY=LOBBY;            /* module-scoped otherwise; probes need it */
   document.body.classList.add('in-lobby');
   if(!LOBBY.built){ lobbyBuild(); return; }
   LOBBY.group.visible=true;
@@ -6562,6 +7939,7 @@ function lobbySlotsRender(){
 }
 function lobbyShow(){
   menuEl.classList.remove('hidden');
+  skinBuildUI();
   lobbyBuild(); lobbyStageApply();
   if(LOBBY.group) LOBBY.group.visible=true;
 }
@@ -6696,7 +8074,11 @@ function toggleMute(){
 const survivors=[];
 const SURV_SPOTS=[[-13.5,11.0],[13.2,10.6],[-19.5,-12.5],[18.8,-3.0]];
 /* prayer-hall hiding places: behind columns and beside the minbar */
-const SURV_SPOTS2=[[-22.2,2.9],[22.2,2.9],[-17.5,-12.5],[16.8,-12.0]];
+/* pulled in off the side walls: at 0.46 scale, 2.8 m of local clearance is
+   only 1.3 m of real gap, tight enough that a coarse nav grid could not
+   thread it and a hostile could pin a survivor against the wall */
+const SURV_SPOTS2=[[-17.2,-4.9],[10.2,-4.9],[-12.6,-12.7],[14.8,-12.7]]
+  .map(([x,z])=>[mqo(x), mqz(z)]);
 const SURV_NAMES=['MARA','JUDE','KIRA','OTIS'];
 const SURV_SKINS=[0xc9a184,0xba8f68,0xd8b494,0xa87a58];
 const SURV_LOOKS=[
@@ -6709,7 +8091,7 @@ const EXIT_ZONE={minX:-2,maxX:2,minZ:12.5,maxZ:14.5};
 /* the way out is act-dependent: the TOPS doors, or the mosque's central arch */
 function exitZone(){
   return mission.act===2
-    ? {minX:ACT_OFF-3.4, maxX:ACT_OFF+3.4, minZ:9.5, maxZ:13.4}
+    ? {minX:ACT_OFF+mqo(-3.4), maxX:ACT_OFF+mqo(3.4), minZ:mqz(9.5), maxZ:mqz(13.4)}
     : EXIT_ZONE;
 }
 let surv_completeFired=false, surv_hudEl=null;
@@ -6891,6 +8273,10 @@ function survivorsUpdate(dt,now){
   }
   /* extraction */
   if(!surv_completeFired&&survivors.length===4&&
+     /* the game's own ALL CLEAR: set only once the wave is exhausted, nothing
+        is left alive and all four are following. Without it an act could be
+        completed during a lull while entries were still waiting to spawn. */
+     mission.extractAnnounced&&
      survivors.every(s=>s.state==='following')&&
      zombies.every(z=>z.state!=='chase')&&
      (()=>{const E=exitZone();
@@ -7003,10 +8389,10 @@ let lc_burstDone=false;
 let lc_groanT=rand(3,6);
 const LC_LOT ={minX:-23,maxX:23,minZ:16,maxZ:29.5};   /* outer clamp (road starts z~32, store front z=15) */
 const LC_LOT1={minX:-23,maxX:23,minZ:16,maxZ:29.5};
-const LC_LOT2={minX:-25,maxX:25,minZ:14.5,maxZ:31};
+const LC_LOT2={minX:mqo(-25),maxX:mqo(25),minZ:mqz(14.5),maxZ:mqz(31)};
 const LC_SPAWN={minX:-20,maxX:20,minZ:17,maxZ:29};
 const LC_SPAWN1={minX:-20,maxX:20,minZ:17,maxZ:29};
-const LC_SPAWN2={minX:-22,maxX:22,minZ:16,maxZ:30};
+const LC_SPAWN2={minX:mqo(-22),maxX:mqo(22),minZ:mqz(16),maxZ:mqz(30)};
 const LC_WRECK={minX:-18.6,maxX:-13.4,minZ:16.8,maxZ:19.6}; /* derelict car at (-16,18.2) */
 
 /* predicate for the integrator: zombiesUpdate must skip these entirely */
@@ -7346,6 +8732,10 @@ const breath_tick=()=>{
   if(!breath_ctx)return;
   if(breath_ctx.state==='suspended'){ breath_ctx.resume(); return; }
   const now=breath_ctx.currentTime;
+  /* After a long pause breath_nextT is far behind the clock, and every
+     skipped cycle got scheduled at now+.02 - so unpausing fired all of them
+     simultaneously. Drop the backlog rather than replaying it. */
+  if(breath_nextT<now) breath_nextT=now+.02;
   while(breath_nextT<now+.3){
     breath_nextT+=breath_scheduleCycle(Math.max(breath_nextT,now+.02));
   }
@@ -8038,13 +9428,18 @@ function resetRun(){
     ragReset(z);
   }
   zVariantInit&&zVariantInit();
+  /* setAct FIRST. survivorsReset places the four actors at the CURRENT act's
+     spots, so resetting before switching back to act 1 left them at the
+     mosque, 900 m outside the act-1 player clamp - round 2, and any
+     re-deploy from act 2, could never be completed. actTwoBegin already does
+     it in this order. */
+  mission.insideLeft=0; mission.spawnT=0; mission.extractAnnounced=false;
+  setAct(1);                       /* every run starts back at TOPS */
   lotCrowdReset&&lotCrowdReset();
   survivorsInit&&survivorsInit();   /* idempotent: builds the 4 actors once */
   survivorsReset&&survivorsReset();
   stats.kills=0; stats.headshots=0; stats.shotsFired=0; stats.shotsHit=0;
   points=500; runTime=0; adren=0;
-  mission.insideLeft=0; mission.spawnT=0; mission.extractAnnounced=false;
-  setAct(1);                       /* every run starts back at TOPS */
   document.getElementById('points-val').textContent=points;
   document.getElementById('wave-num').textContent='-';
   player.pos.set(0,1.7,12.5); player.vel.set(0,0,0);
@@ -8118,8 +9513,31 @@ function startGame(keepRound){
   /* voice lines are static files now - nothing to prefetch */
   try{ const r=document.body.requestPointerLock(); if(r&&r.catch)r.catch(()=>{}); }catch(e){}
 }
+/* ---- adaptive resolution --------------------------------------------------
+   Measures real frame time and trades scene-buffer resolution for framerate.
+   Shrinks after a sustained miss, grows back once there is headroom, and only
+   ever moves one step per decision so it cannot oscillate visibly. The user's
+   quality slider still sets the ceiling via renderer.setPixelRatio. */
+const DRS={acc:0,n:0,win:0,scale:1,last:performance.now()};
+function drsUpdate(){
+  const now=performance.now(), ft=now-DRS.last; DRS.last=now;
+  if(ft<=0||ft>500) return;         /* first frame, or the tab was backgrounded */
+  DRS.acc+=ft; DRS.n++; DRS.win+=ft;
+  if(DRS.win<600) return;           /* decide a bit under twice a second */
+  const avg=DRS.acc/DRS.n; DRS.acc=0; DRS.n=0; DRS.win=0;
+  const before=DRS.scale;
+  /* 17.5ms is just past a vsynced 60fps frame (16.7ms). Growing below 14ms
+     instead would strand every vsync-capped machine at whatever scale a
+     transient dip left it at, since it can never report faster than 16.7. */
+  if(avg>21)        DRS.scale=Math.max(.55, DRS.scale-.10);   /* below ~48fps */
+  else if(avg<17.5) DRS.scale=Math.min(1,   DRS.scale+.05);   /* holding 60fps */
+  if(DRS.scale!==before){ try{ window.fxSetResScale&&window.fxSetResScale(DRS.scale); }catch(e){} }
+}
+window.__drs=()=>({scale:DRS.scale});
+
 function loop(){
   requestAnimationFrame(loop);
+  drsUpdate();
   const dt=Math.min(clock.getDelta(),.05);
   const now=performance.now()/1000;
   if(playing&&!paused){
@@ -8150,10 +9568,15 @@ function loop(){
     }
     townFolkUpdate&&townFolkUpdate(dt);
     throwablesUpdate&&throwablesUpdate(dt,now);
-    survivorsUpdate&&survivorsUpdate(dt,now);
+    /* survivorsUpdate can call missionComplete, and a client running it would
+       advance ITSELF into act 2 (or onto the win screen) while the host is
+       still playing - then get yanked back by the next snapshot. The host
+       owns mission state and broadcasts it via the snapshot's act field. */
+    if(NET.mode!=='client') survivorsUpdate&&survivorsUpdate(dt,now);
     survivorsHUD&&survivorsHUD();
     bloodUpdate(dt); poolsUpdate(dt); shellsUpdate(dt); sparksUpdate(dt); tracersUpdate(dt);
-    debrisUpdate(dt); smokeUpdate(dt); skidFX(dt);
+    debrisUpdate(dt); smokeUpdate(dt); skidFX(dt); dustUpdate(dt);
+    cullUpdate(dt); managedLightsUpdate(dt);
     groanTimer-=dt;
     if(groanTimer<=0){ groanTimer=rand(2.5,6);
       const alive=zombies.filter(z=>z.state==='chase');
@@ -8174,7 +9597,10 @@ function loop(){
         tl.t=tl.state?rand(.4,3):rand(.04,.16);
       }
       const base=tl.base*(phase==='drive'||phase==='parking'||phase==='menu'?tk:1);
-      const target=tl.state?base:2;
+      /* this used to overwrite intensity unconditionally each frame, which
+         undid managedLightsUpdate's culling the instant it applied */
+      const managed=tl.managed;
+      const target=(managed&&!managed.on) ? 0 : (tl.state?base:2);
       tl.light.intensity=lerp(tl.light.intensity,target,clamp(dt*22,0,1));
       tl.mat.color.setScalar(clamp(tl.light.intensity/tl.base,.08,1.2)*.85+.1);
     }
@@ -8205,10 +9631,14 @@ function loop(){
       moon.target.updateMatrixWorld();
     }
   }
-  if(!playing) lobbyTick(dt);
+  /* !playing is also true on the win and death screens, so finishing a run
+     snapped the camera 900 m back to the lobby stage and popped the lobby
+     dolls into the world behind the card. */
+  if(!playing && phase!=='win' && phase!=='dead') lobbyTick(dt);
   netTick(dt,now);
   if(window.fxRender&&SETTINGS.fx&&!location.hash.includes('nfx')) fxRender(dt);
   else {
+    renderer.shadowMap.needsUpdate = true;
     renderer.render(scene,camera);
     const ac=renderer.autoClear, bg=scene.background;
     renderer.autoClear=false; scene.background=null;
@@ -8252,6 +9682,10 @@ window.__game={player, zombies, scene, camera, renderer, zombiesUpdate, spawnZom
   keysRef:()=>keys, pausedRef:()=>({playing,paused,locked}),
   mission, roundScale, carDrive, townCarRef:()=>townCar, carSpeedRef:v=>{ if(v!==undefined)carSpeed=v; return carSpeed; },
   carSkidRef:()=>carSkid, skidFX, skidsRef:()=>SKIDS, smokeRef:()=>SMOKE,
+  carCamSnap:()=>{ carCamYaw=null; },   /* screenshot harness: drop the camera smoothing */
+  cullForceOn:()=>{ for(const c of CULL) c.obj.visible=true; return CULL.length; },
+  cullStats:(x,z)=>{ let on=0,off=0; for(const c of CULL){
+    (Math.hypot(x-c.cx,z-c.cz)<c.r?on++:off++); } return {on,off,total:CULL.length}; },
   THREE};
 
 /* attract/screenshot mode: file:///...#shot */
