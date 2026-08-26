@@ -1207,6 +1207,23 @@ function retireMesh(m){
 const WORLD_X0=-1030, WORLD_X1=170;
 const WORLD_CX=(WORLD_X0+WORLD_X1)/2;
 const MOSQUE_X=-900;
+/* The mosque was authored at roughly 2.4x life size: a 50 x 29 m prayer hall
+   under a 12 m ceiling, a 23 m dome and 26 m minarets. Beside a 1.7 m player
+   that reads as a cathedral, not the neighbourhood mosque it is meant to be.
+   0.46 brings it to a 23 x 13 m hall with a 5.5 m ceiling, a 3.2 m corridor,
+   a 2.1 m courtyard wall and 12 m minarets.
+
+   Scaling alone would pull the courtyard 17 m back off the road, so the group
+   is also offset in z to pin its frontage at z=32 where the street is. Every
+   table of mosque-local coordinates therefore goes through mqz()/mqo(). */
+const MQ_S=0.46;
+const MQ_Z=32*(1-MQ_S);            /* keeps the courtyard wall on the road */
+const mqo=(x)=>x*MQ_S;             /* local x -> offset from MOSQUE_X/ACT_OFF */
+const mqx=(x)=>MOSQUE_X+x*MQ_S;    /* local x -> world x */
+const mqz=(z)=>z*MQ_S+MQ_Z;        /* local z -> world z */
+/* exposed so probes and tools can address the mosque in its own local
+   coordinates instead of hardcoding post-scale world numbers */
+window.__mq={S:MQ_S, Z:MQ_Z, o:mqo, x:mqx, z:mqz};
 
 /* ACT 1 is TOPS at x=0; ACT 2 is the mosque 900 m west. Rather than
    duplicate every bound, spawn table and nav clamp, the whole act is shifted
@@ -2136,11 +2153,18 @@ function buildTown(){
      - the DOME sits over the bay in front of the mihrab, not over the middle
      - the MINARETS stand at the outer courtyard corners
    Local origin is the centre of the prayer hall; +z is back toward the road. */
-const M_HALL={minX:-25, maxX:25, minZ:-16, maxZ:13};   /* prayer hall interior */
-const M_YARD={minX:-26, maxX:26, minZ:14, maxZ:32};    /* sahn */
+/* documentation only - nothing reads these - but keep them truthful */
+const M_HALL={minX:mqo(-25), maxX:mqo(25), minZ:mqz(-16), maxZ:mqz(13)};
+const M_YARD={minX:mqo(-26), maxX:mqo(26), minZ:mqz(14),  maxZ:mqz(32)};
+/* act-2 extents derived from the same local box, so they follow the scale */
+const MQ_B={ inMinX:mqo(-25), inMaxX:mqo(25), outMinX:mqo(-26), outMaxX:mqo(26),
+             minZ:mqz(-16),   inMaxZ:mqz(12.4), yardMaxZ:mqz(31) };
 function buildMosque(){
   const X=MOSQUE_X;
-  const G=new THREE.Group(); G.position.x=X; scene.add(G);
+  const G=new THREE.Group();
+  G.position.set(X, 0, MQ_Z);
+  G.scale.setScalar(MQ_S);
+  scene.add(G);
   window.__mosque=G;
 
   const sand =new THREE.MeshStandardMaterial({color:0xd8c9a8, roughness:.92, map:TEX.wall, normalMap:TEX.wallN});
@@ -2162,7 +2186,10 @@ function buildMosque(){
     b.castShadow = Math.max(w,h,d) >= 1.6;
     b.receiveShadow=true; G.add(b);
     if(collide==='solid'){ worldHits.push(b); }
-    else if(collide){ colliders.push({minX:X+x-w/2,maxX:X+x+w/2,minZ:z-d/2,maxZ:z+d/2,h:y+h/2});
+    else if(collide){ /* the group is scaled and shifted, so the AABB must be too */
+                      colliders.push({minX:X+(x-w/2)*MQ_S, maxX:X+(x+w/2)*MQ_S,
+                                      minZ:(z-d/2)*MQ_S+MQ_Z, maxZ:(z+d/2)*MQ_S+MQ_Z,
+                                      h:(y+h/2)*MQ_S});
                       worldHits.push(b); }
     return b;
   };
@@ -2309,7 +2336,7 @@ function buildMosque(){
   for(const cx of [-8.6,8.6]) for(const cz of [-16.6,-1.4]){
     const col=new THREE.Mesh(new THREE.CylinderGeometry(.72,.8,12,14), stone);
     col.position.set(cx,6,cz); col.castShadow=true; G.add(col);
-    colliders.push({minX:X+cx-.8,maxX:X+cx+.8,minZ:cz-.8,maxZ:cz+.8,h:12});
+    colliders.push({minX:mqx(cx-.8),maxX:mqx(cx+.8),minZ:mqz(cz-.8),maxZ:mqz(cz+.8),h:mqo(12)});
     worldHits.push(col);
   }
   /* hanging lamps down the hall */
@@ -2344,7 +2371,7 @@ function buildMosque(){
       const cz=16.4+i*3.9;
       const col=new THREE.Mesh(new THREE.CylinderGeometry(.5,.56,5.4,12), stone);
       col.position.set(sx,2.7,cz); col.castShadow=true; G.add(col);
-      colliders.push({minX:X+sx-.6,maxX:X+sx+.6,minZ:cz-.6,maxZ:cz+.6,h:5.4});
+      colliders.push({minX:mqx(sx-.6),maxX:mqx(sx+.6),minZ:mqz(cz-.6),maxZ:mqz(cz+.6),h:mqo(5.4)});
       if(i<4) arch(sx,cz+1.95,1.85,.7,5.2,stone,'x');
     }
     box(1.6,1.4,19, sx,6.1,23, sand, false);
@@ -2357,7 +2384,7 @@ function buildMosque(){
   water.position.set(0,1.08,23); G.add(water);
   const spout=new THREE.Mesh(new THREE.CylinderGeometry(.22,.3,2.2,10), stone);
   spout.position.set(0,2.1,23); G.add(spout);
-  colliders.push({minX:X-3.4,maxX:X+3.4,minZ:19.6,maxZ:26.4,h:1.1});
+  colliders.push({minX:mqx(-3.4),maxX:mqx(3.4),minZ:mqz(19.6),maxZ:mqz(26.4),h:mqo(1.1)});
 
   /* street wall + gate, with AL-SALAAM over it */
   box(19,4.6,.8, -17.5,2.3,32, sand, true);
@@ -2382,7 +2409,7 @@ function buildMosque(){
     cap.position.set(mx,27.8,31.5); cap.castShadow=true; G.add(cap);
     const tip=new THREE.Mesh(new THREE.CylinderGeometry(.1,.1,1.7,8), gold);
     tip.position.set(mx,30.3,31.5); G.add(tip);
-    colliders.push({minX:X+mx-1.8,maxX:X+mx+1.8,minZ:29.7,maxZ:33.3,h:26});
+    colliders.push({minX:mqx(mx-1.8),maxX:mqx(mx+1.8),minZ:mqz(29.7),maxZ:mqz(33.3),h:mqo(26)});
   }
 
   /* AL-SALAAM in big letters over the gate, both faces */
@@ -2475,24 +2502,25 @@ phLoad('mosque','assets/ph_mosque.glb',(lib)=>{
   const vases=pick(/vase|pot|goblet|ceramic/i), shelf=pick(/Shelf|Cabinet|Commode/i);
   const books=pick(/book|binder/i);
   /* chandeliers down the prayer hall */
-  chand.forEach((n,i)=>{ for(const cz of [-12,-6]) phPlace('mosque',n, X+(i-1)*13, cz, {h:1.6,y:7.2}); });
+  chand.forEach((n,i)=>{ for(const cz of [-12,-6])
+    phPlace('mosque',n, mqx((i-1)*13), mqz(cz), {h:1.6,y:3.6}); });  /* under a 5.5 m ceiling now */
   /* lanterns along the corridor and the vestibule */
   lant.forEach((n,i)=>{ for(const [lx,lz] of [[-3.1,3.0],[3.1,3.0],[-3.1,6.8],[3.1,6.8]])
-    phPlace('mosque',n, X+lx, lz, {h:.5,y:1.15,solid:true,brk:'pottery'}); });
+    phPlace('mosque',n, mqx(lx), mqz(lz), {h:.5,y:1.15,solid:true,brk:'pottery'}); });
   /* brass on the wudu trough, and pots along the west chamber */
   vases.slice(0,6).forEach((n,i)=>
-    phPlace('mosque',n, X-17+i*1.9, 3.1, {h:.42,solid:true,brk:'pottery'}));
+    phPlace('mosque',n, mqx(-17+i*1.9), mqz(3.1), {h:.42,solid:true,brk:'pottery'}));
   /* madrasa shelving and books */
   /* keep clear of the corner-store door at (22.2, 5.0): shelving lines the
      madrasa's own outer wall, north of it */
   shelf.slice(0,3).forEach((n,i)=>
-    phPlace('mosque',n, X+8.0+i*3.4, 7.6, {h:2.1,ry:Math.PI,solid:true}));
+    phPlace('mosque',n, mqx(8.0+i*3.4), mqz(7.6), {h:2.1,ry:Math.PI,solid:true}));
   books.slice(0,4).forEach((n,i)=>
-    phPlace('mosque',n, X+9.0+i*2.6, 7.0, {h:.28,y:.84,solid:true,brk:'crate',brkScale:.5}));
+    phPlace('mosque',n, mqx(9.0+i*2.6), mqz(7.0), {h:.28,y:.84,solid:true,brk:'crate',brkScale:.5}));
   /* corner stores: crates and pots */
   vases.slice(0,4).forEach((n,i)=>{
-    phPlace('mosque',n, X-22.2+rand(-.8,.8), 2.2+rand(-.8,.8), {h:.4,solid:true,brk:'pottery'});
-    phPlace('mosque',n, X+22.2+rand(-.8,.8), 2.2+rand(-.8,.8), {h:.4,solid:true,brk:'pottery'});
+    phPlace('mosque',n, mqx(-22.2+rand(-.8,.8)), mqz(2.2+rand(-.8,.8)), {h:.4,solid:true,brk:'pottery'});
+    phPlace('mosque',n, mqx( 22.2+rand(-.8,.8)), mqz(2.2+rand(-.8,.8)), {h:.4,solid:true,brk:'pottery'});
   });
 });
 
@@ -2533,9 +2561,9 @@ phLoad('furn','assets/ph_furn.glb',(lib)=>{
   const chairs=pick(/Chair|Stool|stool/i), tables=pick(/Table|Desk|table/i);
   /* reading room sits in the open half of the madrasa, x 6..17 */
   chairs.slice(0,4).forEach((n,i)=>
-    phPlace('furn',n, X+7.5+(i%2)*2.2, 2.6+Math.floor(i/2)*2.6, {h:.95,solid:true,brk:'wood',brkScale:.5}));
+    phPlace('furn',n, mqx(7.5+(i%2)*2.2), mqz(2.6+Math.floor(i/2)*2.6), {h:.95,solid:true,brk:'wood',brkScale:.5}));
   tables.slice(0,2).forEach((n,i)=>
-    phPlace('furn',n, X+13.5, 2.8+i*3.0, {h:.76,solid:true,brk:'wood'}));
+    phPlace('furn',n, mqx(13.5), mqz(2.8+i*3.0), {h:.76,solid:true,brk:'wood'}));
   chairs.slice(0,3).forEach((n,i)=>
     phPlace('furn',n, -18+i*1.9, -11.0, {h:.95,solid:true,brk:'wood',brkScale:.5}));
 });
@@ -2611,7 +2639,7 @@ phLoad('map2','assets/map2.glb',(lib)=>{
   /* leave the middle three panels out: they were fencing off the gateway */
   for(let i=-6;i<=6;i++){
     if(Math.abs(i)<2) continue;
-    P('ironfence', MOSQUE_X+i*2.55, 32.4, {h:2.0, ry:0, cull:230});
+    P('ironfence', mqx(i*2.55), mqz(32.4), {h:2.0, ry:0, cull:230});
   }
 });
 
@@ -2705,14 +2733,14 @@ phLoad('extra','assets/ph_extra.glb',(lib)=>{
   /* ---- mosque ---- */
   const MX=MOSQUE_X;
   for(const [ox,oz] of [[-6.5,15.5],[6.5,15.5],[-6.5,28],[6.5,28]])
-    P('planter_pot_clay', MX+ox, oz, {h:.66, solid:true, brk:'pottery', cull:150});
-  for(let i=0;i<4;i++) P('jug_01',  MX-17+i*1.9, 2.4, {h:.32, brk:'pottery', cull:120});
-  for(let i=0;i<3;i++) P('metal_jug', MX+15+i*1.6, 2.4, {h:.30, cull:120});
-  for(let i=0;i<4;i++) P('painted_wooden_stool', MX+7.5+(i%2)*2.4, 5.0+((i/2)|0)*2.2,
+    P('planter_pot_clay', mqx(ox), mqz(oz), {h:.66, solid:true, brk:'pottery', cull:150});
+  for(let i=0;i<4;i++) P('jug_01',  mqx(-17+i*1.9), mqz(2.4), {h:.32, brk:'pottery', cull:120});
+  for(let i=0;i<3;i++) P('metal_jug', mqx(15+i*1.6), mqz(2.4), {h:.30, cull:120});
+  for(let i=0;i<4;i++) P('painted_wooden_stool', mqx(7.5+(i%2)*2.4), mqz(5.0+((i/2)|0)*2.2),
                          {h:.5, solid:true, brk:'wood', brkScale:.5, cull:130});
-  for(const cz of [-6,-12]) P('lantern_chandelier_01', MX, cz, {h:1.3, y:6.4, cull:150});
-  P('ornate_mirror_01', MX-22.6, -6, {h:1.4, y:1.9, ry:Math.PI/2, cull:130});
-  P('korean_fire_extinguisher_01', MX+3.2, 12.4, {h:.62, cull:130});
+  for(const cz of [-6,-12]) P('lantern_chandelier_01', mqx(0), mqz(cz), {h:1.3, y:3.4, cull:150});
+  P('ornate_mirror_01', mqx(-22.6), mqz(-6), {h:1.4, y:1.9, ry:Math.PI/2, cull:130});
+  P('korean_fire_extinguisher_01', mqx(3.2), mqz(12.4), {h:.62, cull:130});
 });
 
 /* ===================== STREET / FACADES =====================
@@ -5171,7 +5199,7 @@ function decalScatter(){
     decalAdd('track', rand(-20,20), rand(18,29), rand(2.6,5.0), rand(-.3,.3));
   /* mosque forecourt */
   for(let i=0;i<18;i++)
-    decalAdd(Math.random()<.5?'crack':'patch', MOSQUE_X+rand(-24,24), rand(15,31), rand(1.4,3.6));
+    decalAdd(Math.random()<.5?'crack':'patch', mqx(rand(-24,24)), mqz(rand(15,31)), rand(1.4,3.6));
   /* fuel stop apron and the industrial yards leak */
   for(let i=0;i<14;i++)
     decalAdd('oil', -402+rand(-12,12), rand(24,30), rand(1.2,2.8));
@@ -5786,8 +5814,8 @@ const cinematicDeath=(z,dt)=>{
      the supermarket. Mirror the act-aware interior extents setPhase uses, and
      key the inside/outside test off the act's own lot edge. */
   const cd_a2 = (mission.act===2);
-  const cdInMinX = ACT_OFF+(cd_a2?-24:-21), cdInMaxX = ACT_OFF+(cd_a2?24:21);
-  const cdInMinZ = cd_a2?-15:-14,           cdInMaxZ = cd_a2?12.4:15.2;
+  const cdInMinX = ACT_OFF+(cd_a2?MQ_B.inMinX:-21), cdInMaxX = ACT_OFF+(cd_a2?MQ_B.inMaxX:21);
+  const cdInMinZ = cd_a2?MQ_B.minZ:-14,             cdInMaxZ = cd_a2?MQ_B.inMaxZ:15.2;
   const cdIn = rp.z < LC_LOT.minZ;
   rp.x=clamp(rp.x+cd.slide.x*dt, cdIn?cdInMinX:LC_LOT.minX, cdIn?cdInMaxX:LC_LOT.maxX);
   rp.z=clamp(rp.z+cd.slide.z*dt, cdIn?cdInMinZ:LC_LOT.minZ, cdIn?cdInMaxZ:LC_LOT.maxZ);
@@ -6222,7 +6250,8 @@ function dropHeld(){
    secondary weapon, so it was simply unobtainable after TOPS. These are points
    inside the prayer hall and out in the courtyard, offset by ACT_OFF. */
 const THROW_SPOTS2=[[-16,10],[16,10],[-20,-6],[20,-6],[0,-13],[-11,6],[11,6],
-                    [-6,-9],[6,-9],[0,4],[-18,2],[18,2],[8,20],[-8,22],[13,24]];
+                    [-6,-9],[6,-9],[0,4],[-18,2],[18,2],[8,20],[-8,22],[13,24]]
+  .map(([x,z])=>[mqo(x), mqz(z)]);
 function throwablesReset(){
   dropHeld();
   let ti2=0;
@@ -6589,8 +6618,16 @@ window.__phase='menu';
 const INSIDE_PTS=[[-19,-12],[19,-12],[-19,-6],[19,-6],[-8,-11],[8,-11],[-16,0],[16,0],[-19,5],[19,5],[-10,9],[10,9],[-17,13],[17,13],[0,-9.4],[3,-12]];
 /* the mosque has rooms, so its wave spawns are spread across hall, chambers,
    corridor and vestibule rather than reusing the supermarket's aisle ends */
-const INSIDE_PTS2=[[-20.5,-2.5],[20.5,-2.5],[-11,-9],[11,-9],[0,-13],[-21,7],[21,7],
-                   [-14.5,3],[14.5,3],[-7.5,6.6],[7.5,6.6],[0,7.4],[0,2.2],[-18,11],[18,11]];
+/* Hand-authored against the old 50x29 hall; at 0.46 several landed in the
+   side chambers and vestibule corners, which are sealed or too tight to
+   thread - a hostile spawning there could never reach the player. These are
+   flood-fill verified reachable from the portal with >=1.5 m clearance
+   (scratchpad/harness/openspots.mjs). */
+const INSIDE_PTS2=([
+  [-21.7,-12.7],[-12.6,-12.7],[-3.5,-12.7],[5.7,-12.7],[14.8,-12.7],
+  [-17.2,-4.9],[-8,-4.9],[1.1,-4.9],[10.2,-4.9],[22,-6.9],
+  [-16.5,4.2],[-7.4,4.2],[7,4.2],[16.1,4.2]
+  ]).map(([x,z])=>[mqo(x), mqz(z)]);   /* mosque-local */
 function insidePts(){ return mission.act===2 ? INSIDE_PTS2 : INSIDE_PTS; }
 const OUTSIDE_PTS=[[-20,28],[20,27],[-8,26],[24,23.5],[-24,22],[14,29]];
 const LINE_SUB='Remember lads, subscribe to PewDiePie.';
@@ -6605,17 +6642,16 @@ function setPhase(p){
   { const h=document.getElementById('hint'); if(h) h.dataset.thr=''; }
   const A=ACT_OFF, act2=(mission.act===2);
   if(p==='outside'){
-    BOUNDS.minX=A+(act2?-25:-23); BOUNDS.maxX=A+(act2?25:23);
-    /* act 2 parks on the street at z=34.5, outside the old 31 cap - the
-       player was yanked 3.5 m through the perimeter wall on arrival. Let the
-       forecourt be walkable so the walk in through the gate is real. */
-    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?37:30.5;
+    BOUNDS.minX=A+(act2?MQ_B.outMinX:-23); BOUNDS.maxX=A+(act2?MQ_B.outMaxX:23);
+    /* act 2 parks out on the street, past the courtyard wall, so the walk in
+       through the gate is real - hence the 37 rather than the yard edge. */
+    BOUNDS.minZ=act2?MQ_B.minZ:-14;        BOUNDS.maxZ=act2?37:30.5;
   } else {
-    BOUNDS.minX=A+(act2?-24:-21); BOUNDS.maxX=A+(act2?24:21);
-    BOUNDS.minZ=act2?-15:-14;     BOUNDS.maxZ=act2?12.4:15.2;
+    BOUNDS.minX=A+(act2?MQ_B.inMinX:-21);  BOUNDS.maxX=A+(act2?MQ_B.inMaxX:21);
+    BOUNDS.minZ=act2?MQ_B.minZ:-14;        BOUNDS.maxZ=act2?MQ_B.inMaxZ:15.2;
   }
-  ZBOUNDS.minX=A+(act2?-25:-23); ZBOUNDS.maxX=A+(act2?25:23);
-  ZBOUNDS.minZ=act2?-15:-14;     ZBOUNDS.maxZ=act2?31:30.5;
+  ZBOUNDS.minX=A+(act2?MQ_B.outMinX:-23);  ZBOUNDS.maxX=A+(act2?MQ_B.outMaxX:23);
+  ZBOUNDS.minZ=act2?MQ_B.minZ:-14;         ZBOUNDS.maxZ=act2?MQ_B.yardMaxZ:30.5;
   const hint=document.getElementById('hint');
   const lab=document.getElementById('wave-label');
   if(p==='drive'){ hint.textContent='W/S DRIVE · A/D STEER · E RADIO'; lab.textContent='OBJECTIVE'; document.getElementById('wave-num').textContent='TOPS'; xh.style.opacity=0; }
@@ -6765,7 +6801,9 @@ function missionUpdate(dt){
   /* the way in: TOPS front doors in act 1, the mosque's central arch in act 2 */
   if(phase==='outside'){
     const A=ACT_OFF;
-    const gate = mission.act===2 ? (player.pos.z<12.6 && Math.abs(player.pos.x-A)<3.0)
+    /* these were the mosque's PRE-SCALE local numbers; the portal now sits at
+       mqz(12.6) with a 2 m opening, so the old threshold could never be met */
+    const gate = mission.act===2 ? (player.pos.z<mqz(12.6) && Math.abs(player.pos.x-A)<mqo(3.0))
                                  : (player.pos.z<14.7 && Math.abs(player.pos.x-A)<2.1);
     if(gate) enterStore();
   }
@@ -7513,7 +7551,7 @@ function netFollowPhase(p){
   }
   if(p==='inside'&&phase!=='inside'){
     setPhase('inside');
-    player.pos.set(ACT_OFF, 1.7, mission.act===2?10.5:13.5);
+    player.pos.set(ACT_OFF, 1.7, mission.act===2?mqz(10.5):13.5);
     return;
   }
   if(p==='win'&&phase!=='win'){ setPhase('win'); playing=false; document.exitPointerLock(); showWin(window.__runStats||{}); }
@@ -7829,7 +7867,11 @@ function toggleMute(){
 const survivors=[];
 const SURV_SPOTS=[[-13.5,11.0],[13.2,10.6],[-19.5,-12.5],[18.8,-3.0]];
 /* prayer-hall hiding places: behind columns and beside the minbar */
-const SURV_SPOTS2=[[-22.2,2.9],[22.2,2.9],[-17.5,-12.5],[16.8,-12.0]];
+/* pulled in off the side walls: at 0.46 scale, 2.8 m of local clearance is
+   only 1.3 m of real gap, tight enough that a coarse nav grid could not
+   thread it and a hostile could pin a survivor against the wall */
+const SURV_SPOTS2=[[-17.2,-4.9],[10.2,-4.9],[-12.6,-12.7],[14.8,-12.7]]
+  .map(([x,z])=>[mqo(x), mqz(z)]);
 const SURV_NAMES=['MARA','JUDE','KIRA','OTIS'];
 const SURV_SKINS=[0xc9a184,0xba8f68,0xd8b494,0xa87a58];
 const SURV_LOOKS=[
@@ -7842,7 +7884,7 @@ const EXIT_ZONE={minX:-2,maxX:2,minZ:12.5,maxZ:14.5};
 /* the way out is act-dependent: the TOPS doors, or the mosque's central arch */
 function exitZone(){
   return mission.act===2
-    ? {minX:ACT_OFF-3.4, maxX:ACT_OFF+3.4, minZ:9.5, maxZ:13.4}
+    ? {minX:ACT_OFF+mqo(-3.4), maxX:ACT_OFF+mqo(3.4), minZ:mqz(9.5), maxZ:mqz(13.4)}
     : EXIT_ZONE;
 }
 let surv_completeFired=false, surv_hudEl=null;
@@ -8140,10 +8182,10 @@ let lc_burstDone=false;
 let lc_groanT=rand(3,6);
 const LC_LOT ={minX:-23,maxX:23,minZ:16,maxZ:29.5};   /* outer clamp (road starts z~32, store front z=15) */
 const LC_LOT1={minX:-23,maxX:23,minZ:16,maxZ:29.5};
-const LC_LOT2={minX:-25,maxX:25,minZ:14.5,maxZ:31};
+const LC_LOT2={minX:mqo(-25),maxX:mqo(25),minZ:mqz(14.5),maxZ:mqz(31)};
 const LC_SPAWN={minX:-20,maxX:20,minZ:17,maxZ:29};
 const LC_SPAWN1={minX:-20,maxX:20,minZ:17,maxZ:29};
-const LC_SPAWN2={minX:-22,maxX:22,minZ:16,maxZ:30};
+const LC_SPAWN2={minX:mqo(-22),maxX:mqo(22),minZ:mqz(16),maxZ:mqz(30)};
 const LC_WRECK={minX:-18.6,maxX:-13.4,minZ:16.8,maxZ:19.6}; /* derelict car at (-16,18.2) */
 
 /* predicate for the integrator: zombiesUpdate must skip these entirely */
