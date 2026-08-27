@@ -7629,7 +7629,21 @@ function netRenderTick(dt){
          of clients and clients' view of the host alike. Smoothed, or the
          18 Hz sample rate makes the blend chatter. */
       if(pl.actWalk||pl.actRun){
-        const inst=(dt>1e-4&&pl.lx!==undefined)?Math.hypot(x-pl.lx,z-pl.lz)/dt:0;
+        /* Speed comes from the two SNAPSHOT samples, not from the interpolated
+           render position. The render position is re-derived every frame from
+           an alpha that overshoots slightly, so at low frame rates it jitters
+           and a stationary team-mate read ~2 m/s and walked on the spot. The
+           snapshots are the authoritative samples and are frame-rate
+           independent. */
+        let inst=0;
+        const dtn=pl.t1-pl.t0;
+        if(dtn>1e-3){
+          const step=Math.hypot(pl.p1.x-pl.p0.x, pl.p1.z-pl.p0.z);
+          /* a phase change, respawn or the 900 m hop into act 2 covers metres
+             between two samples - a teleport, not a sprint */
+          inst = (step>3) ? 0 : step/dtn;
+        }
+        inst=Math.min(inst,9);        /* nobody covers ground faster on foot */
         pl.spd=(pl.spd===undefined)?inst:pl.spd+(inst-pl.spd)*clamp(dt*7,0,1);
         const sp=pl.spd;
         /* a teleport already skipped the glide above; do not let it read as a sprint */
