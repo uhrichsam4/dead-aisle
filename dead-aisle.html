@@ -621,9 +621,20 @@ function _gltfStart(j){
     _gltfProgress(); _gltfPump();
   };
   arm();
+  /* The watchdog exists to catch a stalled DOWNLOAD, but GLTFLoader's progress
+     events stop the moment the body arrives - everything after that is parse
+     and texture decode, which on a big pack under load can take longer than
+     the timeout. The guard then fired on an asset that had already downloaded
+     fine, "retried" it, and on the second timeout gave up and dropped it for
+     good. Once the body is in, stop arming: at that point there is no network
+     left to stall, and finish() is the only thing that can still fire. */
   new GLTFLoader().load(j.url,
     (g)=>finish(j.onLoad,g),
-    ()=>{ if(!settled) arm(); },
+    (ev)=>{
+      if(settled) return;
+      if(ev && ev.total && ev.loaded >= ev.total){ clearTimeout(j.guard); j.downloaded=true; }
+      else if(!j.downloaded) arm();
+    },
     (e)=>finish(j.onError,e));
 }
 
@@ -2518,7 +2529,21 @@ function phPlace(pack, name, x, z, opts){
     }
   }
   if(opts&&opts.brk) makeBreakable(o, opts.brk, opts.brkScale||1);
-  if(opts&&opts.cull) cullRegister(o, x, z, opts.cull);
+  /* Measured at the car park: 704 meshes in frustum but only 138k triangles,
+     across 557 distinct geometry+material pairs. That is draw-call bound by a
+     long tail of small unique props - instancing cannot batch them because no
+     two share a geometry AND a material. What it IS is a lot of tiny objects
+     drawn from a long way off.
+
+     So derive the cull radius from the prop's own size when the caller has not
+     picked one: a 0.3 m bottle stops being drawn at 25 m, a 9 m building keeps
+     its 155. Distance where an object is roughly a pixel or two, rather than
+     one radius for everything. */
+  const cullR = (opts&&opts.cull) || (()=>{
+    const sz=Math.max(wb.max.x-wb.min.x, wb.max.y-wb.min.y, wb.max.z-wb.min.z);
+    return clamp(sz*38, 22, CULL_FAR);
+  })();
+  cullRegister(o, x, z, cullR);
   return o;
 }
 function phLoad(pack, url, then){
@@ -7466,6 +7491,12 @@ function netOnData(c,raw){
       if(document.pointerLockElement!==document.body) netGrab();
       break;
     }
+    case 'surv': {                                /* you found a survivor */
+      if(NET.mode!=='client')break;
+      banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
+      addPoints(150,'SURVIVOR +150');
+      break;
+    }
     case 'hurt': {                                /* a hostile reached me */
       if(NET.mode!=='client')break;
       if(player.alive){ damagePlayer(d.dmg||18, V3(player.pos.x,1,player.pos.z-1)); Audio.bite(); }
@@ -7537,7 +7568,12 @@ function netBuildSnap(){
   const car=townCar?[+townCar.position.x.toFixed(2), +townCar.position.z.toFixed(2),
                      +townCar.rotation.y.toFixed(3), +carSpeed.toFixed(2), carParked?1:0,
                      +carSteerVal.toFixed(3)]:null;
-  return {t:'snap', z:zs, p:ps, c:car,
+  /* Survivors were in no channel of the snapshot, so a client saw all four
+     crouched in their starting spots - badged, with a live distance readout -
+     for the whole match, even as the host walked them out of the door. */
+  const sv=survivors.map(s=>[+s.root.position.x.toFixed(2), +s.root.position.z.toFixed(2),
+                             +s.root.rotation.y.toFixed(2), s.state==='following'?1:0]);
+  return {t:'snap', z:zs, p:ps, c:car, s:sv,
           m:[mission.insideLeft|0, threatCount()|0, phase, mission.round|0, mission.act|0]};
 }
 function netApplySnap(d){
@@ -7600,6 +7636,14 @@ function netApplySnap(d){
     carParked=NET.carT.parked;
     if(!NET.carSeen){ NET.carSeen=true; townCar.position.set(d.c[0],0,d.c[1]); townCar.rotation.y=d.c[2]; }
   }
+  if(d.s){
+    for(let i=0;i<d.s.length&&i<survivors.length;i++){
+      const e=d.s[i], s=survivors[i];
+      s.root.position.x=e[0]; s.root.position.z=e[1];
+      s.root.rotation.y=e[2];
+      s.state=e[3]?'following':'hiding';
+    }
+  }
   if(d.m){
     mission.insideLeft=d.m[0];
     if(d.m[3]) mission.round=d.m[3];
@@ -7641,6 +7685,11 @@ function netFollowPhase(p){
     /* act 2 steps out into the courtyard side of the road, not the lot */
     if(mission.act===2) player.pos.z=Math.min(player.pos.z,34.5);
     player.yaw=0; player.pitch=0; player.alive=true;
+    /* Alive on the negative hp that killed you is not alive - the next bite
+       re-ran die() and the death screen looped. The early return at the top of
+       this function should prevent reaching here while dead, but restore hp
+       explicitly rather than depending on that. */
+    if(player.hp<=0) player.hp=player.maxHp;
     gun.visible=true; vmGroup.visible=true; carCamYaw=null;
     return;
   }
@@ -8323,12 +8372,32 @@ function survivorsUpdate(dt,now){
       const d=Math.hypot(z.root.position.x-rp.x,z.root.position.z-rp.z);
       if(d<nzd){nzd=d;nzx=z.root.position.x;nzz=z.root.position.z;}
     }
-    /* rescue */
-    if(s.state==='hiding'&&Math.hypot(player.pos.x-rp.x,player.pos.z-rp.z)<1.4){
-      s.state='following';
-      banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
-      addPoints(150,'SURVIVOR +150');
-      Audio.survivorThanks(rp);
+    /* Rescue. survivorsUpdate is host-only, and this used to test the HOST's
+       position alone - so in co-op a client could stand on top of a survivor
+       all match and nothing happened. The level's primary objective was a
+       single-player mechanic. Test every live party member. */
+    if(s.state==='hiding'){
+      let by=null;
+      if(Math.hypot(player.pos.x-rp.x,player.pos.z-rp.z)<1.4) by='@me';
+      else if(NET.mode==='host'){
+        for(const id of Object.keys(NET.players)){
+          const pl=NET.players[id];
+          if(!pl||pl.dead||pl.x===undefined)continue;
+          if(Math.hypot((+pl.x)-rp.x,(+pl.z)-rp.z)<1.4){ by=id; break; }
+        }
+      }
+      if(by){
+        s.state='following';
+        if(by==='@me'){
+          banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
+          addPoints(150,'SURVIVOR +150');
+        }else{
+          /* credit the player who actually found them */
+          const c=NET.conns.find(x=>x.peer===by);
+          if(c) netSendTo(c,{t:'surv'});
+        }
+        Audio.survivorThanks(rp);
+      }
     }
     /* fear */
     const tgt=s.state==='following'?.45:(nzd<6?1:.25);
@@ -8398,9 +8467,19 @@ function survivorsUpdate(dt,now){
      mission.extractAnnounced&&
      survivors.every(s=>s.state==='following')&&
      zombies.every(z=>z.state!=='chase')&&
+     /* any live party member standing in the doorway ends it, not just the
+        host - otherwise a client can walk the survivors to the door and
+        nothing happens until the host comes back for them */
      (()=>{const E=exitZone();
-        return player.pos.x>E.minX&&player.pos.x<E.maxX&&
-               player.pos.z>E.minZ&&player.pos.z<E.maxZ;})()){
+        const inZone=(px,pz)=>px>E.minX&&px<E.maxX&&pz>E.minZ&&pz<E.maxZ;
+        if(player.alive&&inZone(player.pos.x,player.pos.z))return true;
+        if(NET.mode==='host'){
+          for(const id of Object.keys(NET.players)){
+            const pl=NET.players[id];
+            if(pl&&!pl.dead&&pl.x!==undefined&&inZone(+pl.x,+pl.z))return true;
+          }
+        }
+        return false;})()){
     surv_completeFired=true;
     if(typeof missionComplete==='function')missionComplete();
   }
