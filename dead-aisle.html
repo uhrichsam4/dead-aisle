@@ -5972,7 +5972,12 @@ function spawnZombie(waveNum,opts={}){
   return z;
 }
 
-function hitZombie(z,dmg,dir,point,isHead){
+/* `credit` is false when the host is applying a shot a CLIENT fired. The host
+   still owns the damage, blood and physics, but the points, stats, crosshair
+   confirm and kill sting belong to whoever pulled the trigger - the host was
+   scoring every client kill as its own AND echoing a 'cred' back, so both
+   machines counted it. */
+function hitZombie(z,dmg,dir,point,isHead,credit=true){
   if(z.state==='dead')return;
   if(NET.mode==='client'){
     /* the host owns hit points - send the event, keep the local feedback so
@@ -5980,33 +5985,37 @@ function hitZombie(z,dmg,dir,point,isHead){
     netSend({t:'hit', i:zombies.indexOf(z), dmg, h:!!isHead,
              d:[+dir.x.toFixed(2),+dir.z.toFixed(2)],
              p:[+point.x.toFixed(2),+point.y.toFixed(2),+point.z.toFixed(2)]});
-    showHitmarker(!!isHead); Audio.flesh(); bloodBurst(point,dir,6);
+    /* showHitmarker(true) is the red KILL confirm. A client fired it on every
+       headshot whether or not the hostile died; the 'cred' echo from the host
+       flashes the real one when the shot was actually lethal. */
+    showHitmarker(false); Audio.flesh(); bloodBurst(point,dir,6);
     return;
   }
   z.hp-=dmg;
   z.stagger=Math.max(z.stagger,isHead?.28:.16);
-  addPoints(isHead?15:10,null);
-  showHitmarker(false);
-  Audio.flesh();
+  if(credit){ addPoints(isHead?15:10,null); showHitmarker(false); }
+  Audio.flesh();                      /* a world sound either way */
   /* voice reaction, only from the ones near enough to hear */
   { const hn=performance.now()/1000, hpz=z.root.position;
     if(Math.random()<.45){
       const f=clamp(1-Math.hypot(hpz.x-player.pos.x,hpz.z-player.pos.z)/HV_CUTOFF,0,1);
       if(f>.03) SFX.enemyHurt.play(rand(.94,1.08), f*f*.85);
     } else HV.reactAt(hpz,hn,.95); }
-  if(z.hp<=0) killZombie(z,dir,point,isHead);
+  if(z.hp<=0) killZombie(z,dir,point,isHead,credit);
 }
 
-function killZombie(z,dir,point,isHead){
+function killZombie(z,dir,point,isHead,credit=true){
   z.state='dead'; z.deadT=0;
-  stats.kills++;
-  if(isHead)stats.headshots++;
-  adren=1;
-  const base=isHead?90:55;
-  addPoints(base, isHead?'HEADSHOT +'+base:'+'+base, isHead);
-  showHitmarker(true);
-  Audio.killGroan(z.root.position);
-  SFX.kill.play(1);
+  if(credit){
+    stats.kills++;
+    if(isHead)stats.headshots++;
+    adren=1;
+    const base=isHead?90:55;
+    addPoints(base, isHead?'HEADSHOT +'+base:'+'+base, isHead);
+    showHitmarker(true);
+    SFX.kill.play(1);                 /* the shooter's own callout */
+  }
+  Audio.killGroan(z.root.position);   /* the body drops for everyone */
   // fall direction opposite to shot
   const side=Math.random()<.5?1:-1;
   z.fallAxis=side;
@@ -7344,6 +7353,7 @@ function netJoin(code){
     c.on('open',()=>{
       opened=true;
       NET.mode='client'; NET.hostConn=c; NET.code=code; NET.ready=true;
+      NET.selfId=NET.peer&&NET.peer.id;      /* latched - see netApplySnap */
       netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id,skin:SKINS[SKIN_I].id});
       netStatus('Joined room <b>'+code+'</b>. Waiting for the host to start.');
       const btn=document.getElementById('btn-play');
@@ -7422,7 +7432,7 @@ function netOnData(c,raw){
            kill was scored to the host and the shooter's HUD stayed at 0 kills
            and 500 points for the whole match. Echo the outcome back. */
         const wasDead=(z.state==='dead');
-        hitZombie(z, d.dmg, V3(d.d[0],0,d.d[1]), V3(d.p[0],d.p[1],d.p[2]), !!d.h);
+        hitZombie(z, d.dmg, V3(d.d[0],0,d.d[1]), V3(d.p[0],d.p[1],d.p[2]), !!d.h, false);
         const killed=(!wasDead && z.state==='dead');
         try{ c.send(JSON.stringify({t:'cred', h:!!d.h, k:killed, i:d.i|0})); }catch(e){}
       }
@@ -7516,11 +7526,14 @@ function netBuildSnap(){
   for(const id of Object.keys(NET.players)){
     const pl=NET.players[id];
     ps.push([id, pl.name||'', +(+pl.x).toFixed(2), +(+pl.y).toFixed(2), +(+pl.z).toFixed(2),
-             +(+pl.yaw).toFixed(2), Math.round(pl.hp||0), pl.dead?1:0]);
+             +(+pl.yaw).toFixed(2), Math.round(pl.hp||0), pl.dead?1:0, pl.skin||'operator']);
   }
   /* the host's own body, so clients can see the host too */
+  /* the host's own outfit rides along too - without it every client rendered
+     the host as the default OPERATOR whatever they had picked */
   ps.push(['@host',NET.name,+player.pos.x.toFixed(2),+player.pos.y.toFixed(2),
-           +player.pos.z.toFixed(2),+player.yaw.toFixed(2),Math.round(player.hp),player.alive?0:1]);
+           +player.pos.z.toFixed(2),+player.yaw.toFixed(2),Math.round(player.hp),player.alive?0:1,
+           SKINS[SKIN_I].id]);
   const car=townCar?[+townCar.position.x.toFixed(2), +townCar.position.z.toFixed(2),
                      +townCar.rotation.y.toFixed(3), +carSpeed.toFixed(2), carParked?1:0,
                      +carSteerVal.toFixed(3)]:null;
@@ -7552,7 +7565,10 @@ function netApplySnap(d){
   const live=new Set();
   for(const e of d.p){
     const id=e[0];
-    if(id===NET.peer?.id)continue;
+    /* NET.peer.id can change if the peer is recreated, and then a client
+       started rendering its own body and name tag as a team-mate. Latch the
+       id we actually joined with. */
+    if(id===NET.selfId || id===NET.peer?.id)continue;
     live.add(id);
     const pl=NET.players[id]=NET.players[id]||{};
     if(pl.name!==e[1]){ pl.name=e[1]; pl.tagDirty=true; }
@@ -7560,6 +7576,16 @@ function netApplySnap(d){
     pl.p1={x:e[2],y:e[3],z:e[4],yaw:e[5]};
     pl.t0=(pl.t1===undefined?tNow:pl.t1); pl.t1=tNow;
     pl.x=e[2]; pl.y=e[3]; pl.z=e[4]; pl.yaw=e[5]; pl.hp=e[6]; pl.dead=!!e[7];
+    /* an outfit change swaps the whole rig for a model skin, so rebuild rather
+       than repaint when it differs from what this avatar was built with */
+    const sk=e[8]||'operator';
+    if(pl.skin!==sk){
+      pl.skin=sk;
+      if(pl.obj && pl.obj.userData.skin!==sk){
+        pl.obj.removeFromParent(); pl.obj=null; pl.mixer=null; pl.act=null;
+        pl.actIdle=pl.actWalk=pl.actRun=null;
+      }
+    }
     netAvatarFor(pl);
   }
   for(const id of Object.keys(NET.players)) if(!live.has(id)) netDropPlayer(id);
@@ -7623,7 +7649,16 @@ function netFollowPhase(p){
     player.pos.set(ACT_OFF, 1.7, mission.act===2?mqz(10.5):13.5);
     return;
   }
-  if(p==='win'&&phase!=='win'){ setPhase('win'); playing=false; document.exitPointerLock(); showWin(window.__runStats||{}); }
+  if(p==='win'&&phase!=='win'){
+    setPhase('win'); playing=false; document.exitPointerLock();
+    /* __runStats is built by the HOST's missionComplete, so on a client it was
+       undefined and the card rendered as a row of em-dashes with a red C. Build
+       it locally from what this machine actually tracked. */
+    showWin({kills:stats.kills, headshots:stats.headshots,
+             shotsFired:stats.shotsFired, shotsHit:stats.shotsHit,
+             survivors:survivors.filter(s=>s.state==='following').length,
+             points:points, time:runTime});
+  }
 }
 
 /* place remote bodies and drive the hostiles a client does not simulate */
@@ -7643,7 +7678,11 @@ function netRenderTick(dt){
   const now=performance.now()/1000;
   for(const id of Object.keys(NET.players)){
     const pl=NET.players[id]; const o=pl.obj; if(!o)continue;
-    o.visible=!pl.dead;
+    /* Two places a remote body should not be drawn: standing in the middle of
+       the TOPS doorway behind the lobby pads before anyone has pressed PLAY,
+       and standing in the road while everyone is actually riding in the car. */
+    const riding=(phase==='drive'||phase==='parking');
+    o.visible = !pl.dead && playing && !riding;
     if(pl.tagDirty) netTagFor(pl);
     if(pl.p0&&pl.p1){
       const a=netAlpha(pl.t0,pl.t1,now);
@@ -9739,7 +9778,14 @@ loop();
 /* auto-start first wave when game starts handled by intermission in resetRun */
 
 /* smoke-test hooks */
-document.getElementById('btn-win-retry')&&(document.getElementById('btn-win-retry').onclick=()=>{
+document.getElementById('btn-win-retry')&&(document.getElementById('btn-win-retry').onclick=(e)=>{
+  /* Only the host starts the next round. A client pressing this restarted
+     itself locally and was bounced straight back to the win card by the next
+     snapshot, with nothing to say it was waiting on anyone. */
+  if(NET.mode==='client'){
+    const b=e&&e.currentTarget; if(b) b.textContent='WAITING FOR HOST';
+    return;
+  }
   mission.round=(mission.round|0)+1;      /* clearing a round escalates it */
   endReset&&endReset();
   if(NET.mode==='host'&&NET.conns.length) netSend({t:'round',n:mission.round});
