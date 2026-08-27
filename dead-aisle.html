@@ -7210,13 +7210,24 @@ function netAvatarFor(pl){
   scene.add(a);
   pl.obj=a;
   pl.mixer=new THREE.AnimationMixer(a);
-  let clip=skinIdleClip(made.clips);
-  if(!clip&&vmMixer){
-    const names=Object.keys(vmActions);
-    const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
-    clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
-  }
-  if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
+  /* Remote players used to be handed ONE idle clip, so a team-mate crossing
+     the car park glided there in a fixed standing pose. Build the whole
+     locomotion set instead and let netRenderTick blend it by measured speed.
+     The operator rig has idle/walk/run; the suit model has idle/run. */
+  const pick=(re)=>{
+    if(made.clips&&made.clips.length){ const c=made.clips.find(x=>re.test(x.name)); if(c)return c; }
+    if(vmMixer){ const c=vmMixer._actions.map(x=>x._clip).find(x=>re.test(x.name)); if(c)return c; }
+    return null;
+  };
+  const cIdle=pick(/^idle$/i)||pick(/idle/i)||pick(/^aim$/i)||(made.clips&&made.clips[0])||null;
+  const cWalk=pick(/^walk$/i)||pick(/walk|jog/i);
+  const cRun =pick(/^run$/i)||pick(/run|sprint/i);
+  const mk=(c,w)=>{ if(!c)return null; const a=pl.mixer.clipAction(c);
+                    a.play(); a.setEffectiveWeight(w); return a; };
+  pl.actIdle=mk(cIdle,1);
+  pl.actWalk=mk(cWalk,0);
+  pl.actRun =mk(cRun,0);
+  pl.act=pl.actIdle;                 /* kept: other code still reads pl.act */
   netTagFor(pl);
   return a;
 }
@@ -7613,6 +7624,24 @@ function netRenderTick(dt){
       o.position.distanceToSquared(_netV)>36 ? o.position.copy(_netV)
                                              : o.position.lerp(_netV,clamp(dt*22,0,1));
       o.rotation.y=netLerpAngle(o.rotation.y, netLerpAngle(pl.p0.yaw,pl.p1.yaw,a)+Math.PI, clamp(dt*16,0,1));
+      /* Locomotion from the interpolated path rather than any extra network
+         field, so it costs nothing on the wire and works for the host's view
+         of clients and clients' view of the host alike. Smoothed, or the
+         18 Hz sample rate makes the blend chatter. */
+      if(pl.actWalk||pl.actRun){
+        const inst=(dt>1e-4&&pl.lx!==undefined)?Math.hypot(x-pl.lx,z-pl.lz)/dt:0;
+        pl.spd=(pl.spd===undefined)?inst:pl.spd+(inst-pl.spd)*clamp(dt*7,0,1);
+        const sp=pl.spd;
+        /* a teleport already skipped the glide above; do not let it read as a sprint */
+        const run =clamp((sp-2.6)/2.4,0,1);
+        const walk=clamp((sp-0.35)/1.6,0,1)*(1-run);
+        if(pl.actRun)  pl.actRun.setEffectiveWeight(run);
+        if(pl.actWalk) pl.actWalk.setEffectiveWeight(walk);
+        if(pl.actIdle) pl.actIdle.setEffectiveWeight(clamp(1-run-walk,0,1));
+        if(pl.actRun)  pl.actRun.timeScale =clamp(sp/4.2,.7,1.6);
+        if(pl.actWalk) pl.actWalk.timeScale=clamp(sp/1.6,.7,1.5);
+      }
+      pl.lx=x; pl.lz=z;
     }
     if(pl.mixer)pl.mixer.update(dt);
   }

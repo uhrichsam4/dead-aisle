@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DEAD AISLE — model / rig viewer</title>
+<style>
+  :root{ --bg:#0e1013; --panel:#15181d; --line:#252a31; --dim:#8b8b80; --hi:#f6d434; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:#d8d8d0;
+             font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:hidden; }
+  #wrap{ display:flex; height:100%; }
+  #side{ width:290px; flex:none; background:var(--panel); border-right:1px solid var(--line);
+         display:flex; flex-direction:column; }
+  #side h1{ margin:0; padding:14px 16px 10px; font-size:12px; letter-spacing:.18em; color:var(--hi);
+            border-bottom:1px solid var(--line); }
+  #list{ overflow:auto; padding:8px; }
+  .item{ width:100%; text-align:left; margin:0 0 6px; padding:9px 10px; cursor:pointer;
+         background:#1b1f25; border:1px solid var(--line); border-radius:6px; color:#cfcfc4;
+         font:inherit; transition:border-color .12s,transform .12s; }
+  .item:hover{ border-color:#4a5058; transform:translateX(2px); }
+  .item.on{ border-color:var(--hi); color:var(--hi); }
+  .item b{ display:block; font-size:12px; letter-spacing:.05em; }
+  .item span{ display:block; margin-top:3px; font-size:10.5px; color:var(--dim); }
+  .tag{ display:inline-block; margin-top:5px; padding:1px 6px; border-radius:3px;
+        font-size:9.5px; letter-spacing:.09em; }
+  .rig{ background:#1d3b26; color:#7fd39a; }
+  .norig{ background:#3b1d1d; color:#e08a8a; }
+  #ctl{ border-top:1px solid var(--line); padding:11px 14px 14px; }
+  #ctl label{ display:flex; align-items:center; gap:7px; margin:0 0 7px; font-size:11px; color:var(--dim); }
+  #ctl select,#ctl input[type=range]{ flex:1; min-width:0; }
+  #ctl select{ background:#1b1f25; color:#d8d8d0; border:1px solid var(--line);
+               border-radius:4px; padding:4px 6px; font:inherit; font-size:11px; }
+  .chk{ display:flex; flex-wrap:wrap; gap:10px; margin-top:9px; }
+  .chk label{ margin:0; font-size:11px; cursor:pointer; }
+  #view{ flex:1; position:relative; min-width:0; }
+  #cv{ display:block; width:100%; height:100%; }
+  #hud{ position:absolute; left:14px; top:12px; font-size:11px; color:var(--dim);
+        background:rgba(10,12,15,.72); border:1px solid var(--line); border-radius:6px;
+        padding:8px 11px; pointer-events:none; white-space:pre; line-height:1.6; }
+  #hint{ position:absolute; right:14px; bottom:12px; font-size:10.5px; color:#5f6470; }
+  #load{ position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+         background:rgba(10,12,15,.8); font-size:12px; color:var(--hi); letter-spacing:.12em; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="side">
+    <h1>MODEL / RIG VIEWER</h1>
+    <div id="list"></div>
+    <div id="ctl">
+      <label>CLIP <select id="clip"><option>—</option></select></label>
+      <label>SPEED <input id="speed" type="range" min="0" max="2" step="0.05" value="1"></label>
+      <div class="chk">
+        <label><input type="checkbox" id="bones"> skeleton</label>
+        <label><input type="checkbox" id="wire"> wireframe</label>
+        <label><input type="checkbox" id="spin" checked> turntable</label>
+        <label><input type="checkbox" id="grid" checked> grid</label>
+      </div>
+    </div>
+  </div>
+  <div id="view">
+    <canvas id="cv"></canvas>
+    <div id="hud">pick a model</div>
+    <div id="hint">drag to orbit · scroll to zoom · right-drag to pan</div>
+    <div id="load">LOADING…</div>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+/* The two rigged entries are what the pipeline produced; the two raw entries
+   are exactly what arrived, so the difference is visible side by side. */
+const MODELS = [
+  { name:'SUIT — rigged',      url:'../assets/skin_suit.glb',      note:'tools/rig-character.py output' },
+  { name:'HOSTILE — donor rig',url:'../assets/hostile.glb',        note:'the skeleton everything binds to' },
+  { name:'SUIT — raw',         url:'models/suit-raw.glb',          note:'as supplied · 42 MB · slow to load' },
+  { name:'NEW GUY — raw',      url:'models/newguy-raw.glb',        note:'as supplied · arms down (A-pose)' },
+];
+
+const cv = document.getElementById('cv');
+const renderer = new THREE.WebGLRenderer({ canvas:cv, antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14171c);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 200);
+camera.position.set(2.2, 1.6, 3.0);
+const controls = new OrbitControls(camera, cv);
+controls.enableDamping = true; controls.dampingFactor = 0.07;
+controls.target.set(0, 0.95, 0);
+
+const key = new THREE.DirectionalLight(0xfff2dc, 2.4);
+key.position.set(3, 6, 4); key.castShadow = true;
+key.shadow.mapSize.set(1024,1024);
+key.shadow.camera.near = 0.5; key.shadow.camera.far = 25;
+key.shadow.camera.left = -4; key.shadow.camera.right = 4;
+key.shadow.camera.top = 4; key.shadow.camera.bottom = -4;
+scene.add(key);
+scene.add(new THREE.HemisphereLight(0xbcd6e2, 0x35302a, 0.55));
+const fill = new THREE.DirectionalLight(0xdfe8f2, 0.7);
+fill.position.set(-4, 2.5, -3); scene.add(fill);
+
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(6, 48),
+  new THREE.MeshStandardMaterial({ color:0x1b1f25, roughness:0.95 }));
+floor.rotation.x = -Math.PI/2; floor.receiveShadow = true; scene.add(floor);
+const grid = new THREE.GridHelper(12, 24, 0x39424c, 0x232830);
+grid.position.y = 0.002; scene.add(grid);
+
+let current=null, mixer=null, action=null, clips=[], skelHelper=null;
+const loader = new GLTFLoader();
+const hud = document.getElementById('hud');
+const loadEl = document.getElementById('load');
+const clipSel = document.getElementById('clip');
+
+function disposeCurrent(){
+  if(!current) return;
+  scene.remove(current);
+  current.traverse(o=>{
+    if(o.isMesh||o.isSkinnedMesh){
+      o.geometry && o.geometry.dispose();
+      [].concat(o.material).forEach(m=>{
+        if(!m) return;
+        ['map','normalMap','roughnessMap','metalnessMap','emissiveMap','aoMap']
+          .forEach(k=>{ if(m[k]) m[k].dispose(); });
+        m.dispose();
+      });
+    }
+  });
+  if(skelHelper){ scene.remove(skelHelper); skelHelper=null; }
+  current=null; mixer=null; action=null; clips=[];
+}
+
+/* glTF stores a skinned mesh's vertices in BIND space, so Box3.setFromObject
+   on one reports about 0.4 m however tall the character actually is - frame on
+   that and the camera ends up inside a shoe. Measure the posed skeleton for
+   rigged models, and the geometry only for static ones. */
+function measure(obj){
+  obj.updateWorldMatrix(true, true);
+  const box = new THREE.Box3();
+  let sk=null; obj.traverse(o=>{ if(!sk && o.isSkinnedMesh && o.skeleton) sk=o; });
+  if(sk && sk.skeleton.bones.length){
+    const v = new THREE.Vector3();
+    for(const b of sk.skeleton.bones){ b.updateWorldMatrix(true,false); b.getWorldPosition(v); box.expandByPoint(v); }
+    box.expandByScalar(0.10);           /* bones sit inside the silhouette */
+  } else {
+    box.setFromObject(obj);
+  }
+  return box;
+}
+function frame(obj){
+  const box = measure(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const ctr  = box.getCenter(new THREE.Vector3());
+  const h = Math.max(size.y, 0.001);
+  /* stand it on the floor and centre it, so models of different origins line up */
+  obj.position.sub(new THREE.Vector3(ctr.x, box.min.y, ctr.z));
+  const dist = h * 2.1;
+  camera.position.set(dist*0.55, h*0.62, dist*0.85);
+  controls.target.set(0, h*0.5, 0);
+  controls.update();
+  return { size, h };
+}
+
+async function load(i){
+  const M = MODELS[i];
+  [...document.querySelectorAll('.item')].forEach((b,k)=>b.classList.toggle('on', k===i));
+  loadEl.style.display='flex';
+  loadEl.textContent = 'LOADING '+M.name+'…';
+  disposeCurrent();
+  const t0 = performance.now();
+  let g;
+  try { g = await loader.loadAsync(M.url); }
+  catch(e){ loadEl.textContent = 'FAILED: '+e.message; return; }
+  const ms = Math.round(performance.now()-t0);
+
+  current = g.scene;
+  let tris=0, meshes=0, skinned=0, bones=0, verts=0;
+  current.traverse(o=>{
+    if(o.isSkinnedMesh) skinned++;
+    if(o.isMesh || o.isSkinnedMesh){
+      meshes++;
+      o.castShadow = true; o.receiveShadow = true;
+      o.frustumCulled = false;
+      const gg=o.geometry;
+      if(gg){
+        verts += gg.attributes.position ? gg.attributes.position.count : 0;
+        tris  += gg.index ? gg.index.count/3
+               : (gg.attributes.position ? gg.attributes.position.count/3 : 0);
+      }
+      if(o.skeleton) bones = Math.max(bones, o.skeleton.bones.length);
+    }
+  });
+  scene.add(current);
+  const { h } = frame(current);
+
+  clips = g.animations || [];
+  clipSel.innerHTML='';
+  if(clips.length){
+    mixer = new THREE.AnimationMixer(current);
+    clips.forEach((c,k)=>{
+      const o=document.createElement('option'); o.value=k; o.textContent=c.name||('clip '+k);
+      clipSel.appendChild(o);
+    });
+    playClip(0);
+  } else {
+    const o=document.createElement('option'); o.textContent='— no animations —';
+    clipSel.appendChild(o);
+  }
+
+  if(document.getElementById('bones').checked) buildSkeleton();
+  applyWire();
+
+  /* The first frame is still the bind pose; once a clip has actually been
+     evaluated the skeleton moves, so re-frame and re-report the real height. */
+  if(mixer){
+    setTimeout(()=>{
+      if(!current) return;
+      mixer.update(0.016);
+      const h2 = frame(current).h;
+      hud.textContent = hud.textContent.replace(/height {6}[\d.]+ m/, 'height      '+h2.toFixed(2)+' m');
+    }, 260);
+  }
+
+  hud.textContent =
+    M.name+'\n'+
+    'rigged      '+(skinned?('YES · '+bones+' bones'):'NO')+'\n'+
+    'animations  '+(clips.length?clips.map(c=>c.name).join(', '):'none')+'\n'+
+    'triangles   '+Math.round(tris).toLocaleString()+'\n'+
+    'vertices    '+verts.toLocaleString()+'\n'+
+    'meshes      '+meshes+' ('+skinned+' skinned)\n'+
+    'height      '+h.toFixed(2)+' m\n'+
+    'load        '+ms+' ms';
+  loadEl.style.display='none';
+}
+
+function playClip(k){
+  if(!mixer || !clips[k]) return;
+  if(action) action.fadeOut(0.2);
+  action = mixer.clipAction(clips[k]);
+  action.reset().fadeIn(0.2).play();
+}
+function buildSkeleton(){
+  if(skelHelper){ scene.remove(skelHelper); skelHelper=null; }
+  if(!current) return;
+  let sk=null; current.traverse(o=>{ if(!sk && o.isSkinnedMesh) sk=o; });
+  if(!sk) return;
+  skelHelper = new THREE.SkeletonHelper(sk.skeleton.bones[0] ? sk.skeleton.bones[0].parent || sk : sk);
+  skelHelper.material.linewidth = 2;
+  scene.add(skelHelper);
+}
+function applyWire(){
+  const on = document.getElementById('wire').checked;
+  current && current.traverse(o=>{
+    if(o.isMesh||o.isSkinnedMesh) [].concat(o.material).forEach(m=>{ if(m) m.wireframe=on; });
+  });
+}
+
+/* sidebar */
+const list = document.getElementById('list');
+MODELS.forEach((m,i)=>{
+  const b=document.createElement('button');
+  b.className='item';
+  b.innerHTML='<b>'+m.name+'</b><span>'+m.note+'</span>';
+  b.onclick=()=>load(i);
+  list.appendChild(b);
+});
+clipSel.onchange = e => playClip(+e.target.value);
+document.getElementById('bones').onchange = e => {
+  if(e.target.checked) buildSkeleton();
+  else if(skelHelper){ scene.remove(skelHelper); skelHelper=null; }
+};
+document.getElementById('wire').onchange = applyWire;
+document.getElementById('grid').onchange = e => { grid.visible = e.target.checked; };
+
+/* loop */
+let fps=0, acc=0, frames=0, last=performance.now();
+const speed = document.getElementById('speed');
+const spin  = document.getElementById('spin');
+function tick(){
+  requestAnimationFrame(tick);
+  const now=performance.now(), dt=Math.min((now-last)/1000, 0.1); last=now;
+  acc+=dt; frames++;
+  if(acc>0.5){ fps=Math.round(frames/acc); acc=0; frames=0;
+    const l=hud.textContent.split('\n');
+    l[l.length-1]=l[l.length-1].replace(/\s*·\s*\d+ fps$/,'')+' · '+fps+' fps';
+    hud.textContent=l.join('\n'); }
+  if(mixer) mixer.update(dt*parseFloat(speed.value||1));
+  if(current && spin.checked) current.rotation.y += dt*0.5;
+  if(skelHelper) skelHelper.update && skelHelper.update();
+  controls.update();
+  renderer.render(scene,camera);
+}
+function resize(){
+  const w=cv.clientWidth, h=cv.clientHeight;
+  if(!w||!h) return;
+  renderer.setSize(w,h,false);
+  camera.aspect=w/h; camera.updateProjectionMatrix();
+}
+addEventListener('resize',resize); resize(); tick();
+load(0);
+</script>
+</body>
+</html>
