@@ -621,9 +621,20 @@ function _gltfStart(j){
     _gltfProgress(); _gltfPump();
   };
   arm();
+  /* The watchdog exists to catch a stalled DOWNLOAD, but GLTFLoader's progress
+     events stop the moment the body arrives - everything after that is parse
+     and texture decode, which on a big pack under load can take longer than
+     the timeout. The guard then fired on an asset that had already downloaded
+     fine, "retried" it, and on the second timeout gave up and dropped it for
+     good. Once the body is in, stop arming: at that point there is no network
+     left to stall, and finish() is the only thing that can still fire. */
   new GLTFLoader().load(j.url,
     (g)=>finish(j.onLoad,g),
-    ()=>{ if(!settled) arm(); },
+    (ev)=>{
+      if(settled) return;
+      if(ev && ev.total && ev.loaded >= ev.total){ clearTimeout(j.guard); j.downloaded=true; }
+      else if(!j.downloaded) arm();
+    },
     (e)=>finish(j.onError,e));
 }
 
@@ -1251,12 +1262,33 @@ const ZBOUNDS={minX:-23,maxX:23,minZ:-14,maxZ:30.5};
    Loaded async and patched onto the existing materials, so the game still
    runs (untextured) if the files are missing or we are on file://. */
 const _texL=new THREE.TextureLoader();
+/* Several surfaces want the SAME bitmap at different tiling - road2_c is asked
+   for three times, grass2 twice - and each call used to kick off its own load,
+   so the identical image was decoded and uploaded to the GPU once per caller
+   (~29 MB of duplicate texture memory). Load each URL once and hand out
+   clones: Texture.copy() has shared the underlying Source since r152, so a
+   clone costs one JS object and zero GPU bytes, while repeat/colorSpace stay
+   per-caller. Keyed on the relevel params too, since those mutate the bitmap. */
+const _texCache=new Map();
 function surfaceTex(url,repX,repY,srgb,level){
-  const t=_texL.load(url, (tx)=>{ if(level) relevel(tx,level); }, undefined, ()=>{});
+  const key=url+'|'+(level?JSON.stringify(level):'');
+  let base=_texCache.get(key);
+  if(!base){
+    base=_texL.load(url, (tx)=>{ if(level) relevel(tx,level); }, undefined, ()=>{});
+    base.wrapS=base.wrapT=THREE.RepeatWrapping;
+    base.anisotropy=8;
+    _texCache.set(key,base);
+    const t0=base;
+    t0.repeat.set(repX,repY);
+    if(srgb!==false) t0.colorSpace=THREE.SRGBColorSpace;
+    return t0;                       /* first caller gets the original */
+  }
+  const t=base.clone();
   t.wrapS=t.wrapT=THREE.RepeatWrapping;
   t.repeat.set(repX,repY);
   t.anisotropy=8;
   if(srgb!==false) t.colorSpace=THREE.SRGBColorSpace;
+  t.needsUpdate=true;
   return t;
 }
 /* Some of the scanned PBR albedos are photographed dark - the brick wall
@@ -2497,7 +2529,21 @@ function phPlace(pack, name, x, z, opts){
     }
   }
   if(opts&&opts.brk) makeBreakable(o, opts.brk, opts.brkScale||1);
-  if(opts&&opts.cull) cullRegister(o, x, z, opts.cull);
+  /* Measured at the car park: 704 meshes in frustum but only 138k triangles,
+     across 557 distinct geometry+material pairs. That is draw-call bound by a
+     long tail of small unique props - instancing cannot batch them because no
+     two share a geometry AND a material. What it IS is a lot of tiny objects
+     drawn from a long way off.
+
+     So derive the cull radius from the prop's own size when the caller has not
+     picked one: a 0.3 m bottle stops being drawn at 25 m, a 9 m building keeps
+     its 155. Distance where an object is roughly a pixel or two, rather than
+     one radius for everything. */
+  const cullR = (opts&&opts.cull) || (()=>{
+    const sz=Math.max(wb.max.x-wb.min.x, wb.max.y-wb.min.y, wb.max.z-wb.min.z);
+    return clamp(sz*38, 22, CULL_FAR);
+  })();
+  cullRegister(o, x, z, cullR);
   return o;
 }
 function phLoad(pack, url, then){
@@ -5951,7 +5997,12 @@ function spawnZombie(waveNum,opts={}){
   return z;
 }
 
-function hitZombie(z,dmg,dir,point,isHead){
+/* `credit` is false when the host is applying a shot a CLIENT fired. The host
+   still owns the damage, blood and physics, but the points, stats, crosshair
+   confirm and kill sting belong to whoever pulled the trigger - the host was
+   scoring every client kill as its own AND echoing a 'cred' back, so both
+   machines counted it. */
+function hitZombie(z,dmg,dir,point,isHead,credit=true){
   if(z.state==='dead')return;
   if(NET.mode==='client'){
     /* the host owns hit points - send the event, keep the local feedback so
@@ -5959,33 +6010,37 @@ function hitZombie(z,dmg,dir,point,isHead){
     netSend({t:'hit', i:zombies.indexOf(z), dmg, h:!!isHead,
              d:[+dir.x.toFixed(2),+dir.z.toFixed(2)],
              p:[+point.x.toFixed(2),+point.y.toFixed(2),+point.z.toFixed(2)]});
-    showHitmarker(!!isHead); Audio.flesh(); bloodBurst(point,dir,6);
+    /* showHitmarker(true) is the red KILL confirm. A client fired it on every
+       headshot whether or not the hostile died; the 'cred' echo from the host
+       flashes the real one when the shot was actually lethal. */
+    showHitmarker(false); Audio.flesh(); bloodBurst(point,dir,6);
     return;
   }
   z.hp-=dmg;
   z.stagger=Math.max(z.stagger,isHead?.28:.16);
-  addPoints(isHead?15:10,null);
-  showHitmarker(false);
-  Audio.flesh();
+  if(credit){ addPoints(isHead?15:10,null); showHitmarker(false); }
+  Audio.flesh();                      /* a world sound either way */
   /* voice reaction, only from the ones near enough to hear */
   { const hn=performance.now()/1000, hpz=z.root.position;
     if(Math.random()<.45){
       const f=clamp(1-Math.hypot(hpz.x-player.pos.x,hpz.z-player.pos.z)/HV_CUTOFF,0,1);
       if(f>.03) SFX.enemyHurt.play(rand(.94,1.08), f*f*.85);
     } else HV.reactAt(hpz,hn,.95); }
-  if(z.hp<=0) killZombie(z,dir,point,isHead);
+  if(z.hp<=0) killZombie(z,dir,point,isHead,credit);
 }
 
-function killZombie(z,dir,point,isHead){
+function killZombie(z,dir,point,isHead,credit=true){
   z.state='dead'; z.deadT=0;
-  stats.kills++;
-  if(isHead)stats.headshots++;
-  adren=1;
-  const base=isHead?90:55;
-  addPoints(base, isHead?'HEADSHOT +'+base:'+'+base, isHead);
-  showHitmarker(true);
-  Audio.killGroan(z.root.position);
-  SFX.kill.play(1);
+  if(credit){
+    stats.kills++;
+    if(isHead)stats.headshots++;
+    adren=1;
+    const base=isHead?90:55;
+    addPoints(base, isHead?'HEADSHOT +'+base:'+'+base, isHead);
+    showHitmarker(true);
+    SFX.kill.play(1);                 /* the shooter's own callout */
+  }
+  Audio.killGroan(z.root.position);   /* the body drops for everyone */
   // fall direction opposite to shot
   const side=Math.random()<.5?1:-1;
   z.fallAxis=side;
@@ -6709,11 +6764,16 @@ function onCarParked(){
 
 function enterStore(){
   setPhase('inside');
-  if(mission.act===2){ player.pos.set(ACT_OFF,1.7,10.5); }
+  /* 10.5 is a mosque-LOCAL z. Since the rescale it has to go through mqz, or
+     the host walks in 12.6 m short - inside the qibla wall - while the client
+     (netFollowPhase, which was migrated) stands in the right place. */
+  if(mission.act===2){ player.pos.set(ACT_OFF,1.7,mqz(10.5)); }
   /* recycle anyone left in the lot - they cannot path through the wall, and
      both win gates wait for every zombie to leave the 'chase' state */
   for(const z of zombies){
-    const gz=(mission.act===2)?13.2:15.5;
+    /* likewise local: un-migrated, this recycled essentially every hostile the
+       moment anyone crossed the arch */
+    const gz=(mission.act===2)?mqz(13.2):15.5;
     if(z.state!=='idle'&&z.state!=='dead'&&z.root.position.z>gz){
       z.state='idle'; z.root.visible=false;
       z.__lot=false; z.root.userData.flee=false;
@@ -7210,13 +7270,24 @@ function netAvatarFor(pl){
   scene.add(a);
   pl.obj=a;
   pl.mixer=new THREE.AnimationMixer(a);
-  let clip=skinIdleClip(made.clips);
-  if(!clip&&vmMixer){
-    const names=Object.keys(vmActions);
-    const idle=names.find(n=>/idle/i.test(n))||names.find(n=>/aim/i.test(n))||names[0];
-    clip=vmMixer._actions.map(x=>x._clip).find(c=>c.name===idle);
-  }
-  if(clip){ pl.act=pl.mixer.clipAction(clip); pl.act.play(); }
+  /* Remote players used to be handed ONE idle clip, so a team-mate crossing
+     the car park glided there in a fixed standing pose. Build the whole
+     locomotion set instead and let netRenderTick blend it by measured speed.
+     The operator rig has idle/walk/run; the suit model has idle/run. */
+  const pick=(re)=>{
+    if(made.clips&&made.clips.length){ const c=made.clips.find(x=>re.test(x.name)); if(c)return c; }
+    if(vmMixer){ const c=vmMixer._actions.map(x=>x._clip).find(x=>re.test(x.name)); if(c)return c; }
+    return null;
+  };
+  const cIdle=pick(/^idle$/i)||pick(/idle/i)||pick(/^aim$/i)||(made.clips&&made.clips[0])||null;
+  const cWalk=pick(/^walk$/i)||pick(/walk|jog/i);
+  const cRun =pick(/^run$/i)||pick(/run|sprint/i);
+  const mk=(c,w)=>{ if(!c)return null; const a=pl.mixer.clipAction(c);
+                    a.play(); a.setEffectiveWeight(w); return a; };
+  pl.actIdle=mk(cIdle,1);
+  pl.actWalk=mk(cWalk,0);
+  pl.actRun =mk(cRun,0);
+  pl.act=pl.actIdle;                 /* kept: other code still reads pl.act */
   netTagFor(pl);
   return a;
 }
@@ -7307,6 +7378,7 @@ function netJoin(code){
     c.on('open',()=>{
       opened=true;
       NET.mode='client'; NET.hostConn=c; NET.code=code; NET.ready=true;
+      NET.selfId=NET.peer&&NET.peer.id;      /* latched - see netApplySnap */
       netSendTo(c,{t:'hello',name:NET.name,id:NET.peer.id,skin:SKINS[SKIN_I].id});
       netStatus('Joined room <b>'+code+'</b>. Waiting for the host to start.');
       const btn=document.getElementById('btn-play');
@@ -7385,7 +7457,7 @@ function netOnData(c,raw){
            kill was scored to the host and the shooter's HUD stayed at 0 kills
            and 500 points for the whole match. Echo the outcome back. */
         const wasDead=(z.state==='dead');
-        hitZombie(z, d.dmg, V3(d.d[0],0,d.d[1]), V3(d.p[0],d.p[1],d.p[2]), !!d.h);
+        hitZombie(z, d.dmg, V3(d.d[0],0,d.d[1]), V3(d.p[0],d.p[1],d.p[2]), !!d.h, false);
         const killed=(!wasDead && z.state==='dead');
         try{ c.send(JSON.stringify({t:'cred', h:!!d.h, k:killed, i:d.i|0})); }catch(e){}
       }
@@ -7417,6 +7489,12 @@ function netOnData(c,raw){
       endReset&&endReset();
       startGame(true);
       if(document.pointerLockElement!==document.body) netGrab();
+      break;
+    }
+    case 'surv': {                                /* you found a survivor */
+      if(NET.mode!=='client')break;
+      banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
+      addPoints(150,'SURVIVOR +150');
       break;
     }
     case 'hurt': {                                /* a hostile reached me */
@@ -7479,15 +7557,23 @@ function netBuildSnap(){
   for(const id of Object.keys(NET.players)){
     const pl=NET.players[id];
     ps.push([id, pl.name||'', +(+pl.x).toFixed(2), +(+pl.y).toFixed(2), +(+pl.z).toFixed(2),
-             +(+pl.yaw).toFixed(2), Math.round(pl.hp||0), pl.dead?1:0]);
+             +(+pl.yaw).toFixed(2), Math.round(pl.hp||0), pl.dead?1:0, pl.skin||'operator']);
   }
   /* the host's own body, so clients can see the host too */
+  /* the host's own outfit rides along too - without it every client rendered
+     the host as the default OPERATOR whatever they had picked */
   ps.push(['@host',NET.name,+player.pos.x.toFixed(2),+player.pos.y.toFixed(2),
-           +player.pos.z.toFixed(2),+player.yaw.toFixed(2),Math.round(player.hp),player.alive?0:1]);
+           +player.pos.z.toFixed(2),+player.yaw.toFixed(2),Math.round(player.hp),player.alive?0:1,
+           SKINS[SKIN_I].id]);
   const car=townCar?[+townCar.position.x.toFixed(2), +townCar.position.z.toFixed(2),
                      +townCar.rotation.y.toFixed(3), +carSpeed.toFixed(2), carParked?1:0,
                      +carSteerVal.toFixed(3)]:null;
-  return {t:'snap', z:zs, p:ps, c:car,
+  /* Survivors were in no channel of the snapshot, so a client saw all four
+     crouched in their starting spots - badged, with a live distance readout -
+     for the whole match, even as the host walked them out of the door. */
+  const sv=survivors.map(s=>[+s.root.position.x.toFixed(2), +s.root.position.z.toFixed(2),
+                             +s.root.rotation.y.toFixed(2), s.state==='following'?1:0]);
+  return {t:'snap', z:zs, p:ps, c:car, s:sv,
           m:[mission.insideLeft|0, threatCount()|0, phase, mission.round|0, mission.act|0]};
 }
 function netApplySnap(d){
@@ -7515,7 +7601,10 @@ function netApplySnap(d){
   const live=new Set();
   for(const e of d.p){
     const id=e[0];
-    if(id===NET.peer?.id)continue;
+    /* NET.peer.id can change if the peer is recreated, and then a client
+       started rendering its own body and name tag as a team-mate. Latch the
+       id we actually joined with. */
+    if(id===NET.selfId || id===NET.peer?.id)continue;
     live.add(id);
     const pl=NET.players[id]=NET.players[id]||{};
     if(pl.name!==e[1]){ pl.name=e[1]; pl.tagDirty=true; }
@@ -7523,6 +7612,16 @@ function netApplySnap(d){
     pl.p1={x:e[2],y:e[3],z:e[4],yaw:e[5]};
     pl.t0=(pl.t1===undefined?tNow:pl.t1); pl.t1=tNow;
     pl.x=e[2]; pl.y=e[3]; pl.z=e[4]; pl.yaw=e[5]; pl.hp=e[6]; pl.dead=!!e[7];
+    /* an outfit change swaps the whole rig for a model skin, so rebuild rather
+       than repaint when it differs from what this avatar was built with */
+    const sk=e[8]||'operator';
+    if(pl.skin!==sk){
+      pl.skin=sk;
+      if(pl.obj && pl.obj.userData.skin!==sk){
+        pl.obj.removeFromParent(); pl.obj=null; pl.mixer=null; pl.act=null;
+        pl.actIdle=pl.actWalk=pl.actRun=null;
+      }
+    }
     netAvatarFor(pl);
   }
   for(const id of Object.keys(NET.players)) if(!live.has(id)) netDropPlayer(id);
@@ -7536,6 +7635,14 @@ function netApplySnap(d){
     carSteerVal=d.c[5]||0;        /* or the passenger's front wheels never turn */
     carParked=NET.carT.parked;
     if(!NET.carSeen){ NET.carSeen=true; townCar.position.set(d.c[0],0,d.c[1]); townCar.rotation.y=d.c[2]; }
+  }
+  if(d.s){
+    for(let i=0;i<d.s.length&&i<survivors.length;i++){
+      const e=d.s[i], s=survivors[i];
+      s.root.position.x=e[0]; s.root.position.z=e[1];
+      s.root.rotation.y=e[2];
+      s.state=e[3]?'following':'hiding';
+    }
   }
   if(d.m){
     mission.insideLeft=d.m[0];
@@ -7562,6 +7669,11 @@ function netApplySnap(d){
    party leaves the car and enters the store together. */
 function netFollowPhase(p){
   if(NET.mode!=='client')return;
+  /* A dead client must stay dead. Following the host's phase here revived it
+     mid-death - player.alive=true, body teleported - while the DEATH card
+     stayed up over a live game with no pointer lock. RE-DEPLOY (which already
+     round-trips through the 'round' message) is the only way back in. */
+  if(!player.alive || phase==='dead') return;
   if(p==='drive'||p==='parking'){ setPhase(p); return; }
   if(p==='outside'&&phase!=='outside'){
     setPhase('outside');
@@ -7573,6 +7685,11 @@ function netFollowPhase(p){
     /* act 2 steps out into the courtyard side of the road, not the lot */
     if(mission.act===2) player.pos.z=Math.min(player.pos.z,34.5);
     player.yaw=0; player.pitch=0; player.alive=true;
+    /* Alive on the negative hp that killed you is not alive - the next bite
+       re-ran die() and the death screen looped. The early return at the top of
+       this function should prevent reaching here while dead, but restore hp
+       explicitly rather than depending on that. */
+    if(player.hp<=0) player.hp=player.maxHp;
     gun.visible=true; vmGroup.visible=true; carCamYaw=null;
     return;
   }
@@ -7581,7 +7698,16 @@ function netFollowPhase(p){
     player.pos.set(ACT_OFF, 1.7, mission.act===2?mqz(10.5):13.5);
     return;
   }
-  if(p==='win'&&phase!=='win'){ setPhase('win'); playing=false; document.exitPointerLock(); showWin(window.__runStats||{}); }
+  if(p==='win'&&phase!=='win'){
+    setPhase('win'); playing=false; document.exitPointerLock();
+    /* __runStats is built by the HOST's missionComplete, so on a client it was
+       undefined and the card rendered as a row of em-dashes with a red C. Build
+       it locally from what this machine actually tracked. */
+    showWin({kills:stats.kills, headshots:stats.headshots,
+             shotsFired:stats.shotsFired, shotsHit:stats.shotsHit,
+             survivors:survivors.filter(s=>s.state==='following').length,
+             points:points, time:runTime});
+  }
 }
 
 /* place remote bodies and drive the hostiles a client does not simulate */
@@ -7601,7 +7727,11 @@ function netRenderTick(dt){
   const now=performance.now()/1000;
   for(const id of Object.keys(NET.players)){
     const pl=NET.players[id]; const o=pl.obj; if(!o)continue;
-    o.visible=!pl.dead;
+    /* Two places a remote body should not be drawn: standing in the middle of
+       the TOPS doorway behind the lobby pads before anyone has pressed PLAY,
+       and standing in the road while everyone is actually riding in the car. */
+    const riding=(phase==='drive'||phase==='parking');
+    o.visible = !pl.dead && playing && !riding;
     if(pl.tagDirty) netTagFor(pl);
     if(pl.p0&&pl.p1){
       const a=netAlpha(pl.t0,pl.t1,now);
@@ -7610,9 +7740,47 @@ function netRenderTick(dt){
       const z=pl.p0.z+(pl.p1.z-pl.p0.z)*a;
       _netV.set(x,y-1.7,z);
       /* a big jump means a teleport (phase change, respawn) - do not glide */
-      o.position.distanceToSquared(_netV)>36 ? o.position.copy(_netV)
-                                             : o.position.lerp(_netV,clamp(dt*22,0,1));
+      if(o.position.distanceToSquared(_netV)>36){
+        o.position.copy(_netV);
+        /* clear the locomotion history too, or the jump reads as a sprint for
+           about a second after every phase change */
+        pl.lx=x; pl.lz=z; pl.spd=0;
+      }else{
+        o.position.lerp(_netV,clamp(dt*22,0,1));
+      }
       o.rotation.y=netLerpAngle(o.rotation.y, netLerpAngle(pl.p0.yaw,pl.p1.yaw,a)+Math.PI, clamp(dt*16,0,1));
+      /* Locomotion from the interpolated path rather than any extra network
+         field, so it costs nothing on the wire and works for the host's view
+         of clients and clients' view of the host alike. Smoothed, or the
+         18 Hz sample rate makes the blend chatter. */
+      if(pl.actWalk||pl.actRun){
+        /* Speed comes from the two SNAPSHOT samples, not from the interpolated
+           render position. The render position is re-derived every frame from
+           an alpha that overshoots slightly, so at low frame rates it jitters
+           and a stationary team-mate read ~2 m/s and walked on the spot. The
+           snapshots are the authoritative samples and are frame-rate
+           independent. */
+        let inst=0;
+        const dtn=pl.t1-pl.t0;
+        if(dtn>1e-3){
+          const step=Math.hypot(pl.p1.x-pl.p0.x, pl.p1.z-pl.p0.z);
+          /* a phase change, respawn or the 900 m hop into act 2 covers metres
+             between two samples - a teleport, not a sprint */
+          inst = (step>3) ? 0 : step/dtn;
+        }
+        inst=Math.min(inst,9);        /* nobody covers ground faster on foot */
+        pl.spd=(pl.spd===undefined)?inst:pl.spd+(inst-pl.spd)*clamp(dt*7,0,1);
+        const sp=pl.spd;
+        /* a teleport already skipped the glide above; do not let it read as a sprint */
+        const run =clamp((sp-2.6)/2.4,0,1);
+        const walk=clamp((sp-0.35)/1.6,0,1)*(1-run);
+        if(pl.actRun)  pl.actRun.setEffectiveWeight(run);
+        if(pl.actWalk) pl.actWalk.setEffectiveWeight(walk);
+        if(pl.actIdle) pl.actIdle.setEffectiveWeight(clamp(1-run-walk,0,1));
+        if(pl.actRun)  pl.actRun.timeScale =clamp(sp/4.2,.7,1.6);
+        if(pl.actWalk) pl.actWalk.timeScale=clamp(sp/1.6,.7,1.5);
+      }
+      pl.lx=x; pl.lz=z;
     }
     if(pl.mixer)pl.mixer.update(dt);
   }
@@ -8204,12 +8372,32 @@ function survivorsUpdate(dt,now){
       const d=Math.hypot(z.root.position.x-rp.x,z.root.position.z-rp.z);
       if(d<nzd){nzd=d;nzx=z.root.position.x;nzz=z.root.position.z;}
     }
-    /* rescue */
-    if(s.state==='hiding'&&Math.hypot(player.pos.x-rp.x,player.pos.z-rp.z)<1.4){
-      s.state='following';
-      banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
-      addPoints(150,'SURVIVOR +150');
-      Audio.survivorThanks(rp);
+    /* Rescue. survivorsUpdate is host-only, and this used to test the HOST's
+       position alone - so in co-op a client could stand on top of a survivor
+       all match and nothing happened. The level's primary objective was a
+       single-player mechanic. Test every live party member. */
+    if(s.state==='hiding'){
+      let by=null;
+      if(Math.hypot(player.pos.x-rp.x,player.pos.z-rp.z)<1.4) by='@me';
+      else if(NET.mode==='host'){
+        for(const id of Object.keys(NET.players)){
+          const pl=NET.players[id];
+          if(!pl||pl.dead||pl.x===undefined)continue;
+          if(Math.hypot((+pl.x)-rp.x,(+pl.z)-rp.z)<1.4){ by=id; break; }
+        }
+      }
+      if(by){
+        s.state='following';
+        if(by==='@me'){
+          banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
+          addPoints(150,'SURVIVOR +150');
+        }else{
+          /* credit the player who actually found them */
+          const c=NET.conns.find(x=>x.peer===by);
+          if(c) netSendTo(c,{t:'surv'});
+        }
+        Audio.survivorThanks(rp);
+      }
     }
     /* fear */
     const tgt=s.state==='following'?.45:(nzd<6?1:.25);
@@ -8279,9 +8467,19 @@ function survivorsUpdate(dt,now){
      mission.extractAnnounced&&
      survivors.every(s=>s.state==='following')&&
      zombies.every(z=>z.state!=='chase')&&
+     /* any live party member standing in the doorway ends it, not just the
+        host - otherwise a client can walk the survivors to the door and
+        nothing happens until the host comes back for them */
      (()=>{const E=exitZone();
-        return player.pos.x>E.minX&&player.pos.x<E.maxX&&
-               player.pos.z>E.minZ&&player.pos.z<E.maxZ;})()){
+        const inZone=(px,pz)=>px>E.minX&&px<E.maxX&&pz>E.minZ&&pz<E.maxZ;
+        if(player.alive&&inZone(player.pos.x,player.pos.z))return true;
+        if(NET.mode==='host'){
+          for(const id of Object.keys(NET.players)){
+            const pl=NET.players[id];
+            if(pl&&!pl.dead&&pl.x!==undefined&&inZone(+pl.x,+pl.z))return true;
+          }
+        }
+        return false;})()){
     surv_completeFired=true;
     if(typeof missionComplete==='function')missionComplete();
   }
@@ -9659,7 +9857,14 @@ loop();
 /* auto-start first wave when game starts handled by intermission in resetRun */
 
 /* smoke-test hooks */
-document.getElementById('btn-win-retry')&&(document.getElementById('btn-win-retry').onclick=()=>{
+document.getElementById('btn-win-retry')&&(document.getElementById('btn-win-retry').onclick=(e)=>{
+  /* Only the host starts the next round. A client pressing this restarted
+     itself locally and was bounced straight back to the win card by the next
+     snapshot, with nothing to say it was waiting on anyone. */
+  if(NET.mode==='client'){
+    const b=e&&e.currentTarget; if(b) b.textContent='WAITING FOR HOST';
+    return;
+  }
   mission.round=(mission.round|0)+1;      /* clearing a round escalates it */
   endReset&&endReset();
   if(NET.mode==='host'&&NET.conns.length) netSend({t:'round',n:mission.round});
