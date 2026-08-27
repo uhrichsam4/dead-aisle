@@ -7878,6 +7878,9 @@ const SKINS=[
 ];
 /* loaded prototypes for model skins, keyed by id */
 const SKIN_MODELS={};
+/* the game's own characters stand about this tall; supplied rigs are fitted to
+   it so a skin swap never changes how big you look to everyone else */
+const SKIN_TARGET_H=1.82;
 SKINS.filter(s=>s.glb).forEach(sk=>{
   gltfLoad(sk.glb,(g)=>{
     const proto=g.scene;
@@ -8004,7 +8007,53 @@ function skinMake(idx){
     const a=skeletonClone(M.proto);
     a.traverse(o=>{ o.visible=true; o.layers.set(0);
       if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+    /* A supplied rig arrives at whatever size and origin its author used - the
+       Mixamo one is 2.30 m with its feet a metre below the origin, which in
+       game is a giant sunk into the floor. Measure the SKELETON (glTF stores a
+       skinned mesh's vertices in bind space, so mesh bounds are useless here)
+       and fit it to the same height as the game's own characters, standing on
+       y=0. Cached on the prototype so it is computed once, not per avatar. */
+    if(M.fit===undefined){
+      M.fit=1; M.drop=0;
+      let sk0=null; M.proto.traverse(o=>{ if(!sk0&&o.isSkinnedMesh&&o.skeleton) sk0=o; });
+      if(sk0&&sk0.skeleton.bones.length){
+        M.proto.updateMatrixWorld(true);
+        /* updateMatrixWorld on the root is not enough here: the skeleton's
+           bones hang off a node the loader has not resolved yet, so every one
+           of the 22 reported ~hip height and the span came out 0.18 m. Force
+           each bone to walk its own parent chain. */
+        /* Do not assume Y is up. glTF says it should be, but an exporter can
+           hand back a Z-up rig - this one spans 0.18 m in Y and 2.01 m in Z,
+           i.e. lying on its back. Measure all three and treat the longest as
+           height. */
+        const v=new THREE.Vector3();
+        const lo=[Infinity,Infinity,Infinity], hi=[-Infinity,-Infinity,-Infinity];
+        for(const b of sk0.skeleton.bones){
+          b.updateWorldMatrix(true,false);
+          b.getWorldPosition(v);
+          const c=[v.x,v.y,v.z];
+          for(let k=0;k<3;k++){ lo[k]=Math.min(lo[k],c[k]); hi[k]=Math.max(hi[k],c[k]); }
+        }
+        const span=[hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]];
+        const up=span.indexOf(Math.max(...span));
+        M.upAxis=up;                       /* 1 = already Y-up */
+        /* bones stop at the neck joint, not the crown - the same 1.07 head
+           allowance attachHostileModel uses */
+        const natural=span[up]*1.07;
+        if(natural>0.2){ M.fit=SKIN_TARGET_H/natural; M.drop=lo[up]*M.fit; }
+        M.dbg={bones:sk0.skeleton.bones.length, up:['x','y','z'][up],
+               span:span.map(n=>+n.toFixed(2)), natural:+natural.toFixed(3)};
+      }
+      console.info('skin model fit:', sk.id, 'scale', M.fit.toFixed(3), 'drop', M.drop.toFixed(2),
+                   JSON.stringify(M.dbg||{note:'no skinned mesh found'}));
+    }
+    /* stand a Z-up rig on its feet before fitting it */
+    if(M.upAxis===2) a.rotation.x=-Math.PI/2;
+    else if(M.upAxis===0) a.rotation.z=Math.PI/2;
+    a.scale.setScalar(M.fit);
+    a.position.y=-M.drop;
     a.userData.skin=sk.id;
+    a.userData.skinFitted=true;
     return {obj:a, clips:M.clips};
   }
   if(!vmModel) return null;
