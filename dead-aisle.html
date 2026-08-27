@@ -1251,12 +1251,33 @@ const ZBOUNDS={minX:-23,maxX:23,minZ:-14,maxZ:30.5};
    Loaded async and patched onto the existing materials, so the game still
    runs (untextured) if the files are missing or we are on file://. */
 const _texL=new THREE.TextureLoader();
+/* Several surfaces want the SAME bitmap at different tiling - road2_c is asked
+   for three times, grass2 twice - and each call used to kick off its own load,
+   so the identical image was decoded and uploaded to the GPU once per caller
+   (~29 MB of duplicate texture memory). Load each URL once and hand out
+   clones: Texture.copy() has shared the underlying Source since r152, so a
+   clone costs one JS object and zero GPU bytes, while repeat/colorSpace stay
+   per-caller. Keyed on the relevel params too, since those mutate the bitmap. */
+const _texCache=new Map();
 function surfaceTex(url,repX,repY,srgb,level){
-  const t=_texL.load(url, (tx)=>{ if(level) relevel(tx,level); }, undefined, ()=>{});
+  const key=url+'|'+(level?JSON.stringify(level):'');
+  let base=_texCache.get(key);
+  if(!base){
+    base=_texL.load(url, (tx)=>{ if(level) relevel(tx,level); }, undefined, ()=>{});
+    base.wrapS=base.wrapT=THREE.RepeatWrapping;
+    base.anisotropy=8;
+    _texCache.set(key,base);
+    const t0=base;
+    t0.repeat.set(repX,repY);
+    if(srgb!==false) t0.colorSpace=THREE.SRGBColorSpace;
+    return t0;                       /* first caller gets the original */
+  }
+  const t=base.clone();
   t.wrapS=t.wrapT=THREE.RepeatWrapping;
   t.repeat.set(repX,repY);
   t.anisotropy=8;
   if(srgb!==false) t.colorSpace=THREE.SRGBColorSpace;
+  t.needsUpdate=true;
   return t;
 }
 /* Some of the scanned PBR albedos are photographed dark - the brick wall
@@ -6709,11 +6730,16 @@ function onCarParked(){
 
 function enterStore(){
   setPhase('inside');
-  if(mission.act===2){ player.pos.set(ACT_OFF,1.7,10.5); }
+  /* 10.5 is a mosque-LOCAL z. Since the rescale it has to go through mqz, or
+     the host walks in 12.6 m short - inside the qibla wall - while the client
+     (netFollowPhase, which was migrated) stands in the right place. */
+  if(mission.act===2){ player.pos.set(ACT_OFF,1.7,mqz(10.5)); }
   /* recycle anyone left in the lot - they cannot path through the wall, and
      both win gates wait for every zombie to leave the 'chase' state */
   for(const z of zombies){
-    const gz=(mission.act===2)?13.2:15.5;
+    /* likewise local: un-migrated, this recycled essentially every hostile the
+       moment anyone crossed the arch */
+    const gz=(mission.act===2)?mqz(13.2):15.5;
     if(z.state!=='idle'&&z.state!=='dead'&&z.root.position.z>gz){
       z.state='idle'; z.root.visible=false;
       z.__lot=false; z.root.userData.flee=false;
@@ -7573,6 +7599,11 @@ function netApplySnap(d){
    party leaves the car and enters the store together. */
 function netFollowPhase(p){
   if(NET.mode!=='client')return;
+  /* A dead client must stay dead. Following the host's phase here revived it
+     mid-death - player.alive=true, body teleported - while the DEATH card
+     stayed up over a live game with no pointer lock. RE-DEPLOY (which already
+     round-trips through the 'round' message) is the only way back in. */
+  if(!player.alive || phase==='dead') return;
   if(p==='drive'||p==='parking'){ setPhase(p); return; }
   if(p==='outside'&&phase!=='outside'){
     setPhase('outside');
@@ -7621,8 +7652,14 @@ function netRenderTick(dt){
       const z=pl.p0.z+(pl.p1.z-pl.p0.z)*a;
       _netV.set(x,y-1.7,z);
       /* a big jump means a teleport (phase change, respawn) - do not glide */
-      o.position.distanceToSquared(_netV)>36 ? o.position.copy(_netV)
-                                             : o.position.lerp(_netV,clamp(dt*22,0,1));
+      if(o.position.distanceToSquared(_netV)>36){
+        o.position.copy(_netV);
+        /* clear the locomotion history too, or the jump reads as a sprint for
+           about a second after every phase change */
+        pl.lx=x; pl.lz=z; pl.spd=0;
+      }else{
+        o.position.lerp(_netV,clamp(dt*22,0,1));
+      }
       o.rotation.y=netLerpAngle(o.rotation.y, netLerpAngle(pl.p0.yaw,pl.p1.yaw,a)+Math.PI, clamp(dt*16,0,1));
       /* Locomotion from the interpolated path rather than any extra network
          field, so it costs nothing on the wire and works for the host's view
