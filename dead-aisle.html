@@ -1295,6 +1295,26 @@ function cullUpdate(dt){
   }
 }
 
+/* Characters are ~100 small rigid parts each (head_shell, helmet, boots,
+   thighs...), and every avatar path turned frustum culling OFF on all of them.
+   Measured: 1,462 meshes submitted every frame regardless of where the camera
+   was looking. The hostiles were fixed this way already; this is the same
+   treatment for the rest. Disabling culling is only actually necessary for
+   SKINNED meshes, whose bounds are computed in bind space - and even those are
+   fine once the bounding sphere is inflated past anything the animation can
+   reach. */
+function cullFriendly(root, radius){
+  root.traverse(o=>{
+    if(!o.isMesh && !o.isSkinnedMesh) return;
+    o.frustumCulled=true;
+    if(o.geometry){
+      if(!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      if(o.geometry.boundingSphere)
+        o.geometry.boundingSphere.radius=Math.max(o.geometry.boundingSphere.radius, radius||1.6);
+    }
+  });
+}
+
 /* ---- point lights are per-fragment on every lit material in range; keep
    only the handful near the player switched on ---- */
 const MANAGED_LIGHTS=[];
@@ -8412,7 +8432,8 @@ SKINS.filter(s=>s.glb).forEach(sk=>{
   gltfLoad(sk.glb,(g)=>{
     const proto=g.scene;
     proto.traverse(o=>{ if(o.isMesh||o.isSkinnedMesh){
-      o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+      o.castShadow=true; o.receiveShadow=true; } });
+    cullFriendly(proto, 2.0);
     SKIN_MODELS[sk.id]={proto, clips:g.animations||[]};
     console.info('skin model ready:', sk.id, (g.animations||[]).map(c=>c.name).join(','));
   }, undefined, ()=>console.info(sk.glb+' not reachable - skin unavailable'));
@@ -8542,7 +8563,8 @@ function skinMake(idx){
     if(!M||!M.proto) return null;
     const a=skeletonClone(M.proto);
     a.traverse(o=>{ o.visible=true; o.layers.set(0);
-      if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+      if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; } });
+    cullFriendly(a, 2.0);
     /* A supplied rig arrives at whatever size and origin its author used - the
        Mixamo one is 2.30 m with its feet a metre below the origin, which in
        game is a giant sunk into the floor. Measure the SKELETON (glTF stores a
@@ -8922,7 +8944,8 @@ function lobbyAvatar(){
   const a=skeletonClone(vmModel);
   /* the viewmodel hides the head so it never blocks the camera - the lobby
      doll is seen from outside, so put it back */
-  a.traverse(o=>{ o.visible=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+  a.traverse(o=>{ o.visible=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  cullFriendly(a, 1.8);
   a.layers.set(0); a.traverse(o=>o.layers.set(0));
   a.rotation.y=0; a.scale.setScalar(1);
   return a;
