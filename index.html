@@ -4785,8 +4785,16 @@ function muzzleDecay(dt){
 }
 const keys={};
 addEventListener('keydown',e=>{ keys[e.code]=true;
-  /* a cutscene you cannot skip is one you resent the second time */
-  if(typeof CUT!=='undefined' && CUT.on){ window.__cutSkip&&__cutSkip(); return; }
+  /* A cutscene you cannot skip is one you resent the second time - but you
+     arrive at the store with W HELD DOWN, and a held key fires auto-repeat
+     keydown events. So the scene was being skipped by the very key that drove
+     you there, on the frame it started, every single time. Ignore auto-repeat,
+     and ignore anything still held from the drive: only a key pressed FRESH
+     after the scene began counts. */
+  if(typeof CUT!=='undefined' && CUT.on){
+    if(!e.repeat && !CUT.held[e.code]) { window.__cutSkip&&__cutSkip(); }
+    return;
+  }
   /* These are on-foot actions. Without the gate they fired on the menu, the
      pause overlay, the death screen and mid-drive - F in particular grabbed a
      throwable off the death screen and carried it into the next run, which
@@ -4820,7 +4828,12 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
     if(n){ const k=+n[1]-1; if(k<RADIO_STATIONS.length){ Radio.select(k); banner('RADIO',Radio.name()); } }
   }
 });
-addEventListener('keyup',e=>keys[e.code]=false);
+addEventListener('keyup',e=>{
+  keys[e.code]=false;
+  /* once you LET GO of the key that drove you here, pressing it again is a
+     real request to skip - so stop treating it as left over from the drive */
+  if(typeof CUT!=='undefined' && CUT.held) delete CUT.held[e.code];
+});
 
 let locked=false, playing=false, paused=false;
 const menuEl=document.getElementById('menu'), deadEl=document.getElementById('dead'), pauseEl=document.getElementById('pause');
@@ -7338,7 +7351,7 @@ function setPhase(p){
 
    Skippable on any key - a cutscene you cannot skip is a cutscene you resent
    the second time. */
-const CUT={on:false, t:0, stage:0, lid:null, lidA:0, mix:0, skip:false, done:null};
+const CUT={on:false, t:0, stage:0, lid:null, lidA:0, mix:0, skip:false, done:null, held:{}};
 
 /* the bodycam look, dialled out to bare eyes and back */
 const CUT_EYES={k1:.012, k2:0, aberration:.05, vignette:.10, grain:.03, bloom:.32};
@@ -7388,6 +7401,10 @@ const CUT_TOTAL=CUT_STAGES.reduce((a,s)=>a+s.dur,0);
 
 function cutStart(done){
   CUT.on=true; CUT.t=0; CUT.stage=0; CUT.skip=false; CUT.done=done; CUT.lidA=0;
+  /* snapshot what is already down (W, almost always) so its auto-repeat does
+     not count as "the player asked to skip" */
+  CUT.held={};
+  for(const k in keys) if(keys[k]) CUT.held[k]=true;
   cutFindLid();
   cutApplyMix(0);
   try{ goproSet(false); }catch(e){}
