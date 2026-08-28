@@ -445,6 +445,17 @@
 #emote-wheel .ew-slot b{position:absolute;bottom:9px;right:11px;font-size:10px;color:#f6d434;opacity:.75}
 #emote-wheel .ew-slot:hover{transform:translate(-50%,-50%) scale(1.1);
   border-color:#f6d434;background:rgba(40,36,16,.95)}
+
+/* car radio dial */
+#radio-dial{position:fixed;left:18px;bottom:96px;z-index:11;display:none;
+  flex-direction:column;gap:3px;padding:9px 12px;border-radius:8px;
+  background:rgba(10,12,15,.62);border:1px solid rgba(246,212,52,.22);
+  font:700 11px/1.35 "Helvetica Neue",Arial,sans-serif;letter-spacing:.07em;
+  color:#9aa3ad;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,.9)}
+#radio-dial.on{display:flex}
+#radio-dial b{color:#f6d434;font-size:10px;letter-spacing:.16em;margin-bottom:2px}
+#radio-dial .rs.on{color:#e8e6e0}
+#radio-dial i{font-style:normal;color:#6d757d;font-size:10px;margin-top:3px}
 </style>
 </head>
 <body>
@@ -741,11 +752,10 @@ function settingsApply(){
      every channel instead of leaving it on one. */
   const volM=SETTINGS.master/100, volS=(SETTINGS.sfx/100)*volM, volMus=(SETTINGS.music/100)*volM;
   try{ Audio.setVolume&&Audio.setVolume(volM); }catch(e){}
-  /* Math.min against the LIVE volume latched: turning the slider down pinned
-     the track low and turning it back up could never restore it. Scale the
-     fade's own target instead, which is what radioAudio already does. */
-  try{ parkSong.volume=(parkSongTarget||0)*(SETTINGS.music/100); }catch(e){}
-  try{ radioAudio.volume=volMus; }catch(e){}
+  /* The radio owns music volume now: one gain node, rescaled from the live
+     settings. This also retires two bugs the old park fade had - it applied
+     SETTINGS.music twice (squaring it) and ignored master entirely. */
+  try{ Radio.applyVolume(); }catch(e){}
   try{ SFX.setVolumeScale&&SFX.setVolumeScale(volS); }catch(e){}
   try{ HV.setVolumeScale&&HV.setVolumeScale(volS); }catch(e){}
   try{ Steps.setVolumeScale&&Steps.setVolumeScale(volS); }catch(e){}
@@ -1339,7 +1349,7 @@ const TEX={
   lotR : surfaceTex('assets/tex/road2_r.jpg', 14, 5, false),
   dirt : surfaceTex('assets/tex/ground2_c.jpg', 30, 10),
   dirtN: surfaceTex('assets/tex/ground2_n.jpg', 30, 10, false),
-  grass: surfaceTex('assets/tex/grass2_c.jpg', 96, 16),  /* plane is 270 x 46 */
+  grass: surfaceTex('assets/tex/grass2_c.jpg', 96, 16),  /* plane is 1240 x 45.3 */
   grassN:surfaceTex('assets/tex/grass2_n.jpg', 96, 16, false),
   /* a supermarket has a tiled floor, not floorboards */
   floor: surfaceTex('assets/tex/tiles2_c.jpg', 20, 14),  /* hall is 44 x 30   */
@@ -1553,13 +1563,18 @@ const shelfRows=[makeShelfRow(-8.2), makeShelfRow(-2.9), makeShelfRow(2.9), make
 for(const r of shelfRows) cullRegister(r, 0, r.position.z, 70);
 /* shelf tiers of the props.glb gondola (2.92 x 2.17 x 0.89) and how far its
    shelf face stands off the row spine. The stock is placed against these. */
-const SHELF_TIERS=[.38,.95,1.52];
+/* Deck TOPS measured off assets/props.glb shelf_step (0.083 / 0.646 /
+   1.209, pitch 0.563). The old [.38,.95,1.52] were the mid-points BETWEEN
+   planks, so every product floated in the gap instead of standing on a
+   shelf. Stock adds pd.h*.31 on top of these. */
+const SHELF_TIERS=[.09,.65,1.21];
 /* the gondola's front face is 0.75 from the row spine and the shelf plate
    is ~0.45 deep, so stock has to sit back from that or it pokes through */
 const SHELF_FACE_Z=.46;
 /* the wall run: 2.62 x 2.10 x 0.44 industrial units, open face on local +Z */
 const WALL_UNITS=[];
-const WALL_TIERS=[.30,.78,1.26,1.74];
+/* likewise for the wall units - measured, not guessed */
+const WALL_TIERS=[.10,.52,.94,1.36];
 let WALL_FACE_Z=.10;
 window.__wallFace=v=>{ WALL_FACE_Z=v; };
 let SHELF_ITEMS=null;
@@ -1895,13 +1910,19 @@ function floorSpot(minX,maxX,minZ,maxZ,pad){
 }
 for(let i=0;i<46;i++){
   const sp=floorSpot(-20,20,-13,14,.15); if(!sp)continue;
-  const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.15,.5),rand(.02,.08),rand(.15,.4)), debrisMats[rint(0,1)]);
-  d.position.set(sp[0],.03,sp[1]); d.rotation.y=rand(0,6.3); scene.add(d);
+  /* y was a constant .03 against a thickness of .02-.08, so the thicker
+     slabs sank through the floor plane and the thin ones hovered */
+  const dt=rand(.02,.08);
+  const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.15,.5),dt,rand(.15,.4)), debrisMats[rint(0,1)]);
+  d.position.set(sp[0],dt*.5,sp[1]); d.rotation.y=rand(0,6.3); scene.add(d);
 }
 for(let i=0;i<8;i++){
   const sp=floorSpot(-19,19,-13,13,.5); if(!sp)continue;
-  const bx=new THREE.Mesh(new THREE.BoxGeometry(rand(.5,.9),rand(.4,.7),rand(.5,.8)), debrisMats[1]);
-  bx.position.set(sp[0],.3,sp[1]); bx.rotation.y=rand(0,6.3); scene.add(bx);
+  /* same again: .3 was half of an older fixed height, so the short crates
+     hovered ~10 cm and the tall ones buried ~5 cm */
+  const bh=rand(.4,.7);
+  const bx=new THREE.Mesh(new THREE.BoxGeometry(rand(.5,.9),bh,rand(.5,.8)), debrisMats[1]);
+  bx.position.set(sp[0],bh*.5,sp[1]); bx.rotation.y=rand(0,6.3); scene.add(bx);
   worldHits.push(bx); makeBreakable(bx,'crate');
 }
 /* shopping carts tipped */
@@ -2059,8 +2080,8 @@ function buildTown(){
   /* The map used to stop at x=+/-135. Act 2 is a mosque ~900 m west, so the
      ground and road now run from x=-1030 to +170 - about a 90 second drive
      at the car's top speed. */
-  const ground=new THREE.Mesh(new THREE.PlaneGeometry(1240,46),townMats.ground);
-  ground.rotation.x=-Math.PI/2; ground.position.set(WORLD_CX,0,37.5); ground.receiveShadow=true; scene.add(ground);
+  const ground=new THREE.Mesh(new THREE.PlaneGeometry(1240,45.3),townMats.ground);
+  ground.rotation.x=-Math.PI/2; ground.position.set(WORLD_CX,0,37.85); ground.receiveShadow=true; scene.add(ground);
 
   const lot=new THREE.Mesh(new THREE.PlaneGeometry(48,15),townMats.lot);
   lot.rotation.x=-Math.PI/2; lot.position.set(0,.01,22.5);
@@ -4051,55 +4072,191 @@ function carCamera(dt){
   camera.updateProjectionMatrix();
 }
 
-/* ===================== PARK TRACK =====================
-   Already trimmed so it begins 15 s into the song. Fades in on a smoothstep
-   so there is no hard cut at either end. */
-const parkSong=new window.Audio('assets/park-song.mp3');
-parkSong.loop=true; parkSong.preload='auto'; parkSong.volume=0;
-/* the level the fade is aiming at, so settingsApply can rescale rather than
-   clamp against whatever the volume happens to be mid-fade */
-let parkSongTarget=0;
-let parkFade=null;
-/* N toggles just the park track, independently of the global M mute */
-let parkMuted=false, allMuted=false;
-function parkSongToggle(){
-  parkMuted=!parkMuted;
-  try{ parkSong.muted=parkMuted||allMuted; }catch(e){}
-  banner(parkMuted?'MUSIC OFF':'MUSIC ON','');
-  return parkMuted;
-}
-function parkSongStart(target, secs=3.4){
-  if(target===undefined) target=(SETTINGS.music/100)*.9;
-  try{ parkSong.muted=parkMuted||allMuted; }catch(e){}
-  try{ parkSong.volume=0; const pr=parkSong.play(); if(pr&&pr.catch)pr.catch(()=>{}); }
-  catch(e){ return; }
-  clearInterval(parkFade);
-  const t0=performance.now();
-  parkFade=setInterval(()=>{
-    const k=Math.min(1,(performance.now()-t0)/(secs*1000));
-    parkSongTarget=target;
-    parkSong.volume=target*(k*k*(3-2*k))*(SETTINGS.music/100);
-    if(k>=1)clearInterval(parkFade);
-  },40);
-}
-function parkSongStop(secs=1.6){
-  clearInterval(parkFade);
-  const v0=parkSong.volume, t0=performance.now();
-  parkFade=setInterval(()=>{
-    const k=Math.min(1,(performance.now()-t0)/(secs*1000));
-    parkSong.volume=v0*(1-k);
-    if(k>=1){ clearInterval(parkFade); try{ parkSong.pause(); parkSong.currentTime=0; }catch(e){} }
-  },40);
-}
+/* ===================== CAR RADIO =====================
+   The radio is a real object in the world, not a track laid over the mix. It
+   lives on the car, so once you park and walk away it is still playing back
+   there and it gets quieter the further you go - which is the whole point of
+   leaving it on.
 
-/* ---- radio ---- */
-const radioAudio=new window.Audio('assets/radio-song.m4a');
-radioAudio.loop=true; radioAudio.volume=.5;
-function radioToggle(){
-  if(radioAudio.paused){ radioAudio.play().catch(()=>{}); return true; }
-  radioAudio.pause();
-  return false;
+   That means WebAudio rather than a bare HTMLAudioElement: each station's
+   element is wrapped in a MediaElementAudioSourceNode and routed through one
+   shared gain into a PannerNode positioned at the car. A PannerNode downmixes
+   to mono for spatialisation, which is why the station files are encoded mono
+   - the stereo half would have been thrown away at runtime anyway.
+
+   Two rules the graph has to respect:
+     - createMediaElementSource may be called ONCE per element, ever. Calling
+       it a second time throws and kills the node, so the sources are cached.
+     - The context starts suspended until a user gesture. Everything is built
+       lazily on the first key press and resume() is attempted on every play.
+*/
+const RADIO_STATIONS=[
+  /* rename these freely - the name is what shows on the dial */
+  {id:'static',     name:'STATIC FM',  src:'assets/radio-song.m4a'},
+  {id:'nightshift', name:'NIGHTSHIFT', src:'assets/radio-nightshift.mp3'},
+  {id:'lowrider',   name:'LOWRIDER',   src:'assets/radio-lowrider.mp3'},
+  {id:'magic',      name:'MAGIC VIP',  src:'assets/radio-magic.mp3'},
+  {id:'parkside',   name:'PARKSIDE',   src:'assets/park-song.mp3'},
+];
+/* N mutes just the music; M mutes everything. Both are read by the gain. */
+let parkMuted=false, allMuted=false;
+
+const Radio=(()=>{
+  let ctx=null, gain=null, panner=null, built=false;
+  const els=new Map(), srcs=new Map();
+  let cur=0, on=false;
+  let stationDirty=true;
+
+  function ensure(){
+    if(built) return !!ctx;
+    built=true;
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC) return false;
+      ctx=new AC();
+      gain=ctx.createGain(); gain.gain.value=0;
+      panner=ctx.createPanner();
+      panner.panningModel='HRTF';
+      /* inverse falloff tuned for a car park: audible across the lot, gone by
+         the time you are inside. Act 2 parks ~900 m away, where this correctly
+         leaves it silent rather than bleeding through the whole map. */
+      panner.distanceModel='inverse';
+      panner.refDistance=4;
+      panner.rolloffFactor=1.15;
+      panner.maxDistance=140;
+      gain.connect(panner); panner.connect(ctx.destination);
+    }catch(e){ ctx=null; return false; }
+    return true;
+  }
+  function elFor(i){
+    const st=RADIO_STATIONS[i]; if(!st) return null;
+    let el=els.get(i);
+    if(!el){
+      el=new window.Audio(st.src);
+      el.loop=true; el.preload='none'; el.volume=1;
+      els.set(i,el);
+    }
+    if(ctx && !srcs.has(i)){
+      /* once per element, for the life of the page */
+      try{ const s=ctx.createMediaElementSource(el); s.connect(gain); srcs.set(i,s); }
+      catch(e){ /* already wired, or the element is not routable */ }
+    }
+    return el;
+  }
+  function level(){
+    if(allMuted||parkMuted||!on) return 0;
+    return (SETTINGS.music/100)*(SETTINGS.master/100);
+  }
+  function applyVolume(){
+    if(!ctx) return;
+    try{ gain.gain.setTargetAtTime(level(), ctx.currentTime, .08); }catch(e){}
+  }
+  function stopAllEls(){
+    for(const el of els.values()){ try{ el.pause(); }catch(e){} }
+  }
+  function play(){
+    if(!ensure()) return false;
+    try{ if(ctx.state==='suspended') ctx.resume(); }catch(e){}
+    const el=elFor(cur); if(!el) return false;
+    stopAllEls();
+    try{ el.preload='auto'; const pr=el.play(); if(pr&&pr.catch)pr.catch(()=>{}); }catch(e){}
+    applyVolume();
+    return true;
+  }
+  return {
+    stations:RADIO_STATIONS,
+    index:()=>cur,
+    isOn:()=>on,
+    name:()=>((RADIO_STATIONS[cur]||{}).name||'--'),
+    toggle(){
+      on=!on;
+      if(on) play(); else { stopAllEls(); applyVolume(); }
+      stationDirty=true;
+      return on;
+    },
+    select(i){
+      if(i<0||i>=RADIO_STATIONS.length) return false;
+      const same=(i===cur && on);
+      cur=i; stationDirty=true;
+      if(same) return true;          /* already on this one */
+      on=true; play();
+      return true;
+    },
+    next(){ return this.select((cur+1)%RADIO_STATIONS.length); },
+    stop(){ on=false; stopAllEls(); applyVolume(); stationDirty=true; },
+    toggleMusicMute(){
+      parkMuted=!parkMuted; applyVolume();
+      banner(parkMuted?'MUSIC OFF':'MUSIC ON','');
+      return parkMuted;
+    },
+    setAllMuted(m){ allMuted=m; applyVolume(); },
+    applyVolume,
+    dirty(){ const d=stationDirty; stationDirty=false; return d; },
+    /* verification hook: proves the element is really running and that the
+       source is where the car is, rather than just flagged on */
+    debug(){
+      const el=els.get(cur);
+      const sx=(typeof townCar!=='undefined'&&townCar)?townCar.position:player.pos;
+      const dx=camera.position.x-sx.x, dz=camera.position.z-sx.z;
+      return {
+        ctx: ctx?ctx.state:null,
+        gain: gain?+gain.gain.value.toFixed(4):null,
+        on, station:(RADIO_STATIONS[cur]||{}).name,
+        elPaused: el?el.paused:null,
+        elTime: el?+el.currentTime.toFixed(2):null,
+        elReady: el?el.readyState:null,
+        sources: srcs.size,
+        srcPos: [+sx.x.toFixed(1), +sx.z.toFixed(1)],
+        listener: [+camera.position.x.toFixed(1), +camera.position.z.toFixed(1)],
+        distance: +Math.hypot(dx,dz).toFixed(1),
+      };
+    },
+    /* Move the listener with the camera and pin the source to the car. Called
+       every frame; cheap, and the only thing that makes the falloff real. */
+    tick(){
+      if(!ctx||!panner) return;
+      const src=(typeof townCar!=='undefined'&&townCar)?townCar.position:player.pos;
+      try{
+        if(panner.positionX){
+          panner.positionX.value=src.x; panner.positionY.value=src.y+.9; panner.positionZ.value=src.z;
+        } else panner.setPosition(src.x,src.y+.9,src.z);
+        const L=ctx.listener;
+        const m=camera.matrixWorld.elements;
+        /* three's camera looks down -Z; the listener wants forward and up */
+        const fx=-m[8], fy=-m[9], fz=-m[10], ux=m[4], uy=m[5], uz=m[6];
+        if(L.positionX){
+          L.positionX.value=camera.position.x;
+          L.positionY.value=camera.position.y;
+          L.positionZ.value=camera.position.z;
+          L.forwardX.value=fx; L.forwardY.value=fy; L.forwardZ.value=fz;
+          L.upX.value=ux; L.upY.value=uy; L.upZ.value=uz;
+        }else{
+          L.setPosition(camera.position.x,camera.position.y,camera.position.z);
+          L.setOrientation(fx,fy,fz,ux,uy,uz);
+        }
+      }catch(e){}
+    },
+  };
+})();
+window.__Radio=Radio;             /* module-scoped otherwise; probes need it */
+/* the dial: only up while you are actually at the wheel */
+function radioHudSync(){
+  let d=document.getElementById('radio-dial');
+  const show=(phase==='drive'||phase==='parking')&&playing&&!paused;
+  if(!d){
+    if(!show) return;
+    d=document.createElement('div'); d.id='radio-dial';
+    document.body.appendChild(d);
+  }
+  d.classList.toggle('on',show);
+  if(!show||!Radio.dirty()) return;
+  d.innerHTML='<b>RADIO</b>'+RADIO_STATIONS.map((s,i)=>
+    '<span class="rs'+(Radio.isOn()&&i===Radio.index()?' on':'')+'">'+(i+1)+' '+s.name+'</span>').join('')+
+    '<i>E '+(Radio.isOn()?'OFF':'ON')+'</i>';
 }
+/* kept for the old call sites; the radio owns the music now */
+function parkSongToggle(){ return Radio.toggleMusicMute(); }
+function radioToggle(){ return Radio.toggle(); }
 
 /* ============================== END TOWN / CAR ============================== */
 
@@ -4177,9 +4334,18 @@ function storeDressing(){
       const w=rand(.24,.5),h=rand(.28,.55),d=rand(.28,.6);
       b.scale.set(w,h,d);
       const tipped=Math.random()<.55, side=Math.random()<.5?1:-1;
-      b.position.set(rand(-7.4,7.4),tipped?Math.min(w,d)/2:h/2,rz+side*rand(.68,1.5));
+      /* A tipped crate is tilted to 67-88 deg, NOT laid flat, so its lowest
+         point is not min(w,d)/2 - that value assumed a full 90 deg and left
+         every leaning crate hanging in the air. Solve the real half-height for
+         the tilt. (rotation.y cannot change it: Y is its own axis.) */
+      const tz = tipped ? Math.PI/2*side*rand(.75,.98) : 0;
+      const halfY = (Math.abs(w*Math.sin(tz)) + Math.abs(h*Math.cos(tz)))*.5;
+      /* offset was .68-1.5 against row centres [-8.2,-2.9,2.9,8.2], banding
+         every box against a shelf face and leaving the aisles empty */
+      b.position.set(rand(-7.4,7.4), halfY,
+                     clamp(rz+side*rand(.75,2.55),-12.6,13.4));
       b.rotation.y=rand(0,6.3);
-      if(tipped)b.rotation.z=Math.PI/2*side*rand(.75,.98);
+      b.rotation.z=tz;
       scene.add(b);
     }
   }
@@ -4381,7 +4547,15 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
   if(EMP.i!=null && (e.code==='KeyW'||e.code==='KeyA'||e.code==='KeyS'||e.code==='KeyD'||e.code==='Space')) emoteStop();
   if(e.code==='KeyM') toggleMute();
   if(e.code==='KeyN') parkSongToggle();
-  if(e.code==='KeyE'&&phase==='drive'){ const on=radioToggle(); banner(on?'RADIO ON':'RADIO OFF',''); }
+  if(e.code==='KeyE'&&(phase==='drive'||phase==='parking')){
+    const on=Radio.toggle(); banner(on?('RADIO ON'):'RADIO OFF', on?Radio.name():'');
+  }
+  /* At the wheel the number keys are free - weapon select is gated to
+     outside/inside - so they tune the radio directly. */
+  if(phase==='drive'||phase==='parking'){
+    const n=/^Digit([1-9])$/.exec(e.code);
+    if(n){ const k=+n[1]-1; if(k<RADIO_STATIONS.length){ Radio.select(k); banner('RADIO',Radio.name()); } }
+  }
 });
 addEventListener('keyup',e=>keys[e.code]=false);
 
@@ -4540,8 +4714,20 @@ const Steps=(()=>{
     setVolumeScale(v){ vscale=clamp(v,0,1); },
   };
 })();
+/* Discrete footsteps on a stride timer, not the old looping bed. A loop can
+   never use variants and always reads as a treadmill; one-shots on a stride
+   let each footfall be a different recording and land with the gait. */
+let strideT=0;
 function footsteps(dt,speed2,spd,sprinting){
-  Steps.update(dt, speed2>=1.2, !!sprinting, phase==='inside');
+  if(!playing||paused||!player.alive||speed2<1.2){ strideT=.72; return; }
+  const surf = (phase==='inside') ? 'tile' : 'concrete';
+  const rate = sprinting ? 2.95 : 1.9;                 /* strides per second */
+  strideT += dt*rate*clamp(speed2/Math.max(spd,.01),.35,1.3);
+  if(strideT>=1){
+    strideT-=1;
+    const set = sprinting ? (SFX.sprintBy[surf]||SFX.stepBy[surf]) : SFX.stepBy[surf];
+    if(set) set.play(rand(.93,1.08));
+  }
 }
 
 function damagePlayer(dmg, fromPos){
@@ -4563,8 +4749,7 @@ function die(){
   setPhase('dead');
   document.exitPointerLock();
   Audio.deathSting();
-  try{ radioAudio.pause(); }catch(e){}
-  parkSongStop();
+  Radio.stop();
   streamStop&&streamStop();
   goproSet&&goproSet(false);
   SFX.stopAll();
@@ -4831,6 +5016,18 @@ function tryReload(){
   window.vmReloadAnim&&vmReloadAnim();
   weapon.reloading=true; weapon.reloadEnd=performance.now()/1000+weapon.reloadTime;
   Audio.reload();
+  /* A reload is three events, not one noise: the mag drops, a fresh one seats,
+     the bolt goes home. Scheduled as fractions of weapon.reloadTime so it
+     tracks whatever weapon is in hand. Under pressure he can fumble it. */
+  const T=weapon.reloadTime*1000;
+  const stressed = player.hp<55 || (typeof threatCount==='function' && threatCount()>2);
+  const still=()=>playing&&!paused&&player.alive&&weapon.reloading;
+  SFX.gun.magout.play(rand(.95,1.06));
+  if(stressed && Math.random()<.35)
+    setTimeout(()=>{ if(still()) SFX.gun.fumble.play(1); }, T*.30);
+  setTimeout(()=>{ if(still()) SFX.gun.magin.play(rand(.95,1.06)); },  T*.55);
+  setTimeout(()=>{ if(still()) SFX.gun.charge.play(rand(.96,1.05)); }, T*.84);
+  if(Math.random()<.45) SFX.say('reloading',3.5);   /* no reserve pool in this game */
   updateHudAmmo();
 }
 
@@ -4838,7 +5035,7 @@ function shoot(now){
   if(weapon.reloading||weapon.mag<=0){
     weapon.lastShot=now;
     /* tryReload() flips reloading synchronously, so the click lands once */
-    if(weapon.mag<=0&&!weapon.reloading){ Audio.dry(); tryReload(); }
+    if(weapon.mag<=0&&!weapon.reloading){ Audio.dry(); SFX.gun.dry.play(1); tryReload(); }
     return;
   }
   weapon.mag--; weapon.lastShot=now;
@@ -6652,39 +6849,121 @@ function hostilesHearGunfire(now){
    browser's speech synthesiser if a file is missing. */
 const SFX=(()=>{
   let muted=false, vscale=1;
+  /* src may be one file or a LIST of variants. With a list, each play picks a
+     different file, which is the whole point of generating variants: the same
+     footstep six times in a row is what makes audio read as fake. */
   function pool(src,n,vol,fallbackText,fallbackFn){
+    const srcs=[].concat(src);
     const els=[]; let broken=false;
-    for(let i=0;i<n;i++){
-      const a=new window.Audio(src);
-      a.preload='auto'; a.volume=vol;
-      a.addEventListener('error',()=>{ broken=true; },{once:true});
-      els.push(a);
+    for(const sr of srcs){
+      for(let i=0;i<n;i++){
+        const a=new window.Audio(sr);
+        a.preload=srcs.length>3?'metadata':'auto'; a.volume=vol;
+        a.addEventListener('error',()=>{ broken=true; },{once:true});
+        els.push(a);
+      }
     }
-    let i=0;
+    let i=0, last=-1;
     return {
       play(rate,vv){
         if(muted)return;
         if(broken){ if(fallbackFn)fallbackFn(); else window.ttsSay&&ttsSay(fallbackText,{rate:rate||1}); return; }
-        const a=els[i++%els.length];
+        let k;
+        if(srcs.length>1){
+          /* never the same variant twice running */
+          do{ k=(Math.random()*els.length)|0; }while(els.length>1 && k===last);
+          last=k;
+        } else k=i++%els.length;
+        const a=els[k];
         try{ a.pause(); a.currentTime=0; a.playbackRate=rate||1; a.volume=clamp((vv===undefined?vol:vv)*vscale,0,1); a.play().catch(()=>{}); }
         catch(e){ if(fallbackFn)fallbackFn(); else window.ttsSay&&ttsSay(fallbackText,{rate:rate||1}); }
       },
       stop(){ for(const a of els){ try{ a.pause(); a.currentTime=0; }catch(e){} } },
     };
   }
+  /* assets/sfx/<fam>_<name>_<i>.mp3 - see tools/gen-audio.py */
+  const V=(fam,name,n)=>Array.from({length:n},(_,i)=>`assets/sfx/${fam}_${name}_${i+1}.mp3`);
   const kill  =pool('assets/kill-voice.mp3',4,.9 ,'Minus one.');
   const deploy=pool('assets/vo-deploy.mp3' ,1,.95,'Remember lads, subscribe to PewDiePie.');
   const win   =pool('assets/vo-win.mp3'    ,1,.95,'We made it out. GG chat.');
   /* Recorded one-shots. Each falls back to the synthesised equivalent rather
      than to speech, so a missing file degrades instead of talking at you. */
-  const gunshot  =pool('assets/sfx-gunshot.mp3'     ,6,.55,'',()=>Audio.shot());
-  const playerHit=pool('assets/sfx-player-hit.mp3'  ,3,.85,'',()=>Audio.hurt());
+  const gunshot  =pool(V('gun','shot',6)            ,2,.55,'',()=>Audio.shot());
+  const playerHit=pool(V('pain','hit',4)            ,2,.85,'',()=>Audio.hurt());
   const breath   =pool('assets/sfx-breath.mp3'      ,2,.5 ,'',()=>{});
+  /* the breathing set is driven by exertion, so it is addressed by level */
+  const breathBy ={
+    calm  : pool(V('breath','calm',3)  ,2,.42,'',()=>{}),
+    medium: pool(V('breath','medium',3),2,.50,'',()=>{}),
+    heavy : pool(V('breath','heavy',4) ,2,.58,'',()=>{}),
+    spent : pool(V('breath','spent',3) ,2,.64,'',()=>{}),
+  };
+  const stepBy={
+    tile    : pool(V('step','tile',6)    ,2,.34,'',()=>{}),
+    concrete: pool(V('step','concrete',6),2,.34,'',()=>{}),
+    gravel  : pool(V('step','gravel',4)  ,2,.34,'',()=>{}),
+    grass   : pool(V('step','grass',4)   ,2,.30,'',()=>{}),
+    wet     : pool(V('step','wet',4)     ,2,.36,'',()=>{}),
+  };
+  const sprintBy={
+    tile    : pool(V('sprint','tile',4)    ,2,.42,'',()=>{}),
+    concrete: pool(V('sprint','concrete',4),2,.42,'',()=>{}),
+  };
+  const gun={
+    dry    : pool(V('gun','dry',2)    ,2,.55,'',()=>Audio.dry()),
+    magout : pool(V('gun','magout',3) ,2,.60,'',()=>{}),
+    magin  : pool(V('gun','magin',3)  ,2,.60,'',()=>{}),
+    charge : pool(V('gun','charge',3) ,2,.60,'',()=>{}),
+    fumble : pool(V('gun','fumble',2) ,1,.55,'',()=>{}),
+    draw   : pool(V('gun','draw',3)   ,2,.55,'',()=>{}),
+    holster: pool(V('gun','holster',2),1,.50,'',()=>{}),
+    adsin  : pool(V('gun','adsin',2)  ,2,.30,'',()=>{}),
+    adsout : pool(V('gun','adsout',2) ,2,.28,'',()=>{}),
+  };
+  const gear={
+    goproOn : pool(V('gear','gopro_on',2)  ,1,.70,'',()=>{}),
+    goproBeep:pool(V('gear','gopro_beep',2),2,.55,'',()=>{}),
+    strap   : pool(V('gear','strap',2)     ,1,.60,'',()=>{}),
+    rustle  : pool(V('gear','rustle',3)    ,2,.42,'',()=>{}),
+  };
+  const car={
+    start     : pool(V('car','start',2)     ,1,.70,'',()=>{}),
+    rev       : pool(V('car','rev',2)       ,1,.60,'',()=>{}),
+    doorOpen  : pool(V('car','dooropen',2)  ,1,.70,'',()=>{}),
+    doorClose : pool(V('car','doorclose',2) ,1,.75,'',()=>{}),
+    trunkOpen : pool(V('car','trunkopen',2) ,1,.72,'',()=>{}),
+    trunkClose: pool(V('car','trunkclose',2),1,.75,'',()=>{}),
+    handbrake : pool(V('car','handbrake',1) ,1,.65,'',()=>{}),
+    seatbelt  : pool(V('car','seatbelt',1)  ,1,.60,'',()=>{}),
+  };
+  const impact={
+    metal   : pool(V('hit','metal',3)   ,2,.55,'',()=>{}),
+    wood    : pool(V('hit','wood',3)    ,2,.55,'',()=>{}),
+    concrete: pool(V('hit','concrete',3),2,.55,'',()=>{}),
+    glass   : pool(V('hit','glass',3)   ,2,.60,'',()=>{}),
+  };
+  const effort=pool(V('pain','effort',3),2,.55,'',()=>{});
+  /* player callouts, Australian, one element each - they never overlap */
+  const VO_IDS=['camera_live','reloading','last_mag','clear','moving','contact',
+                'hit','low_hp','survivor','all_survivors','out_front','need_ammo',
+                'behind_you','nice_shot','regroup','trunk','driving','parked'];
+  const vo={};
+  for(const id of VO_IDS) vo[id]=pool(`assets/sfx/vo_${id}.mp3`,1,.9,'',()=>{});
+  let voCd=0;
+  function say(id,minGap=2.2){
+    const t=performance.now()/1000;
+    if(t<voCd||!vo[id])return false;
+    voCd=t+minGap; vo[id].play(1); return true;
+  }
   const bodyDrop =pool('assets/sfx-body-drop.mp3'   ,4,.7 ,'',()=>{});
   const enemyHurt=pool('assets/sfx-enemy-scream.mp3',4,.8 ,'',()=>Audio.flesh());
-  const all=[kill,deploy,win,gunshot,playerHit,breath,bodyDrop,enemyHurt];
+  const all=[kill,deploy,win,gunshot,playerHit,breath,bodyDrop,enemyHurt,effort]
+    .concat(Object.values(breathBy), Object.values(stepBy), Object.values(sprintBy),
+            Object.values(gun), Object.values(gear), Object.values(car),
+            Object.values(impact), Object.values(vo));
   return {
     kill, deploy, win, gunshot, playerHit, breath, bodyDrop, enemyHurt,
+    breathBy, stepBy, sprintBy, gun, gear, car, impact, effort, vo, say,
     stopAll(){ for(const p of all)p.stop(); HV.stopAll(); window.ttsStopAll&&ttsStopAll(); },
     setMuted(m){ muted=!!m; if(muted) for(const p of all)p.stop(); },
     setVolumeScale(v){ vscale=clamp(v,0,1); },
@@ -6763,7 +7042,6 @@ function setPhase(p){
 function onCarParked(){
   if(phase!=='drive')return;
   setPhase('parking');
-  parkSongStart();                      /* fades up under the GoPro boot */
   lotCrowdScatter&&lotCrowdScatter();   /* panic first, wake later */
   setObjectiveState&&setObjectiveState('drive','done');
   setObjectiveState&&setObjectiveState('park','done');
@@ -6780,7 +7058,6 @@ function onCarParked(){
       player.yaw=mission.act===2?Math.PI*0.02:0; player.pitch=0;
       gun.visible=true; vmGroup.visible=true;
       carCamYaw=null;
-      try{ radioAudio.pause(); }catch(e){}
       lotCrowdScatter();
       for(const p of OUTSIDE_PTS) spawnZombie(3,{pos:p,flee:Math.random()<.35});
       setPhase('outside');
@@ -6883,8 +7160,7 @@ function missionComplete(){
   const saved=survivors.filter(s=>s.state==='following').length;
   addPoints(500,'EXTRACTED +500');    /* before the snapshot, or the screen
                                          reports the pre-bonus score */
-  try{ radioAudio.pause(); }catch(e){}
-  parkSongStop(2.4);
+  Radio.stop();
   window.__runStats={kills:stats.kills,headshots:stats.headshots,shotsFired:stats.shotsFired,
     shotsHit:stats.shotsHit,survivors:saved,timeSec:runTime,points};
   setObjectiveState&&setObjectiveState('extract','done');
@@ -7258,6 +7534,7 @@ const Audio=(()=>{
           engineStart,engineSet,engineStop,glassBreak,woodBreak,rubbleBreak,skidSet};
 })();
 window.__toggleMute=Audio.toggleMute;
+window.__SFX=SFX;                 /* module-scoped otherwise; probes need it */
 /* ===================== NETWORK (P2P CO-OP) =====================
    The game ships as static files, so there is no server of ours to relay
    through. Players connect peer-to-peer over WebRTC; PeerJS's public broker
@@ -7946,6 +8223,12 @@ function skinIsFlesh(c){
    everybody, including the lobby dolls standing next to them. */
 function skinApply(root, idx){
   const sk=SKINS[((idx|0)%SKINS.length+SKINS.length)%SKINS.length];
+  /* A model skin carries its own textures and has no pal[]. Recolouring it is
+     meaningless, and reading sk.pal.map on one threw
+     "Cannot read properties of undefined (reading 'map')" out of lobbyBuild
+     for anyone whose saved skin was the suit - which killed the lobby on
+     every load until they cleared localStorage. */
+  if(!sk||!sk.pal) return;
   const uniq=new Map();                       /* original material -> clone */
   const order=[];
   root.traverse(o=>{
@@ -8465,6 +8748,10 @@ function lobbyBuild(){
       /* pad 0 is you; the rest are stand-ins, given different outfits so the
          line-up does not read as four clones */
       skinApply(av, i===0 ? SKIN_I : (i*3)%SKINS.length);
+      /* If your saved skin is a model rather than a palette, pad 0 has to be
+         that model - skinApply cannot paint the operator into it. Handled by
+         the retry in lobbyTick, because at build time the GLB is usually still
+         parsing and skinMake would just return null. */
     }
   }
   lobbySlotsRender();
@@ -8487,6 +8774,16 @@ function lobbyTick(dt){
   for(const m of LOBBY.mixers) m.update(dt);
   /* the emote pose goes on AFTER the mixers have written the base idle, or the
      clip overwrites it every frame */
+  /* A saved model skin cannot be built during lobbyBuild - the GLB is still
+     parsing then. Swap pad 0 over as soon as it is ready, once. */
+  if(!LOBBY.modelSwapped && SKINS[SKIN_I] && SKINS[SKIN_I].glb){
+    const d0=LOBBY.dolls&&LOBBY.dolls[0];
+    if(d0 && d0.userData.skin!==SKINS[SKIN_I].id && SKIN_MODELS[SKINS[SKIN_I].id]
+       && SKIN_MODELS[SKINS[SKIN_I].id].proto){
+      LOBBY.modelSwapped=true;
+      try{ skinSelect(SKIN_I); }catch(e){}
+    }
+  }
   if(LOBBY.em && LOBBY.em.i!=null){
     const doll=LOBBY.dolls&&LOBBY.dolls[0];
     if(!doll || !emoteTick(doll, LOBBY.em, dt)) LOBBY.em.i=null;
@@ -8641,13 +8938,18 @@ function toggleMute(){
   SFX.setMuted(m);
   HV.setMuted(m);
   Steps.setMuted(m);
-  try{ radioAudio.muted=m; parkSong.muted=m||parkMuted; }catch(e){}
+  Radio.setAllMuted(m);
   banner(m?'MUTED':'SOUND ON','');
 }
 
 /* ============================== SURVIVORS ============================== */
 const survivors=[];
-const SURV_SPOTS=[[-13.5,11.0],[13.2,10.6],[-19.5,-12.5],[18.8,-3.0]];
+/* Two of these sat inside the checkout desks: (-13.5,11.0) is within the
+   desk0 model placed at (-13,0,11.6) (x -14.30..-11.70, z 10.96..12.24)
+   and (13.2,10.6) within lane 13's. A survivor spawned there was pushed
+   up out of the counter and read as floating. Moved outboard into open
+   floor - both new spots pass floorFree(x,z,.45). */
+const SURV_SPOTS=[[-16.4,11.0],[16.4,10.6],[-19.5,-12.5],[18.8,-3.0]];
 /* prayer-hall hiding places: behind columns and beside the minbar */
 /* pulled in off the side walls: at 0.46 scale, 2.8 m of local clearance is
    only 1.3 m of real gap, tight enough that a coarse nav grid could not
@@ -10079,8 +10381,7 @@ function resetRun(){
     const pv=document.getElementById('pf-count'); if(pv)pv.textContent='3';
     const ph=document.getElementById('pf-hn');    if(ph)ph.textContent='142'; }
   for(const z of zombies) resetVariant(z);
-  try{ radioAudio.pause();
-       parkSong.pause(); parkSong.currentTime=0; parkSong.volume=0;
+  try{ Radio.stop();
        clearInterval(parkFade); }catch(e){}
   carSpeed=0; carParked=false; carSteerVal=0; carCamYaw=null; autoParking=false;
   lightMix=1;                       /* otherwise run 2 starts the drive at night */
@@ -10231,6 +10532,9 @@ function loop(){
        call here was overwritten every frame and never reached the screen */
     emoteTickLocal(dt);
     vmCamSync();
+    /* after vmCamSync, so camera.matrixWorld is current for the listener */
+    Radio.tick();
+    radioHudSync();
     /* slide the shadow frustum to wherever the action is */
     {
       const fx=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
