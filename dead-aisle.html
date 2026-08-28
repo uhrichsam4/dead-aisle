@@ -3787,6 +3787,8 @@ window.__carlotDone = true;
 /* The Brabus S-Class carries its length on Z with the NOSE at +Z, and
    townCar's forward is -Z (its headlights are at z=-2.22), so the model needs
    a half turn. The old pack needed PI/2 because its length ran along X. */
+/* car2.glb exports with its front at +Z (Blender's Z-up becomes glTF Y-up on
+   the way out), so it needs the same PI flip the Brabus did. */
 const CAR_FIT={scale:1, x:0, y:0, z:0, ry:Math.PI};
 let carModel=null;
 function applyCarFit(){
@@ -3795,7 +3797,7 @@ function applyCarFit(){
   carModel.position.set(CAR_FIT.x,CAR_FIT.y,CAR_FIT.z);
   carModel.rotation.set(0,CAR_FIT.ry,0);
 }
-gltfLoad('assets/car.glb',(gltf)=>{
+gltfLoad('assets/car2.glb',(gltf)=>{
   const m=gltf.scene;
   m.traverse(o=>{
     if(!o.isMesh)return;
@@ -3823,7 +3825,7 @@ gltfLoad('assets/car.glb',(gltf)=>{
     console.info('custom car ready');
   };
   tryAttach();
-}, undefined, ()=>console.info('assets/car.glb not reachable - block sedan stays'));
+}, undefined, ()=>console.info('assets/car2.glb not reachable - block sedan stays'));
 
 /* The player car is a 74k-triangle hero asset you sit inside. The five
    roadside wrecks use the old low-poly sedan instead - cloning the Brabus
@@ -3869,7 +3871,7 @@ function carWheelsBind(m){
   let tail=null;
   m.traverse(o=>{ if(!o.isMesh)return;
     for(const mat of [].concat(o.material)){
-      if(mat&&/taillight|reflector - red/i.test(mat.name||'')){ tail=mat; }
+      if(mat&&/taillight|reflector - red|redglass/i.test(mat.name||'')){ tail=mat; }
     }});
   if(tail){ tail.emissive=new THREE.Color(0xff2a12); tail.emissiveIntensity=.45; townCar.userData.tailMat=tail; }
   console.info('car wheels bound:',Object.keys(w).join(','),'r='+townCar.userData.wheelR.toFixed(2));
