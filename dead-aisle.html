@@ -445,6 +445,17 @@
 #emote-wheel .ew-slot b{position:absolute;bottom:9px;right:11px;font-size:10px;color:#f6d434;opacity:.75}
 #emote-wheel .ew-slot:hover{transform:translate(-50%,-50%) scale(1.1);
   border-color:#f6d434;background:rgba(40,36,16,.95)}
+
+/* car radio dial */
+#radio-dial{position:fixed;left:18px;bottom:96px;z-index:11;display:none;
+  flex-direction:column;gap:3px;padding:9px 12px;border-radius:8px;
+  background:rgba(10,12,15,.62);border:1px solid rgba(246,212,52,.22);
+  font:700 11px/1.35 "Helvetica Neue",Arial,sans-serif;letter-spacing:.07em;
+  color:#9aa3ad;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,.9)}
+#radio-dial.on{display:flex}
+#radio-dial b{color:#f6d434;font-size:10px;letter-spacing:.16em;margin-bottom:2px}
+#radio-dial .rs.on{color:#e8e6e0}
+#radio-dial i{font-style:normal;color:#6d757d;font-size:10px;margin-top:3px}
 </style>
 </head>
 <body>
@@ -741,11 +752,10 @@ function settingsApply(){
      every channel instead of leaving it on one. */
   const volM=SETTINGS.master/100, volS=(SETTINGS.sfx/100)*volM, volMus=(SETTINGS.music/100)*volM;
   try{ Audio.setVolume&&Audio.setVolume(volM); }catch(e){}
-  /* Math.min against the LIVE volume latched: turning the slider down pinned
-     the track low and turning it back up could never restore it. Scale the
-     fade's own target instead, which is what radioAudio already does. */
-  try{ parkSong.volume=(parkSongTarget||0)*(SETTINGS.music/100); }catch(e){}
-  try{ radioAudio.volume=volMus; }catch(e){}
+  /* The radio owns music volume now: one gain node, rescaled from the live
+     settings. This also retires two bugs the old park fade had - it applied
+     SETTINGS.music twice (squaring it) and ignored master entirely. */
+  try{ Radio.applyVolume(); }catch(e){}
   try{ SFX.setVolumeScale&&SFX.setVolumeScale(volS); }catch(e){}
   try{ HV.setVolumeScale&&HV.setVolumeScale(volS); }catch(e){}
   try{ Steps.setVolumeScale&&Steps.setVolumeScale(volS); }catch(e){}
@@ -4051,55 +4061,191 @@ function carCamera(dt){
   camera.updateProjectionMatrix();
 }
 
-/* ===================== PARK TRACK =====================
-   Already trimmed so it begins 15 s into the song. Fades in on a smoothstep
-   so there is no hard cut at either end. */
-const parkSong=new window.Audio('assets/park-song.mp3');
-parkSong.loop=true; parkSong.preload='auto'; parkSong.volume=0;
-/* the level the fade is aiming at, so settingsApply can rescale rather than
-   clamp against whatever the volume happens to be mid-fade */
-let parkSongTarget=0;
-let parkFade=null;
-/* N toggles just the park track, independently of the global M mute */
-let parkMuted=false, allMuted=false;
-function parkSongToggle(){
-  parkMuted=!parkMuted;
-  try{ parkSong.muted=parkMuted||allMuted; }catch(e){}
-  banner(parkMuted?'MUSIC OFF':'MUSIC ON','');
-  return parkMuted;
-}
-function parkSongStart(target, secs=3.4){
-  if(target===undefined) target=(SETTINGS.music/100)*.9;
-  try{ parkSong.muted=parkMuted||allMuted; }catch(e){}
-  try{ parkSong.volume=0; const pr=parkSong.play(); if(pr&&pr.catch)pr.catch(()=>{}); }
-  catch(e){ return; }
-  clearInterval(parkFade);
-  const t0=performance.now();
-  parkFade=setInterval(()=>{
-    const k=Math.min(1,(performance.now()-t0)/(secs*1000));
-    parkSongTarget=target;
-    parkSong.volume=target*(k*k*(3-2*k))*(SETTINGS.music/100);
-    if(k>=1)clearInterval(parkFade);
-  },40);
-}
-function parkSongStop(secs=1.6){
-  clearInterval(parkFade);
-  const v0=parkSong.volume, t0=performance.now();
-  parkFade=setInterval(()=>{
-    const k=Math.min(1,(performance.now()-t0)/(secs*1000));
-    parkSong.volume=v0*(1-k);
-    if(k>=1){ clearInterval(parkFade); try{ parkSong.pause(); parkSong.currentTime=0; }catch(e){} }
-  },40);
-}
+/* ===================== CAR RADIO =====================
+   The radio is a real object in the world, not a track laid over the mix. It
+   lives on the car, so once you park and walk away it is still playing back
+   there and it gets quieter the further you go - which is the whole point of
+   leaving it on.
 
-/* ---- radio ---- */
-const radioAudio=new window.Audio('assets/radio-song.m4a');
-radioAudio.loop=true; radioAudio.volume=.5;
-function radioToggle(){
-  if(radioAudio.paused){ radioAudio.play().catch(()=>{}); return true; }
-  radioAudio.pause();
-  return false;
+   That means WebAudio rather than a bare HTMLAudioElement: each station's
+   element is wrapped in a MediaElementAudioSourceNode and routed through one
+   shared gain into a PannerNode positioned at the car. A PannerNode downmixes
+   to mono for spatialisation, which is why the station files are encoded mono
+   - the stereo half would have been thrown away at runtime anyway.
+
+   Two rules the graph has to respect:
+     - createMediaElementSource may be called ONCE per element, ever. Calling
+       it a second time throws and kills the node, so the sources are cached.
+     - The context starts suspended until a user gesture. Everything is built
+       lazily on the first key press and resume() is attempted on every play.
+*/
+const RADIO_STATIONS=[
+  /* rename these freely - the name is what shows on the dial */
+  {id:'static',     name:'STATIC FM',  src:'assets/radio-song.m4a'},
+  {id:'nightshift', name:'NIGHTSHIFT', src:'assets/radio-nightshift.mp3'},
+  {id:'lowrider',   name:'LOWRIDER',   src:'assets/radio-lowrider.mp3'},
+  {id:'magic',      name:'MAGIC VIP',  src:'assets/radio-magic.mp3'},
+  {id:'parkside',   name:'PARKSIDE',   src:'assets/park-song.mp3'},
+];
+/* N mutes just the music; M mutes everything. Both are read by the gain. */
+let parkMuted=false, allMuted=false;
+
+const Radio=(()=>{
+  let ctx=null, gain=null, panner=null, built=false;
+  const els=new Map(), srcs=new Map();
+  let cur=0, on=false;
+  let stationDirty=true;
+
+  function ensure(){
+    if(built) return !!ctx;
+    built=true;
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC) return false;
+      ctx=new AC();
+      gain=ctx.createGain(); gain.gain.value=0;
+      panner=ctx.createPanner();
+      panner.panningModel='HRTF';
+      /* inverse falloff tuned for a car park: audible across the lot, gone by
+         the time you are inside. Act 2 parks ~900 m away, where this correctly
+         leaves it silent rather than bleeding through the whole map. */
+      panner.distanceModel='inverse';
+      panner.refDistance=4;
+      panner.rolloffFactor=1.15;
+      panner.maxDistance=140;
+      gain.connect(panner); panner.connect(ctx.destination);
+    }catch(e){ ctx=null; return false; }
+    return true;
+  }
+  function elFor(i){
+    const st=RADIO_STATIONS[i]; if(!st) return null;
+    let el=els.get(i);
+    if(!el){
+      el=new window.Audio(st.src);
+      el.loop=true; el.preload='none'; el.volume=1;
+      els.set(i,el);
+    }
+    if(ctx && !srcs.has(i)){
+      /* once per element, for the life of the page */
+      try{ const s=ctx.createMediaElementSource(el); s.connect(gain); srcs.set(i,s); }
+      catch(e){ /* already wired, or the element is not routable */ }
+    }
+    return el;
+  }
+  function level(){
+    if(allMuted||parkMuted||!on) return 0;
+    return (SETTINGS.music/100)*(SETTINGS.master/100);
+  }
+  function applyVolume(){
+    if(!ctx) return;
+    try{ gain.gain.setTargetAtTime(level(), ctx.currentTime, .08); }catch(e){}
+  }
+  function stopAllEls(){
+    for(const el of els.values()){ try{ el.pause(); }catch(e){} }
+  }
+  function play(){
+    if(!ensure()) return false;
+    try{ if(ctx.state==='suspended') ctx.resume(); }catch(e){}
+    const el=elFor(cur); if(!el) return false;
+    stopAllEls();
+    try{ el.preload='auto'; const pr=el.play(); if(pr&&pr.catch)pr.catch(()=>{}); }catch(e){}
+    applyVolume();
+    return true;
+  }
+  return {
+    stations:RADIO_STATIONS,
+    index:()=>cur,
+    isOn:()=>on,
+    name:()=>((RADIO_STATIONS[cur]||{}).name||'--'),
+    toggle(){
+      on=!on;
+      if(on) play(); else { stopAllEls(); applyVolume(); }
+      stationDirty=true;
+      return on;
+    },
+    select(i){
+      if(i<0||i>=RADIO_STATIONS.length) return false;
+      const same=(i===cur && on);
+      cur=i; stationDirty=true;
+      if(same) return true;          /* already on this one */
+      on=true; play();
+      return true;
+    },
+    next(){ return this.select((cur+1)%RADIO_STATIONS.length); },
+    stop(){ on=false; stopAllEls(); applyVolume(); stationDirty=true; },
+    toggleMusicMute(){
+      parkMuted=!parkMuted; applyVolume();
+      banner(parkMuted?'MUSIC OFF':'MUSIC ON','');
+      return parkMuted;
+    },
+    setAllMuted(m){ allMuted=m; applyVolume(); },
+    applyVolume,
+    dirty(){ const d=stationDirty; stationDirty=false; return d; },
+    /* verification hook: proves the element is really running and that the
+       source is where the car is, rather than just flagged on */
+    debug(){
+      const el=els.get(cur);
+      const sx=(typeof townCar!=='undefined'&&townCar)?townCar.position:player.pos;
+      const dx=camera.position.x-sx.x, dz=camera.position.z-sx.z;
+      return {
+        ctx: ctx?ctx.state:null,
+        gain: gain?+gain.gain.value.toFixed(4):null,
+        on, station:(RADIO_STATIONS[cur]||{}).name,
+        elPaused: el?el.paused:null,
+        elTime: el?+el.currentTime.toFixed(2):null,
+        elReady: el?el.readyState:null,
+        sources: srcs.size,
+        srcPos: [+sx.x.toFixed(1), +sx.z.toFixed(1)],
+        listener: [+camera.position.x.toFixed(1), +camera.position.z.toFixed(1)],
+        distance: +Math.hypot(dx,dz).toFixed(1),
+      };
+    },
+    /* Move the listener with the camera and pin the source to the car. Called
+       every frame; cheap, and the only thing that makes the falloff real. */
+    tick(){
+      if(!ctx||!panner) return;
+      const src=(typeof townCar!=='undefined'&&townCar)?townCar.position:player.pos;
+      try{
+        if(panner.positionX){
+          panner.positionX.value=src.x; panner.positionY.value=src.y+.9; panner.positionZ.value=src.z;
+        } else panner.setPosition(src.x,src.y+.9,src.z);
+        const L=ctx.listener;
+        const m=camera.matrixWorld.elements;
+        /* three's camera looks down -Z; the listener wants forward and up */
+        const fx=-m[8], fy=-m[9], fz=-m[10], ux=m[4], uy=m[5], uz=m[6];
+        if(L.positionX){
+          L.positionX.value=camera.position.x;
+          L.positionY.value=camera.position.y;
+          L.positionZ.value=camera.position.z;
+          L.forwardX.value=fx; L.forwardY.value=fy; L.forwardZ.value=fz;
+          L.upX.value=ux; L.upY.value=uy; L.upZ.value=uz;
+        }else{
+          L.setPosition(camera.position.x,camera.position.y,camera.position.z);
+          L.setOrientation(fx,fy,fz,ux,uy,uz);
+        }
+      }catch(e){}
+    },
+  };
+})();
+window.__Radio=Radio;             /* module-scoped otherwise; probes need it */
+/* the dial: only up while you are actually at the wheel */
+function radioHudSync(){
+  let d=document.getElementById('radio-dial');
+  const show=(phase==='drive'||phase==='parking')&&playing&&!paused;
+  if(!d){
+    if(!show) return;
+    d=document.createElement('div'); d.id='radio-dial';
+    document.body.appendChild(d);
+  }
+  d.classList.toggle('on',show);
+  if(!show||!Radio.dirty()) return;
+  d.innerHTML='<b>RADIO</b>'+RADIO_STATIONS.map((s,i)=>
+    '<span class="rs'+(Radio.isOn()&&i===Radio.index()?' on':'')+'">'+(i+1)+' '+s.name+'</span>').join('')+
+    '<i>E '+(Radio.isOn()?'OFF':'ON')+'</i>';
 }
+/* kept for the old call sites; the radio owns the music now */
+function parkSongToggle(){ return Radio.toggleMusicMute(); }
+function radioToggle(){ return Radio.toggle(); }
 
 /* ============================== END TOWN / CAR ============================== */
 
@@ -4381,7 +4527,15 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
   if(EMP.i!=null && (e.code==='KeyW'||e.code==='KeyA'||e.code==='KeyS'||e.code==='KeyD'||e.code==='Space')) emoteStop();
   if(e.code==='KeyM') toggleMute();
   if(e.code==='KeyN') parkSongToggle();
-  if(e.code==='KeyE'&&phase==='drive'){ const on=radioToggle(); banner(on?'RADIO ON':'RADIO OFF',''); }
+  if(e.code==='KeyE'&&(phase==='drive'||phase==='parking')){
+    const on=Radio.toggle(); banner(on?('RADIO ON'):'RADIO OFF', on?Radio.name():'');
+  }
+  /* At the wheel the number keys are free - weapon select is gated to
+     outside/inside - so they tune the radio directly. */
+  if(phase==='drive'||phase==='parking'){
+    const n=/^Digit([1-9])$/.exec(e.code);
+    if(n){ const k=+n[1]-1; if(k<RADIO_STATIONS.length){ Radio.select(k); banner('RADIO',Radio.name()); } }
+  }
 });
 addEventListener('keyup',e=>keys[e.code]=false);
 
@@ -4563,8 +4717,7 @@ function die(){
   setPhase('dead');
   document.exitPointerLock();
   Audio.deathSting();
-  try{ radioAudio.pause(); }catch(e){}
-  parkSongStop();
+  Radio.stop();
   streamStop&&streamStop();
   goproSet&&goproSet(false);
   SFX.stopAll();
@@ -6763,7 +6916,6 @@ function setPhase(p){
 function onCarParked(){
   if(phase!=='drive')return;
   setPhase('parking');
-  parkSongStart();                      /* fades up under the GoPro boot */
   lotCrowdScatter&&lotCrowdScatter();   /* panic first, wake later */
   setObjectiveState&&setObjectiveState('drive','done');
   setObjectiveState&&setObjectiveState('park','done');
@@ -6780,7 +6932,6 @@ function onCarParked(){
       player.yaw=mission.act===2?Math.PI*0.02:0; player.pitch=0;
       gun.visible=true; vmGroup.visible=true;
       carCamYaw=null;
-      try{ radioAudio.pause(); }catch(e){}
       lotCrowdScatter();
       for(const p of OUTSIDE_PTS) spawnZombie(3,{pos:p,flee:Math.random()<.35});
       setPhase('outside');
@@ -6883,8 +7034,7 @@ function missionComplete(){
   const saved=survivors.filter(s=>s.state==='following').length;
   addPoints(500,'EXTRACTED +500');    /* before the snapshot, or the screen
                                          reports the pre-bonus score */
-  try{ radioAudio.pause(); }catch(e){}
-  parkSongStop(2.4);
+  Radio.stop();
   window.__runStats={kills:stats.kills,headshots:stats.headshots,shotsFired:stats.shotsFired,
     shotsHit:stats.shotsHit,survivors:saved,timeSec:runTime,points};
   setObjectiveState&&setObjectiveState('extract','done');
@@ -8641,7 +8791,7 @@ function toggleMute(){
   SFX.setMuted(m);
   HV.setMuted(m);
   Steps.setMuted(m);
-  try{ radioAudio.muted=m; parkSong.muted=m||parkMuted; }catch(e){}
+  Radio.setAllMuted(m);
   banner(m?'MUTED':'SOUND ON','');
 }
 
@@ -10079,8 +10229,7 @@ function resetRun(){
     const pv=document.getElementById('pf-count'); if(pv)pv.textContent='3';
     const ph=document.getElementById('pf-hn');    if(ph)ph.textContent='142'; }
   for(const z of zombies) resetVariant(z);
-  try{ radioAudio.pause();
-       parkSong.pause(); parkSong.currentTime=0; parkSong.volume=0;
+  try{ Radio.stop();
        clearInterval(parkFade); }catch(e){}
   carSpeed=0; carParked=false; carSteerVal=0; carCamYaw=null; autoParking=false;
   lightMix=1;                       /* otherwise run 2 starts the drive at night */
@@ -10231,6 +10380,9 @@ function loop(){
        call here was overwritten every frame and never reached the screen */
     emoteTickLocal(dt);
     vmCamSync();
+    /* after vmCamSync, so camera.matrixWorld is current for the listener */
+    Radio.tick();
+    radioHudSync();
     /* slide the shadow frustum to wherever the action is */
     {
       const fx=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
