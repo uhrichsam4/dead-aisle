@@ -8096,6 +8096,12 @@ function skinIsFlesh(c){
    everybody, including the lobby dolls standing next to them. */
 function skinApply(root, idx){
   const sk=SKINS[((idx|0)%SKINS.length+SKINS.length)%SKINS.length];
+  /* A model skin carries its own textures and has no pal[]. Recolouring it is
+     meaningless, and reading sk.pal.map on one threw
+     "Cannot read properties of undefined (reading 'map')" out of lobbyBuild
+     for anyone whose saved skin was the suit - which killed the lobby on
+     every load until they cleared localStorage. */
+  if(!sk||!sk.pal) return;
   const uniq=new Map();                       /* original material -> clone */
   const order=[];
   root.traverse(o=>{
@@ -8615,6 +8621,10 @@ function lobbyBuild(){
       /* pad 0 is you; the rest are stand-ins, given different outfits so the
          line-up does not read as four clones */
       skinApply(av, i===0 ? SKIN_I : (i*3)%SKINS.length);
+      /* If your saved skin is a model rather than a palette, pad 0 has to be
+         that model - skinApply cannot paint the operator into it. Handled by
+         the retry in lobbyTick, because at build time the GLB is usually still
+         parsing and skinMake would just return null. */
     }
   }
   lobbySlotsRender();
@@ -8637,6 +8647,16 @@ function lobbyTick(dt){
   for(const m of LOBBY.mixers) m.update(dt);
   /* the emote pose goes on AFTER the mixers have written the base idle, or the
      clip overwrites it every frame */
+  /* A saved model skin cannot be built during lobbyBuild - the GLB is still
+     parsing then. Swap pad 0 over as soon as it is ready, once. */
+  if(!LOBBY.modelSwapped && SKINS[SKIN_I] && SKINS[SKIN_I].glb){
+    const d0=LOBBY.dolls&&LOBBY.dolls[0];
+    if(d0 && d0.userData.skin!==SKINS[SKIN_I].id && SKIN_MODELS[SKINS[SKIN_I].id]
+       && SKIN_MODELS[SKINS[SKIN_I].id].proto){
+      LOBBY.modelSwapped=true;
+      try{ skinSelect(SKIN_I); }catch(e){}
+    }
+  }
   if(LOBBY.em && LOBBY.em.i!=null){
     const doll=LOBBY.dolls&&LOBBY.dolls[0];
     if(!doll || !emoteTick(doll, LOBBY.em, dt)) LOBBY.em.i=null;
