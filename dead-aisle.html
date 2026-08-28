@@ -1478,10 +1478,21 @@ function surfaceTex(url,repX,repY,srgb,level){
     const waiting=[]; _texClones.set(key,waiting);
     base=_texL.load(url, (tx)=>{
       if(level) relevel(tx,level);
-      /* Texture.clone() copies `image` BY VALUE at clone time, so any clone
-         taken before the file arrived held undefined and would have stayed
-         blank for the whole session. Push the real image out to them. */
-      for(const c of waiting){ c.image=tx.image; c.needsUpdate=true; }
+      /* The 1x1 blank below is uploaded into IMMUTABLE texStorage2D storage the
+         first time the material is drawn. three then only ever calls
+         texSubImage2D on that Source, so pushing the real 1024^2 bitmap in
+         fails with GL_INVALID_VALUE and the surface keeps the grey texel for
+         the entire session - the store floor, the road, the lot, the grass and
+         the wall normal maps all shipped untextured because of it. A blank
+         normal map is worse than none: rgb(127,127,127) decodes to a garbage
+         tangent normal rather than a flat one.
+
+         Texture.clone() SHARES the Source since r152, so handing out the image
+         is not the fix. Give every user a FRESH Source: an unseen Source has no
+         WebGLTexture yet, so three allocates storage at the real size. */
+      const src=new THREE.Source(tx.image);
+      tx.dispose(); tx.source=src; tx.needsUpdate=true;
+      for(const c of waiting){ c.dispose(); c.source=src; c.needsUpdate=true; }
       waiting.length=0;
     }, undefined, ()=>{});
     base.image=_texBlank; base.needsUpdate=true;
@@ -1602,8 +1613,15 @@ addBox(.4,5,30,-22,2.5,0,MAT.wall,0,'solid');
 addBox(.4,5,30, 22,2.5,0,MAT.wall,0,'solid');
 addBox(44,5,.4, 0,2.5,-15,MAT.wall,0,'solid');
 /* front wall with CENTER DOOR GAP x -2..2 */
-addBox(20,5,.4,-12,2.5,15,MAT.wallIn,0,'solid');
-addBox(20,5,.4,12,2.5,15,MAT.wallIn,0,'solid');
+/* 'solid' is a WORLDHITS-ONLY flag - addBox only registers an AABB when
+   collide is true and not that string. The comment there says movement is
+   handled by the BOUNDS clamp, which holds for the side and back walls but NOT
+   for this one: phase 'outside' sets maxZ=30.5, which spans the shop interior,
+   so the 44 m storefront was walk-through and enterStore (|x|<2.1) never
+   fired - you ended up standing inside with the HUD still saying FIGHT TO THE
+   DOORS. */
+addBox(20,5,.4,-12,2.5,15,MAT.wallIn,0,true);
+addBox(20,5,.4,12,2.5,15,MAT.wallIn,0,true);
 addBox(4.6,1.6,.45,0,4.2,15,MAT.wallIn,0,'solid');
 for(const dx of[-2.1,2.1]) addBox(.25,3.4,.5,dx,1.7,15,MAT.metalD);
 for(const wx of [-16,-8,0,8,16]){
@@ -7353,6 +7371,19 @@ function threatCount(){ let n=0; for(const z of zombies) if(z.state==='chase')n+
 
 function setPhase(p){
   phase=p; phaseTime=0; window.__phase=p;
+  /* #emote-wheel is inset:0 / pointer-events:auto at z-index 60 and the end
+     screens are z-index 20, so a wheel left open buries RE-DEPLOY and NEXT
+     ROUND - and B cannot close it, because that handler needs you alive. Since
+     the wheel stopped pausing the game you can now die with it up, so this is
+     reachable. Closed inline rather than via emoteWheelClose(), which would
+     try to re-grab the mouse one line before the end screen releases it. */
+  if(p==='dead'||p==='win'){
+    try{
+      if(typeof EMP!=='undefined') EMP.open=false;
+      const w=document.getElementById('emote-wheel');
+      if(w) w.classList.remove('on');
+    }catch(e){}
+  }
   /* the throwable prompt caches its last state on the element; writing
      hint.textContent below without clearing it stranded 'F THROW' forever */
   { const h=document.getElementById('hint'); if(h) h.dataset.thr=''; }
@@ -9689,8 +9720,17 @@ function survivorsUpdate(dt,now){
         /* act-aware: these used to be bare act-1 numbers, which pinned a
        following survivor 900 m away from the mosque */
     { const A=ACT_OFF, a2=(mission.act===2);
-      rp.x=clamp(px, A+(a2?-24.2:-21.2), A+(a2?24.2:21.2));
-      rp.z=clamp(pz, a2?-15.2:-14.2, a2?12.2:14.2); }
+      /* The act-2 numbers are mosque-LOCAL and were never run through
+         mqz()/mqo() - the same un-migrated-literal bug as s.home and the
+         enterStore threshold. mqz(z)=0.46z+17.28, so the upper bound 12.2 was
+         being used as WORLD z: mosque-local -11.04, deep inside the hall and
+         9.9 m short of the arch. Rescued survivors snapped backwards on their
+         first following frame and then ran on the spot against an invisible
+         line while you stood at the exit - the whole escort beat of the last
+         act. Act 1's equivalent clamp deliberately reaches INTO its exit zone;
+         this now does the same. */
+      rp.x=clamp(px, A+(a2?mqo(-24.2):-21.2), A+(a2?mqo(24.2):21.2));
+      rp.z=clamp(pz, a2?mqz(-15.2):-14.2, a2?mqz(12.2):14.2); }
       }
     }else if(nzd<9){ faceYaw=Math.atan2(nzx-rp.x,nzz-rp.z); }
     if(faceYaw!==null){
