@@ -2823,10 +2823,48 @@ function phPlace(pack, name, x, z, opts){
   cullRegister(o, x, z, cullR);
   return o;
 }
+/* The scanned packs ship some albedos so dark they are effectively black:
+   wP_Facade_C's 'interior' and 'glass clear' measure 0.004 linear luminance,
+   and those meshes are 8 x 10 m. At any distance they stop reading as a
+   building and become a solid black rectangle against the sky - which is
+   exactly the "black boxes" in the lot. relevel() already does this for
+   TEXTURES ("a black slab no light rig can rescue"); the pack MATERIALS never
+   got the same treatment.
+
+   Lift only what is genuinely too dark to be lit, and lift it toward a floor
+   rather than washing everything out, so intentionally dark things (tyres,
+   asphalt) keep their character. */
+const PH_BLACK_FLOOR=0.055;      /* linear luminance a lit surface needs */
+function phLiftDarkMaterials(root, packName){
+  const seen=new Set(); let lifted=0;
+  root.traverse(o=>{
+    if(!o.isMesh && !o.isSkinnedMesh) return;
+    for(const m of [].concat(o.material)){
+      if(!m || !m.color || seen.has(m.uuid)) continue;
+      seen.add(m.uuid);
+      const c=m.color;
+      const lum=0.2126*c.r+0.7152*c.g+0.0722*c.b;
+      if(lum>=PH_BLACK_FLOOR) continue;
+      if(lum<=1e-6){
+        /* PURE black - wP_Facade_E's canopy glass is literally 0,0,0. It
+           cannot be scaled up (the ratio is infinite), which is how it slipped
+           through the first pass. Seat it flat on the floor instead. */
+        c.setScalar(PH_BLACK_FLOOR);
+      }else{
+        /* scale toward the floor, keeping hue and relative channel balance */
+        const k=PH_BLACK_FLOOR/lum;
+        c.setRGB(Math.min(1,c.r*k), Math.min(1,c.g*k), Math.min(1,c.b*k));
+      }
+      lifted++;
+    }
+  });
+  if(lifted) console.info('prop pack',packName,'lifted',lifted,'near-black materials');
+}
 function phLoad(pack, url, then){
   gltfLoad(url,(g)=>{
     const lib={};
     for(const c of g.scene.children.slice()) if(c.name) lib[c.name]=c;
+    phLiftDarkMaterials(g.scene, pack);
     PH_PACKS[pack]=lib;
     try{ then&&then(lib); }catch(e){ console.warn('prop placement failed',pack,e); }
     console.info('prop pack',pack,Object.keys(lib).length);
@@ -3088,6 +3126,12 @@ phLoad('extra','assets/ph_extra.glb',(lib)=>{
    which shredded under decimation. */
 const STREET_FIT={facadeY:0, ry:0};
 gltfLoad('assets/street.glb', (gltf)=>{
+  /* street.glb loads directly rather than through phLoad, so it missed the
+     near-black lift - and it is the worst offender: wP_Facade_C's 'interior'
+     and 'glass clear' sit at 0.004 linear luminance on 8 x 10 m meshes, which
+     is what reads as black rectangles standing against the sky down the road.
+     Deliberately NOT applied to car2/car-lod/guns, where black is the point. */
+  phLiftDarkMaterials(gltf.scene, 'street');
   const lib={};
   for(const o of gltf.scene.children.slice()) lib[o.name]=o;
   const put=(name,x,z,ry,sc,collide,y)=>{
