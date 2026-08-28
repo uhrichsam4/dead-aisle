@@ -678,10 +678,18 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const lerp=(a,b,t)=>a+(b-a)*t;
 
 const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'), antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+/* dpr 2 is FOUR times the pixels of dpr 1, which makes it the largest single
+   multiplier on fragment cost in the frame. Capped at 1.5: through a bodycam
+   chain with grain, vignette and barrel distortion the difference is very hard
+   to see, and it buys back ~44% of the pixels on every Retina panel. The
+   quality slider can still push it higher. */
+const DPR_CAP=1.5;
+renderer.setPixelRatio(Math.min(devicePixelRatio,DPR_CAP));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+/* PCFSoft takes many more taps per fragment than PCF for a slightly softer
+   edge. Reserved for the top of the quality slider. */
+renderer.shadowMap.type = THREE.PCFShadowMap;
 /* Every renderer.render() rebuilds the shadow map. There are two scene passes
    per frame - the world, then the view model through its own camera - so the
    map was being rebuilt TWICE for one frame's worth of shadows, and the view
@@ -730,6 +738,8 @@ function settingsApply(){
     /* let the render-quality slider drive shadow resolution too */
     try{
       const want = SETTINGS.res>=150 ? 4096 : SETTINGS.res>=90 ? 2048 : 1024;
+      const wantType = SETTINGS.res>=125 ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+      if(renderer.shadowMap.type!==wantType){ renderer.shadowMap.type=wantType; }
       if(moon.shadow.mapSize.x!==want){
         moon.shadow.mapSize.set(want,want);
         if(moon.shadow.map){ moon.shadow.map.dispose(); moon.shadow.map=null; }
@@ -738,7 +748,7 @@ function settingsApply(){
     /* >100% is supersampling: render above the display's pixel count and let
        the browser downsample. Hard-capped at 4x so a slider drag cannot ask
        for a buffer the GPU refuses to allocate. */
-    renderer.setPixelRatio(Math.min(Math.min(devicePixelRatio,2)*(SETTINGS.res/100), 4));
+    renderer.setPixelRatio(Math.min(Math.min(devicePixelRatio,DPR_CAP)*(SETTINGS.res/100), 3));
     /* The scene renders into the postfx target, not straight to the canvas.
        fxResize was only wired to the window resize event, so moving the
        quality slider changed the canvas and left the target at its old size -
@@ -1005,6 +1015,7 @@ addEventListener('resize', ()=>{
       gl_FragColor = vec4(s, 1.0);
     }`;
   let bloomA=null, bloomB=null, brightMat=null, blurMat=null, fxQuad=null;
+  const BLOOM_ITER = 1;
 
   function fxInit(){
     if (ready) return;
@@ -1021,9 +1032,11 @@ addEventListener('resize', ()=>{
          the ACES curve in the quad pass rolls them off */
       type: THREE.HalfFloatType,
       colorSpace: THREE.LinearSRGBColorSpace,
-      /* the canvas' own antialias:true does nothing once the scene renders
-         into an RT; this is the only MSAA in the pipeline, so it earns 4 */
-      samples: 4,
+      /* The canvas' own antialias:true does nothing once the scene renders
+         into an RT, so this is the only MSAA in the pipeline. 4x on a
+         half-float target is not cheap though, so it is tied to the render
+         quality slider rather than always on. */
+      samples: (typeof SETTINGS!=='undefined' && SETTINGS.res>=125) ? 4 : 2,
     });
     rt.texture.minFilter = THREE.LinearFilter;
     rt.texture.magFilter = THREE.LinearFilter;
@@ -1094,7 +1107,8 @@ addEventListener('resize', ()=>{
     u.exposure.value = renderer.toneMappingExposure;
 
     /* PASS 1: scene -> RT (linear HDR, no tonemap/OETF per r160 RT rules) */
-    renderer.shadowMap.needsUpdate = true;      /* exactly one rebuild a frame */
+    /* was unconditional: a full rebuild of every caster, every frame */
+    renderer.shadowMap.needsUpdate = (typeof shadowsWanted==='function') ? shadowsWanted() : true;
     renderer.setRenderTarget(rt);
     renderer.render(scene, camera);
     /* PASS 1b: view model over the top, own narrower FOV, fresh depth */
@@ -1118,7 +1132,9 @@ addEventListener('resize', ()=>{
       renderer.setRenderTarget(bloomA);
       renderer.render(fxScene, fxCam);
       fxQuad.material = blurMat;
-      for (let i = 0; i < 2; i++) {
+      /* one iteration, not two: the second pass widened the glow slightly and
+         cost two more fullscreen draws a frame for it */
+      for (let i = 0; i < BLOOM_ITER; i++) {
         blurMat.uniforms.tSrc.value = bloomA.texture;
         blurMat.uniforms.dir.value.set(1, 0);
         renderer.setRenderTarget(bloomB);
@@ -1294,17 +1310,43 @@ function lightRegister(l,radius){
   return l;
 }
 let _lightT=0;
+/* Keep EXACTLY this many point lights live. Two reasons it is a fixed count
+   rather than a radius test:
+
+   1. Setting intensity=0 saved nothing. three bakes NUM_POINT_LIGHTS into the
+      shader from the count of VISIBLE lights, so a zero-intensity light is
+      still in the array and every lit fragment still evaluates its distance,
+      attenuation and falloff before multiplying by zero. Only visible=false
+      takes it out of the shader.
+   2. But a varying count means a new program every time it changes, and a
+      shader recompile mid-fight is a visible hitch. Holding the count CONSTANT
+      means one program, compiled once, and the per-fragment lighting cost is
+      bounded by this number instead of by how many lights the level has. */
+const LIGHT_BUDGET=6;
+const _lightRank=[];
 function managedLightsUpdate(dt){
   _lightT-=dt; if(_lightT>0)return;
   _lightT=.25;
   const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
   const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  _lightRank.length=0;
   for(const m of MANAGED_LIGHTS){
-    const d=Math.hypot(px-m.wx, pz-m.wz);
-    const on=d<m.r;
+    m.d=Math.hypot(px-m.wx, pz-m.wz);
+    _lightRank.push(m);
+  }
+  _lightRank.sort((a,b)=>a.d-b.d);
+  const k=Math.min(LIGHT_BUDGET,_lightRank.length);
+  for(let i=0;i<_lightRank.length;i++){
+    const m=_lightRank[i];
+    /* inside the budget AND actually in range - a distant light still counts
+       against the budget slot so the program stays stable, but contributes
+       nothing */
+    const near=i<k;
+    const on=near && m.d<m.r;
     m.on=on;                       /* the tube flicker loop reads this */
-    if(on && m.l.intensity===0) m.l.intensity=m.base;
-    else if(!on && m.l.intensity!==0) m.l.intensity=0;
+    if(m.l.visible!==near) m.l.visible=near;
+    const want=on?m.base:0;
+    if(m.l.intensity!==want) m.l.intensity=want;
   }
 }
 
@@ -10597,6 +10639,18 @@ function startGame(keepRound){
    Shrinks after a sustained miss, grows back once there is headroom, and only
    ever moves one step per decision so it cannot oscillate visibly. The user's
    quality slider still sets the ceiling via renderer.setPixelRatio. */
+/* The shadow map was rebuilt from scratch EVERY frame - autoUpdate is off, but
+   needsUpdate was being set unconditionally in the render path, which is the
+   same thing. With 3,232 casters that was the single biggest item in the
+   frame. The world is static; only the actors and the car move, and a
+   PCF-soft shadow refreshed every other frame is indistinguishable. The
+   cadence backs off further when the frame budget is already blown. */
+const SHADOW={tick:0, every:2};
+function shadowsWanted(){
+  if(++SHADOW.tick < SHADOW.every) return false;
+  SHADOW.tick=0; return true;
+}
+window.__shadow=()=>({every:SHADOW.every});
 const DRS={acc:0,n:0,win:0,scale:1,last:performance.now()};
 function drsUpdate(){
   const now=performance.now(), ft=now-DRS.last; DRS.last=now;
@@ -10610,6 +10664,9 @@ function drsUpdate(){
      transient dip left it at, since it can never report faster than 16.7. */
   if(avg>21)        DRS.scale=Math.max(.55, DRS.scale-.10);   /* below ~48fps */
   else if(avg<17.5) DRS.scale=Math.min(1,   DRS.scale+.05);   /* holding 60fps */
+  /* shadows are the most expensive thing that can be spread over frames, so
+     they give way before resolution does */
+  SHADOW.every = avg>26 ? 4 : avg>21 ? 3 : 2;
   if(DRS.scale!==before){ try{ window.fxSetResScale&&window.fxSetResScale(DRS.scale); }catch(e){} }
 }
 window.__drs=()=>({scale:DRS.scale});
@@ -10724,7 +10781,7 @@ function loop(){
   netTick(dt,now);
   if(window.fxRender&&SETTINGS.fx&&!location.hash.includes('nfx')) fxRender(dt);
   else {
-    renderer.shadowMap.needsUpdate = true;
+    renderer.shadowMap.needsUpdate = (typeof shadowsWanted==='function') ? shadowsWanted() : true;
     renderer.render(scene,camera);
     const ac=renderer.autoClear, bg=scene.background;
     renderer.autoClear=false; scene.background=null;
