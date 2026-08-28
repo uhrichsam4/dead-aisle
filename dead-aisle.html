@@ -2133,8 +2133,26 @@ for(let i=0;i<8;i++){
 /* shopping carts tipped */
 function cart(x,z,rot){
   const g=new THREE.Group();
-  const bas=new THREE.Mesh(new THREE.BoxGeometry(1.0,.5,.7), new THREE.MeshStandardMaterial({color:0x8f9598,metalness:.8,roughness:.35,wireframe:true}));
-  bas.position.y=.25; g.add(bas);
+  /* wireframe:true on a box draws its twelve EDGES, which reads as a floating
+     wire outline rather than a trolley. Build the basket from actual bars. */
+  const W=1.0, H=.5, D=.7, BAR=.022;
+  const wire=new THREE.MeshStandardMaterial({color:0x9aa0a3,metalness:.75,roughness:.38});
+  const bar=(sx,sy,sz,px,py,pz)=>{
+    const m=new THREE.Mesh(new THREE.BoxGeometry(sx,sy,sz),wire);
+    m.position.set(px,py,pz); m.castShadow=true; g.add(m); return m;
+  };
+  /* four uprights */
+  for(const ux of [-W/2,W/2]) for(const uz of [-D/2,D/2]) bar(BAR,H,BAR,ux,H/2,uz);
+  /* top and bottom rails */
+  for(const ry2 of [H,.04]){
+    bar(W,BAR,BAR, 0,ry2,-D/2); bar(W,BAR,BAR, 0,ry2, D/2);
+    bar(BAR,BAR,D, -W/2,ry2,0); bar(BAR,BAR,D,  W/2,ry2,0);
+  }
+  /* vertical mesh, sparse enough to stay cheap */
+  for(let i=1;i<6;i++){ const px=-W/2+i*(W/6); bar(BAR,H,BAR,px,H/2,-D/2); bar(BAR,H,BAR,px,H/2,D/2); }
+  for(let i=1;i<4;i++){ const pz=-D/2+i*(D/4); bar(BAR,H,BAR,-W/2,H/2,pz); bar(BAR,H,BAR,W/2,H/2,pz); }
+  /* floor of the basket */
+  for(let i=1;i<5;i++) bar(W,BAR,BAR, 0,.04,-D/2+i*(D/5));
   const hd=new THREE.Mesh(new THREE.BoxGeometry(.9,.06,.06),MAT.metal); hd.position.set(0,.55,-.4); g.add(hd);
   /* A cart tipped 81 degrees about X swings its body out sideways, so at
      y=0.15 the tipped ones sat 0.35 m into the floor. Upright ones are fine
@@ -2749,6 +2767,16 @@ function phPlace(pack, name, x, z, opts){
   const lib=PH_PACKS[pack]; if(!lib)return null;
   const src=lib[name]; if(!src)return null;
   const o=src.clone(true);
+  /* Measure the prop around its OWN origin. setFromObject returns world
+     bounds, so with the source's position still on the clone, b.min.y carried
+     whatever offset the prop had inside its pack file - and the position.set
+     below then discards that offset while still subtracting it. Any prop
+     authored off-origin ended up floating (or sunk) by exactly that much,
+     which is why a plastic chair and a shopping trolley hung in mid-air in the
+     middle of the aisle. */
+  o.position.set(0,0,0);
+  o.rotation.set(0,0,0);
+  o.scale.setScalar(1);
   o.updateWorldMatrix(true,true);
   const b=new THREE.Box3().setFromObject(o);
   const h=Math.max(.001, b.max.y-b.min.y);
