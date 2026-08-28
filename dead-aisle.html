@@ -4714,8 +4714,20 @@ const Steps=(()=>{
     setVolumeScale(v){ vscale=clamp(v,0,1); },
   };
 })();
+/* Discrete footsteps on a stride timer, not the old looping bed. A loop can
+   never use variants and always reads as a treadmill; one-shots on a stride
+   let each footfall be a different recording and land with the gait. */
+let strideT=0;
 function footsteps(dt,speed2,spd,sprinting){
-  Steps.update(dt, speed2>=1.2, !!sprinting, phase==='inside');
+  if(!playing||paused||!player.alive||speed2<1.2){ strideT=.72; return; }
+  const surf = (phase==='inside') ? 'tile' : 'concrete';
+  const rate = sprinting ? 2.95 : 1.9;                 /* strides per second */
+  strideT += dt*rate*clamp(speed2/Math.max(spd,.01),.35,1.3);
+  if(strideT>=1){
+    strideT-=1;
+    const set = sprinting ? (SFX.sprintBy[surf]||SFX.stepBy[surf]) : SFX.stepBy[surf];
+    if(set) set.play(rand(.93,1.08));
+  }
 }
 
 function damagePlayer(dmg, fromPos){
@@ -5004,6 +5016,18 @@ function tryReload(){
   window.vmReloadAnim&&vmReloadAnim();
   weapon.reloading=true; weapon.reloadEnd=performance.now()/1000+weapon.reloadTime;
   Audio.reload();
+  /* A reload is three events, not one noise: the mag drops, a fresh one seats,
+     the bolt goes home. Scheduled as fractions of weapon.reloadTime so it
+     tracks whatever weapon is in hand. Under pressure he can fumble it. */
+  const T=weapon.reloadTime*1000;
+  const stressed = player.hp<55 || (typeof threatCount==='function' && threatCount()>2);
+  const still=()=>playing&&!paused&&player.alive&&weapon.reloading;
+  SFX.gun.magout.play(rand(.95,1.06));
+  if(stressed && Math.random()<.35)
+    setTimeout(()=>{ if(still()) SFX.gun.fumble.play(1); }, T*.30);
+  setTimeout(()=>{ if(still()) SFX.gun.magin.play(rand(.95,1.06)); },  T*.55);
+  setTimeout(()=>{ if(still()) SFX.gun.charge.play(rand(.96,1.05)); }, T*.84);
+  if(Math.random()<.45) SFX.say('reloading',3.5);   /* no reserve pool in this game */
   updateHudAmmo();
 }
 
@@ -5011,7 +5035,7 @@ function shoot(now){
   if(weapon.reloading||weapon.mag<=0){
     weapon.lastShot=now;
     /* tryReload() flips reloading synchronously, so the click lands once */
-    if(weapon.mag<=0&&!weapon.reloading){ Audio.dry(); tryReload(); }
+    if(weapon.mag<=0&&!weapon.reloading){ Audio.dry(); SFX.gun.dry.play(1); tryReload(); }
     return;
   }
   weapon.mag--; weapon.lastShot=now;
@@ -6825,39 +6849,121 @@ function hostilesHearGunfire(now){
    browser's speech synthesiser if a file is missing. */
 const SFX=(()=>{
   let muted=false, vscale=1;
+  /* src may be one file or a LIST of variants. With a list, each play picks a
+     different file, which is the whole point of generating variants: the same
+     footstep six times in a row is what makes audio read as fake. */
   function pool(src,n,vol,fallbackText,fallbackFn){
+    const srcs=[].concat(src);
     const els=[]; let broken=false;
-    for(let i=0;i<n;i++){
-      const a=new window.Audio(src);
-      a.preload='auto'; a.volume=vol;
-      a.addEventListener('error',()=>{ broken=true; },{once:true});
-      els.push(a);
+    for(const sr of srcs){
+      for(let i=0;i<n;i++){
+        const a=new window.Audio(sr);
+        a.preload=srcs.length>3?'metadata':'auto'; a.volume=vol;
+        a.addEventListener('error',()=>{ broken=true; },{once:true});
+        els.push(a);
+      }
     }
-    let i=0;
+    let i=0, last=-1;
     return {
       play(rate,vv){
         if(muted)return;
         if(broken){ if(fallbackFn)fallbackFn(); else window.ttsSay&&ttsSay(fallbackText,{rate:rate||1}); return; }
-        const a=els[i++%els.length];
+        let k;
+        if(srcs.length>1){
+          /* never the same variant twice running */
+          do{ k=(Math.random()*els.length)|0; }while(els.length>1 && k===last);
+          last=k;
+        } else k=i++%els.length;
+        const a=els[k];
         try{ a.pause(); a.currentTime=0; a.playbackRate=rate||1; a.volume=clamp((vv===undefined?vol:vv)*vscale,0,1); a.play().catch(()=>{}); }
         catch(e){ if(fallbackFn)fallbackFn(); else window.ttsSay&&ttsSay(fallbackText,{rate:rate||1}); }
       },
       stop(){ for(const a of els){ try{ a.pause(); a.currentTime=0; }catch(e){} } },
     };
   }
+  /* assets/sfx/<fam>_<name>_<i>.mp3 - see tools/gen-audio.py */
+  const V=(fam,name,n)=>Array.from({length:n},(_,i)=>`assets/sfx/${fam}_${name}_${i+1}.mp3`);
   const kill  =pool('assets/kill-voice.mp3',4,.9 ,'Minus one.');
   const deploy=pool('assets/vo-deploy.mp3' ,1,.95,'Remember lads, subscribe to PewDiePie.');
   const win   =pool('assets/vo-win.mp3'    ,1,.95,'We made it out. GG chat.');
   /* Recorded one-shots. Each falls back to the synthesised equivalent rather
      than to speech, so a missing file degrades instead of talking at you. */
-  const gunshot  =pool('assets/sfx-gunshot.mp3'     ,6,.55,'',()=>Audio.shot());
-  const playerHit=pool('assets/sfx-player-hit.mp3'  ,3,.85,'',()=>Audio.hurt());
+  const gunshot  =pool(V('gun','shot',6)            ,2,.55,'',()=>Audio.shot());
+  const playerHit=pool(V('pain','hit',4)            ,2,.85,'',()=>Audio.hurt());
   const breath   =pool('assets/sfx-breath.mp3'      ,2,.5 ,'',()=>{});
+  /* the breathing set is driven by exertion, so it is addressed by level */
+  const breathBy ={
+    calm  : pool(V('breath','calm',3)  ,2,.42,'',()=>{}),
+    medium: pool(V('breath','medium',3),2,.50,'',()=>{}),
+    heavy : pool(V('breath','heavy',4) ,2,.58,'',()=>{}),
+    spent : pool(V('breath','spent',3) ,2,.64,'',()=>{}),
+  };
+  const stepBy={
+    tile    : pool(V('step','tile',6)    ,2,.34,'',()=>{}),
+    concrete: pool(V('step','concrete',6),2,.34,'',()=>{}),
+    gravel  : pool(V('step','gravel',4)  ,2,.34,'',()=>{}),
+    grass   : pool(V('step','grass',4)   ,2,.30,'',()=>{}),
+    wet     : pool(V('step','wet',4)     ,2,.36,'',()=>{}),
+  };
+  const sprintBy={
+    tile    : pool(V('sprint','tile',4)    ,2,.42,'',()=>{}),
+    concrete: pool(V('sprint','concrete',4),2,.42,'',()=>{}),
+  };
+  const gun={
+    dry    : pool(V('gun','dry',2)    ,2,.55,'',()=>Audio.dry()),
+    magout : pool(V('gun','magout',3) ,2,.60,'',()=>{}),
+    magin  : pool(V('gun','magin',3)  ,2,.60,'',()=>{}),
+    charge : pool(V('gun','charge',3) ,2,.60,'',()=>{}),
+    fumble : pool(V('gun','fumble',2) ,1,.55,'',()=>{}),
+    draw   : pool(V('gun','draw',3)   ,2,.55,'',()=>{}),
+    holster: pool(V('gun','holster',2),1,.50,'',()=>{}),
+    adsin  : pool(V('gun','adsin',2)  ,2,.30,'',()=>{}),
+    adsout : pool(V('gun','adsout',2) ,2,.28,'',()=>{}),
+  };
+  const gear={
+    goproOn : pool(V('gear','gopro_on',2)  ,1,.70,'',()=>{}),
+    goproBeep:pool(V('gear','gopro_beep',2),2,.55,'',()=>{}),
+    strap   : pool(V('gear','strap',2)     ,1,.60,'',()=>{}),
+    rustle  : pool(V('gear','rustle',3)    ,2,.42,'',()=>{}),
+  };
+  const car={
+    start     : pool(V('car','start',2)     ,1,.70,'',()=>{}),
+    rev       : pool(V('car','rev',2)       ,1,.60,'',()=>{}),
+    doorOpen  : pool(V('car','dooropen',2)  ,1,.70,'',()=>{}),
+    doorClose : pool(V('car','doorclose',2) ,1,.75,'',()=>{}),
+    trunkOpen : pool(V('car','trunkopen',2) ,1,.72,'',()=>{}),
+    trunkClose: pool(V('car','trunkclose',2),1,.75,'',()=>{}),
+    handbrake : pool(V('car','handbrake',1) ,1,.65,'',()=>{}),
+    seatbelt  : pool(V('car','seatbelt',1)  ,1,.60,'',()=>{}),
+  };
+  const impact={
+    metal   : pool(V('hit','metal',3)   ,2,.55,'',()=>{}),
+    wood    : pool(V('hit','wood',3)    ,2,.55,'',()=>{}),
+    concrete: pool(V('hit','concrete',3),2,.55,'',()=>{}),
+    glass   : pool(V('hit','glass',3)   ,2,.60,'',()=>{}),
+  };
+  const effort=pool(V('pain','effort',3),2,.55,'',()=>{});
+  /* player callouts, Australian, one element each - they never overlap */
+  const VO_IDS=['camera_live','reloading','last_mag','clear','moving','contact',
+                'hit','low_hp','survivor','all_survivors','out_front','need_ammo',
+                'behind_you','nice_shot','regroup','trunk','driving','parked'];
+  const vo={};
+  for(const id of VO_IDS) vo[id]=pool(`assets/sfx/vo_${id}.mp3`,1,.9,'',()=>{});
+  let voCd=0;
+  function say(id,minGap=2.2){
+    const t=performance.now()/1000;
+    if(t<voCd||!vo[id])return false;
+    voCd=t+minGap; vo[id].play(1); return true;
+  }
   const bodyDrop =pool('assets/sfx-body-drop.mp3'   ,4,.7 ,'',()=>{});
   const enemyHurt=pool('assets/sfx-enemy-scream.mp3',4,.8 ,'',()=>Audio.flesh());
-  const all=[kill,deploy,win,gunshot,playerHit,breath,bodyDrop,enemyHurt];
+  const all=[kill,deploy,win,gunshot,playerHit,breath,bodyDrop,enemyHurt,effort]
+    .concat(Object.values(breathBy), Object.values(stepBy), Object.values(sprintBy),
+            Object.values(gun), Object.values(gear), Object.values(car),
+            Object.values(impact), Object.values(vo));
   return {
     kill, deploy, win, gunshot, playerHit, breath, bodyDrop, enemyHurt,
+    breathBy, stepBy, sprintBy, gun, gear, car, impact, effort, vo, say,
     stopAll(){ for(const p of all)p.stop(); HV.stopAll(); window.ttsStopAll&&ttsStopAll(); },
     setMuted(m){ muted=!!m; if(muted) for(const p of all)p.stop(); },
     setVolumeScale(v){ vscale=clamp(v,0,1); },
@@ -7428,6 +7534,7 @@ const Audio=(()=>{
           engineStart,engineSet,engineStop,glassBreak,woodBreak,rubbleBreak,skidSet};
 })();
 window.__toggleMute=Audio.toggleMute;
+window.__SFX=SFX;                 /* module-scoped otherwise; probes need it */
 /* ===================== NETWORK (P2P CO-OP) =====================
    The game ships as static files, so there is no server of ours to relay
    through. Players connect peer-to-peer over WebRTC; PeerJS's public broker
