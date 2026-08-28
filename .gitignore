@@ -5,3 +5,6 @@ dist/
 node_modules/
 *.log
 viewer/models/
+
+# superseded by car2.glb (the Sonata)
+assets/car.glb

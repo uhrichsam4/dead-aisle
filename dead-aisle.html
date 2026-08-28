@@ -3968,7 +3968,7 @@ function carWheelsBind(m){
   const w={};
   m.traverse(o=>{ if(/^wheel_(FL|FR|BL|BR)/.test(o.name||'')) w[o.name.slice(0,8)]=o; });
   const found=Object.keys(w).map(k=>w[k]);
-  if(!found.length){ console.info('car wheels: none found in car.glb'); return; }
+  if(!found.length){ console.info('car wheels: none found in car2.glb'); return; }
   /* Each wheel node carries whatever orientation the glTF Y-up conversion
      baked into it, so rolling its own rotation.x span it about an arbitrary
      axis - it looked like the wheel was turning on the spot. Hang each one
