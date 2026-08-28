@@ -1349,7 +1349,7 @@ const TEX={
   lotR : surfaceTex('assets/tex/road2_r.jpg', 14, 5, false),
   dirt : surfaceTex('assets/tex/ground2_c.jpg', 30, 10),
   dirtN: surfaceTex('assets/tex/ground2_n.jpg', 30, 10, false),
-  grass: surfaceTex('assets/tex/grass2_c.jpg', 96, 16),  /* plane is 270 x 46 */
+  grass: surfaceTex('assets/tex/grass2_c.jpg', 96, 16),  /* plane is 1240 x 45.3 */
   grassN:surfaceTex('assets/tex/grass2_n.jpg', 96, 16, false),
   /* a supermarket has a tiled floor, not floorboards */
   floor: surfaceTex('assets/tex/tiles2_c.jpg', 20, 14),  /* hall is 44 x 30   */
@@ -1563,13 +1563,18 @@ const shelfRows=[makeShelfRow(-8.2), makeShelfRow(-2.9), makeShelfRow(2.9), make
 for(const r of shelfRows) cullRegister(r, 0, r.position.z, 70);
 /* shelf tiers of the props.glb gondola (2.92 x 2.17 x 0.89) and how far its
    shelf face stands off the row spine. The stock is placed against these. */
-const SHELF_TIERS=[.38,.95,1.52];
+/* Deck TOPS measured off assets/props.glb shelf_step (0.083 / 0.646 /
+   1.209, pitch 0.563). The old [.38,.95,1.52] were the mid-points BETWEEN
+   planks, so every product floated in the gap instead of standing on a
+   shelf. Stock adds pd.h*.31 on top of these. */
+const SHELF_TIERS=[.09,.65,1.21];
 /* the gondola's front face is 0.75 from the row spine and the shelf plate
    is ~0.45 deep, so stock has to sit back from that or it pokes through */
 const SHELF_FACE_Z=.46;
 /* the wall run: 2.62 x 2.10 x 0.44 industrial units, open face on local +Z */
 const WALL_UNITS=[];
-const WALL_TIERS=[.30,.78,1.26,1.74];
+/* likewise for the wall units - measured, not guessed */
+const WALL_TIERS=[.10,.52,.94,1.36];
 let WALL_FACE_Z=.10;
 window.__wallFace=v=>{ WALL_FACE_Z=v; };
 let SHELF_ITEMS=null;
@@ -1905,13 +1910,19 @@ function floorSpot(minX,maxX,minZ,maxZ,pad){
 }
 for(let i=0;i<46;i++){
   const sp=floorSpot(-20,20,-13,14,.15); if(!sp)continue;
-  const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.15,.5),rand(.02,.08),rand(.15,.4)), debrisMats[rint(0,1)]);
-  d.position.set(sp[0],.03,sp[1]); d.rotation.y=rand(0,6.3); scene.add(d);
+  /* y was a constant .03 against a thickness of .02-.08, so the thicker
+     slabs sank through the floor plane and the thin ones hovered */
+  const dt=rand(.02,.08);
+  const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.15,.5),dt,rand(.15,.4)), debrisMats[rint(0,1)]);
+  d.position.set(sp[0],dt*.5,sp[1]); d.rotation.y=rand(0,6.3); scene.add(d);
 }
 for(let i=0;i<8;i++){
   const sp=floorSpot(-19,19,-13,13,.5); if(!sp)continue;
-  const bx=new THREE.Mesh(new THREE.BoxGeometry(rand(.5,.9),rand(.4,.7),rand(.5,.8)), debrisMats[1]);
-  bx.position.set(sp[0],.3,sp[1]); bx.rotation.y=rand(0,6.3); scene.add(bx);
+  /* same again: .3 was half of an older fixed height, so the short crates
+     hovered ~10 cm and the tall ones buried ~5 cm */
+  const bh=rand(.4,.7);
+  const bx=new THREE.Mesh(new THREE.BoxGeometry(rand(.5,.9),bh,rand(.5,.8)), debrisMats[1]);
+  bx.position.set(sp[0],bh*.5,sp[1]); bx.rotation.y=rand(0,6.3); scene.add(bx);
   worldHits.push(bx); makeBreakable(bx,'crate');
 }
 /* shopping carts tipped */
@@ -2069,8 +2080,8 @@ function buildTown(){
   /* The map used to stop at x=+/-135. Act 2 is a mosque ~900 m west, so the
      ground and road now run from x=-1030 to +170 - about a 90 second drive
      at the car's top speed. */
-  const ground=new THREE.Mesh(new THREE.PlaneGeometry(1240,46),townMats.ground);
-  ground.rotation.x=-Math.PI/2; ground.position.set(WORLD_CX,0,37.5); ground.receiveShadow=true; scene.add(ground);
+  const ground=new THREE.Mesh(new THREE.PlaneGeometry(1240,45.3),townMats.ground);
+  ground.rotation.x=-Math.PI/2; ground.position.set(WORLD_CX,0,37.85); ground.receiveShadow=true; scene.add(ground);
 
   const lot=new THREE.Mesh(new THREE.PlaneGeometry(48,15),townMats.lot);
   lot.rotation.x=-Math.PI/2; lot.position.set(0,.01,22.5);
@@ -4323,9 +4334,18 @@ function storeDressing(){
       const w=rand(.24,.5),h=rand(.28,.55),d=rand(.28,.6);
       b.scale.set(w,h,d);
       const tipped=Math.random()<.55, side=Math.random()<.5?1:-1;
-      b.position.set(rand(-7.4,7.4),tipped?Math.min(w,d)/2:h/2,rz+side*rand(.68,1.5));
+      /* A tipped crate is tilted to 67-88 deg, NOT laid flat, so its lowest
+         point is not min(w,d)/2 - that value assumed a full 90 deg and left
+         every leaning crate hanging in the air. Solve the real half-height for
+         the tilt. (rotation.y cannot change it: Y is its own axis.) */
+      const tz = tipped ? Math.PI/2*side*rand(.75,.98) : 0;
+      const halfY = (Math.abs(w*Math.sin(tz)) + Math.abs(h*Math.cos(tz)))*.5;
+      /* offset was .68-1.5 against row centres [-8.2,-2.9,2.9,8.2], banding
+         every box against a shelf face and leaving the aisles empty */
+      b.position.set(rand(-7.4,7.4), halfY,
+                     clamp(rz+side*rand(.75,2.55),-12.6,13.4));
       b.rotation.y=rand(0,6.3);
-      if(tipped)b.rotation.z=Math.PI/2*side*rand(.75,.98);
+      b.rotation.z=tz;
       scene.add(b);
     }
   }
@@ -8817,7 +8837,12 @@ function toggleMute(){
 
 /* ============================== SURVIVORS ============================== */
 const survivors=[];
-const SURV_SPOTS=[[-13.5,11.0],[13.2,10.6],[-19.5,-12.5],[18.8,-3.0]];
+/* Two of these sat inside the checkout desks: (-13.5,11.0) is within the
+   desk0 model placed at (-13,0,11.6) (x -14.30..-11.70, z 10.96..12.24)
+   and (13.2,10.6) within lane 13's. A survivor spawned there was pushed
+   up out of the counter and read as floating. Moved outboard into open
+   floor - both new spots pass floorFree(x,z,.45). */
+const SURV_SPOTS=[[-16.4,11.0],[16.4,10.6],[-19.5,-12.5],[18.8,-3.0]];
 /* prayer-hall hiding places: behind columns and beside the minbar */
 /* pulled in off the side walls: at 0.46 scale, 2.8 m of local clearance is
    only 1.3 m of real gap, tight enough that a coarse nav grid could not
