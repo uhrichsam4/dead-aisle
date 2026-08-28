@@ -1399,11 +1399,30 @@ const _texL=new THREE.TextureLoader();
    clone costs one JS object and zero GPU bytes, while repeat/colorSpace stay
    per-caller. Keyed on the relevel params too, since those mutate the bitmap. */
 const _texCache=new Map();
+/* Every texture starts life holding this, so one is never bound to a draw call
+   without an image. That bind is what produced six "Texture marked for update
+   but no image data found" warnings a session, and the object rendered
+   untextured until the file landed. */
+const _texBlank=(()=>{
+  const cv=document.createElement('canvas'); cv.width=cv.height=1;
+  const cx=cv.getContext('2d'); cx.fillStyle='#7f7f7f'; cx.fillRect(0,0,1,1);
+  return cv;
+})();
+const _texClones=new Map();          /* cache key -> clones awaiting the image */
 function surfaceTex(url,repX,repY,srgb,level){
   const key=url+'|'+(level?JSON.stringify(level):'');
   let base=_texCache.get(key);
   if(!base){
-    base=_texL.load(url, (tx)=>{ if(level) relevel(tx,level); }, undefined, ()=>{});
+    const waiting=[]; _texClones.set(key,waiting);
+    base=_texL.load(url, (tx)=>{
+      if(level) relevel(tx,level);
+      /* Texture.clone() copies `image` BY VALUE at clone time, so any clone
+         taken before the file arrived held undefined and would have stayed
+         blank for the whole session. Push the real image out to them. */
+      for(const c of waiting){ c.image=tx.image; c.needsUpdate=true; }
+      waiting.length=0;
+    }, undefined, ()=>{});
+    base.image=_texBlank; base.needsUpdate=true;
     base.wrapS=base.wrapT=THREE.RepeatWrapping;
     base.anisotropy=8;
     _texCache.set(key,base);
@@ -1418,6 +1437,10 @@ function surfaceTex(url,repX,repY,srgb,level){
   t.anisotropy=8;
   if(srgb!==false) t.colorSpace=THREE.SRGBColorSpace;
   t.needsUpdate=true;
+  /* if the source has not landed yet this clone is holding the blank, so
+     register it for the hand-off above */
+  const w=_texClones.get(key);
+  if(w && (!base.image || base.image===_texBlank)) w.push(t);
   return t;
 }
 /* Some of the scanned PBR albedos are photographed dark - the brick wall
