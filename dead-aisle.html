@@ -866,6 +866,8 @@ addEventListener('resize', ()=>{
     uniform float grain;       // 0..~
     uniform float flickerAmt;  // ~0.01
     uniform vec2 res;          // drawing buffer size
+    uniform sampler2D tBloom;
+    uniform float bloomStrength;
     varying vec2 vUv;
 
     float hash21(vec2 p){
@@ -927,6 +929,12 @@ addEventListener('resize', ()=>{
       col.g = texture2D(tDiffuse, clamp(uv,       0.001, 0.999)).g;
       col.b = texture2D(tDiffuse, clamp(uv - ca, 0.001, 0.999)).b;
 
+      /* Bloom is added HERE - scene-referred, before the tone curve - because
+         that is where real lens bleed happens. Adding it after ACES would just
+         wash the image out instead of letting the curve roll the highlights
+         off. */
+      col += texture2D(tBloom, clamp(uv, 0.001, 0.999)).rgb * bloomStrength;
+
       /* tiny sensor exposure flicker (scene-referred, before the tone curve) */
       col *= 1.0 + sin(time * 13.0) * flickerAmt;
 
@@ -951,7 +959,14 @@ addEventListener('resize', ()=>{
 
   let rt = null, fxScene = null, fxCam = null, quadMat = null, ready = false, time = 0;
 
-  const look = { k1: 0.20, k2: 0.055, aberration: 1.25, vignette: 0.34, grain: 0.085, flicker: 0.01 };
+  /* These ARE the shipped values. They used to be overridden by an fxSetLook
+     call further down, but that call lives inside a debug quick-start path
+     that never runs in a normal session - so the game shipped on the raw
+     defaults, with aberration at 1.25 fringing every frame edge in rainbow.
+     Real action-cam glass shows a fraction of that. */
+  const look = { k1: 0.16, k2: 0.04, aberration: 0.45, vignette: 0.40,
+                 grain: 0.11, flicker: 0.01,
+                 bloom: 0.60, bloomThreshold: 1.0 };
 
   function syncLook(){
     if (!quadMat) return;
@@ -962,6 +977,34 @@ addEventListener('resize', ()=>{
     u.grain.value = look.grain;
     u.flickerAmt.value = look.flicker;
   }
+
+  /* Bloom: pull the highlights out of the linear HDR target, blur them small
+     and wide, and add them back before tone mapping. Half res, two ping-pong
+     gaussian iterations - cheap enough to leave on. */
+  const BRIGHT_FRAG = `
+    precision highp float;
+    uniform sampler2D tSrc;
+    uniform float threshold, knee;
+    varying vec2 vUv;
+    void main(){
+      vec3 c = texture2D(tSrc, vUv).rgb;
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      gl_FragColor = vec4(c * smoothstep(threshold, threshold + knee, l), 1.0);
+    }`;
+  const BLUR_FRAG = `
+    precision highp float;
+    uniform sampler2D tSrc;
+    uniform vec2 dir, texel;
+    varying vec2 vUv;
+    void main(){
+      vec2 o1 = dir * texel * 1.3846153846;
+      vec2 o2 = dir * texel * 3.2307692308;
+      vec3 s = texture2D(tSrc, vUv).rgb * 0.2270270270;
+      s += (texture2D(tSrc, vUv + o1).rgb + texture2D(tSrc, vUv - o1).rgb) * 0.3162162162;
+      s += (texture2D(tSrc, vUv + o2).rgb + texture2D(tSrc, vUv - o2).rgb) * 0.0702702703;
+      gl_FragColor = vec4(s, 1.0);
+    }`;
+  let bloomA=null, bloomB=null, brightMat=null, blurMat=null, fxQuad=null;
 
   function fxInit(){
     if (ready) return;
@@ -978,7 +1021,9 @@ addEventListener('resize', ()=>{
          the ACES curve in the quad pass rolls them off */
       type: THREE.HalfFloatType,
       colorSpace: THREE.LinearSRGBColorSpace,
-      samples: 2,          /* without this the canvas antialias:true is dead */
+      /* the canvas' own antialias:true does nothing once the scene renders
+         into an RT; this is the only MSAA in the pipeline, so it earns 4 */
+      samples: 4,
     });
     rt.texture.minFilter = THREE.LinearFilter;
     rt.texture.magFilter = THREE.LinearFilter;
@@ -995,6 +1040,8 @@ addEventListener('resize', ()=>{
         grain:      { value: look.grain },
         flickerAmt: { value: look.flicker },
         res:        { value: new THREE.Vector2(w, h) },
+        tBloom:     { value: null },
+        bloomStrength: { value: look.bloom },
       },
       vertexShader: VERT,
       fragmentShader: FRAG,
@@ -1008,6 +1055,27 @@ addEventListener('resize', ()=>{
       new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), 3));
     const quad = new THREE.Mesh(tri, quadMat);
     quad.frustumCulled = false;
+    fxQuad = quad;
+
+    const bw = Math.max(2, w >> 1), bh = Math.max(2, h >> 1);
+    const bopt = { depthBuffer:false, stencilBuffer:false, type: THREE.HalfFloatType,
+                   colorSpace: THREE.LinearSRGBColorSpace };
+    bloomA = new THREE.WebGLRenderTarget(bw, bh, bopt);
+    bloomB = new THREE.WebGLRenderTarget(bw, bh, bopt);
+    for (const t of [bloomA, bloomB]) {
+      t.texture.minFilter = THREE.LinearFilter;
+      t.texture.magFilter = THREE.LinearFilter;
+      t.texture.generateMipmaps = false;
+    }
+    brightMat = new THREE.ShaderMaterial({
+      uniforms:{ tSrc:{value:null}, threshold:{value:look.bloomThreshold}, knee:{value:.55} },
+      vertexShader: VERT, fragmentShader: BRIGHT_FRAG,
+      toneMapped:false, depthTest:false, depthWrite:false });
+    blurMat = new THREE.ShaderMaterial({
+      uniforms:{ tSrc:{value:null}, dir:{value:new THREE.Vector2(1,0)},
+                 texel:{value:new THREE.Vector2(1/bw, 1/bh)} },
+      vertexShader: VERT, fragmentShader: BLUR_FRAG,
+      toneMapped:false, depthTest:false, depthWrite:false });
 
     fxScene = new THREE.Scene();
     fxScene.add(quad);
@@ -1040,6 +1108,32 @@ addEventListener('resize', ()=>{
       renderer.autoClear = ac;
     }
 
+    /* PASS 1c: bloom - bright-pass then two ping-pong gaussian iterations */
+    const bs = look.bloom * (SETTINGS && SETTINGS.fx ? 1 : 0);
+    u.bloomStrength.value = bs;
+    if (bs > 0.001) {
+      brightMat.uniforms.tSrc.value = rt.texture;
+      brightMat.uniforms.threshold.value = look.bloomThreshold;
+      fxQuad.material = brightMat;
+      renderer.setRenderTarget(bloomA);
+      renderer.render(fxScene, fxCam);
+      fxQuad.material = blurMat;
+      for (let i = 0; i < 2; i++) {
+        blurMat.uniforms.tSrc.value = bloomA.texture;
+        blurMat.uniforms.dir.value.set(1, 0);
+        renderer.setRenderTarget(bloomB);
+        renderer.render(fxScene, fxCam);
+        blurMat.uniforms.tSrc.value = bloomB.texture;
+        blurMat.uniforms.dir.value.set(0, 1);
+        renderer.setRenderTarget(bloomA);
+        renderer.render(fxScene, fxCam);
+      }
+      u.tBloom.value = bloomA.texture;
+      fxQuad.material = quadMat;
+    } else {
+      u.tBloom.value = bloomA ? bloomA.texture : null;
+    }
+
     /* PASS 2: fullscreen triangle -> screen (manual ACES + sRGB inside) */
     renderer.setRenderTarget(null);
     renderer.render(fxScene, fxCam);
@@ -1052,6 +1146,11 @@ addEventListener('resize', ()=>{
     rt.setSize(Math.max(2, Math.floor(size.x * FX_RES_SCALE)),
                Math.max(2, Math.floor(size.y * FX_RES_SCALE)));
     quadMat.uniforms.res.value.set(rt.width, rt.height);
+    if (bloomA) {
+      const bw = Math.max(2, rt.width >> 1), bh = Math.max(2, rt.height >> 1);
+      bloomA.setSize(bw, bh); bloomB.setSize(bw, bh);
+      blurMat.uniforms.texel.value.set(1 / bw, 1 / bh);
+    }
   }
 
   function fxSetLook(o){
@@ -1060,13 +1159,16 @@ addEventListener('resize', ()=>{
       if (d.k1 != null) look.k1 = d.k1;
       if (d.k2 != null) look.k2 = d.k2;
       if (o.aberration != null) look.aberration = o.aberration;
+      if (o.bloom != null) look.bloom = o.bloom;
+      if (o.bloomThreshold != null) look.bloomThreshold = o.bloomThreshold;
       if (o.vignette != null) look.vignette = o.vignette;
       if (o.grain != null) look.grain = o.grain;
       if (o.flicker != null) look.flicker = o.flicker;
       syncLook();
     }
     return { k1: look.k1, k2: look.k2, aberration: look.aberration,
-             vignette: look.vignette, grain: look.grain, flicker: look.flicker };
+             vignette: look.vignette, grain: look.grain, flicker: look.flicker,
+             bloom: look.bloom, bloomThreshold: look.bloomThreshold };
   }
 
   /* Dynamic resolution. Only the offscreen scene buffer shrinks - pass 2
@@ -1976,9 +2078,15 @@ const LIGHT_DAY={bg:new THREE.Color(0x8fb6cf),fog:new THREE.Color(0x8fb6cf),fogD
   ambI:.9,ambC:new THREE.Color(0xcfdbe4),hemiI:.8,sunI:2.6,sunC:new THREE.Color(0xfff2dc),
   fillI:.95,fillC:new THREE.Color(0xdfe8f2),
   shaftC:new THREE.Color(0xe8d9b0),shaftO:.16,tubeK:.35};
+/* Night ambient was 1.15 - HIGHER than daylight's 0.9. A global flood that
+   strong washes out every shadow and every pool of light, which is why the
+   store read flat and grey instead of dark. Pulled right down so the ceiling
+   tubes and the emergency light actually carry the room, which is what makes
+   bodycam footage look like bodycam footage. tubeK stays at 1 so the
+   practicals are untouched. */
 const LIGHT_NIGHT={bg:new THREE.Color(0x070a0c),fog:new THREE.Color(0x0b1014),fogD:.026,
-  ambI:1.15,ambC:new THREE.Color(0x50606f),hemiI:.85,sunI:1.5,sunC:new THREE.Color(0x9fb4d8),
-  fillI:.34,fillC:new THREE.Color(0x8ea4c4),
+  ambI:.38,ambC:new THREE.Color(0x50606f),hemiI:.34,sunI:1.0,sunC:new THREE.Color(0x9fb4d8),
+  fillI:.20,fillC:new THREE.Color(0x8ea4c4),
   shaftC:new THREE.Color(0x6b82ab),shaftO:.14,tubeK:1};
 
 /* blob shadow texture (shared) */
@@ -4353,8 +4461,15 @@ function storeDressing(){
   }
   for(let i=0;i<8;i++){
     const c=new THREE.Mesh(dr_box,dr_boxMats[rint(0,3)]);
-    c.scale.set(rand(.45,.85),rand(.05,.11),rand(.4,.75));
-    c.position.set(rand(-19,19),.035,rand(-12.5,13));
+    /* y was pinned at .035 against a height of .05-.11, so half of these sank
+       through the floor and half hovered. And they were dropped anywhere in
+       the hall, including inside the shelf rows - floorSpot is the test the
+       rest of the clutter already uses. */
+    const ch=rand(.05,.11);
+    c.scale.set(rand(.45,.85),ch,rand(.4,.75));
+    const sp=(typeof floorSpot==='function')?floorSpot(-19,19,-12.5,13,.5):null;
+    if(!sp) continue;
+    c.position.set(sp[0],ch*.5,sp[1]);
     c.rotation.y=rand(0,6.3); scene.add(c);
   }
   { /* toppled shelf section */
@@ -10627,7 +10742,8 @@ if(location.hash.includes('shot')){
   setObjectiveState&&setObjectiveState('drive','done');
   setObjectiveState&&setObjectiveState('park','done');
   setObjectiveState&&setObjectiveState('enter','active');
-  window.fxSetLook&&fxSetLook({distort:{k1:.16,k2:.04},grain:.14,aberration:1.2,vignette:.42});
+  window.fxSetLook&&fxSetLook({distort:{k1:.16,k2:.04}, grain:.11, aberration:.45,
+                               vignette:.40, bloom:.60, bloomThreshold:1.0});
   if(location.hash.includes('drive')){
     G.setPhase('drive');
   }else{
