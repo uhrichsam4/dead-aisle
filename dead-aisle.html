@@ -428,6 +428,23 @@
 }
 
 
+
+/* emote wheel */
+#emote-wheel{position:fixed;inset:0;z-index:60;display:none;pointer-events:none;
+  background:radial-gradient(circle at 50% 50%,rgba(0,0,0,.42),rgba(0,0,0,.72))}
+#emote-wheel.on{display:block;pointer-events:auto}
+#emote-wheel .ew-ring{position:absolute;left:50%;top:50%;width:min(52vh,420px);height:min(52vh,420px);
+  transform:translate(-50%,-50%)}
+#emote-wheel .ew-slot{position:absolute;transform:translate(-50%,-50%);
+  width:104px;height:104px;border-radius:50%;cursor:pointer;
+  background:rgba(18,21,26,.92);border:2px solid rgba(246,212,52,.35);color:#e8e6e0;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  font:800 11px/1 "Helvetica Neue",Arial,sans-serif;letter-spacing:.08em;
+  transition:transform .12s ease,border-color .12s ease,background .12s ease}
+#emote-wheel .ew-slot i{font-style:normal;font-size:30px;line-height:1}
+#emote-wheel .ew-slot b{position:absolute;bottom:9px;right:11px;font-size:10px;color:#f6d434;opacity:.75}
+#emote-wheel .ew-slot:hover{transform:translate(-50%,-50%) scale(1.1);
+  border-color:#f6d434;background:rgba(40,36,16,.95)}
 </style>
 </head>
 <body>
@@ -4346,7 +4363,7 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
      throwable off the death screen and carried it into the next run, which
      left the player with no rifle. */
   const onFoot = playing && !paused && player.alive && (phase==='outside'||phase==='inside');
-  if(onFoot){
+  if(onFoot && !EMP.open){
     if(e.code==='KeyR') tryReload();
     if(e.code==='Digit1') selectWeapon(0);
     if(e.code==='Digit2') selectWeapon(1);
@@ -4354,6 +4371,14 @@ addEventListener('keydown',e=>{ keys[e.code]=true;
     if(e.code==='KeyQ')   selectWeapon((weaponIndex+1)%WEAPONS.length);
     if(e.code==='KeyF'){ if(heldItem) throwHeld(); else pickUp(nearestThrowable()); }
   }
+  if(onFoot && e.code==='KeyB'){ EMP.open?emoteWheelClose():emoteWheelOpen(); }
+  if(EMP.open){
+    if(e.code==='Escape'){ emoteWheelClose(); }
+    const n=/^Digit([1-9])$/.exec(e.code);
+    if(n){ const k=+n[1]-1; if(k<EMOTES.length){ emotePlay(k); } }
+  }
+  /* moving cancels an emote, same as every game that has them */
+  if(EMP.i!=null && (e.code==='KeyW'||e.code==='KeyA'||e.code==='KeyS'||e.code==='KeyD'||e.code==='Space')) emoteStop();
   if(e.code==='KeyM') toggleMute();
   if(e.code==='KeyN') parkSongToggle();
   if(e.code==='KeyE'&&phase==='drive'){ const on=radioToggle(); banner(on?'RADIO ON':'RADIO OFF',''); }
@@ -4887,7 +4912,10 @@ function gunUpdate(dt,now){
   gun.userData.adsT=lerp(gun.userData.adsT??0,t,clamp(dt*11,0,1));
   const a=gun.userData.adsT;
   if(vmLoaded){
-    vmGroup.visible=true;
+    /* this runs after emoteTickLocal, so it has to respect the emote itself -
+       otherwise the rifle is re-shown every frame and floats in front of the
+       third-person camera while the player is saluting */
+    vmGroup.visible=!emoteHiding();
     vmGroup.position.set(
       VM_ANCHOR.x + bx*2.2,
       VM_ANCHOR.y + by*2 - weapon.recoil*.003,
@@ -4897,7 +4925,7 @@ function gunUpdate(dt,now){
     /* The rifle keeps its own tuned camera-space pose (that is what actually
        reads on screen), but drifts toward the right hand by GUN_FOLLOW so the
        aim/fire/reload clips still visibly move it. */
-    gun.visible=true;
+    gun.visible=!emoteHiding();
     if(heldItem){ gun.visible=false; return; }   /* hands full */
     if(gunInHand){
       if(!gunCalibrated){ applyGunGrip(); gunCalibrated=true; }
@@ -7426,6 +7454,19 @@ function netOnData(c,raw){
       if(NET.mode==='host'&&NET.started) netSendTo(c,{t:'start'});
       break;
     }
+    case 'emote': {                               /* someone played an emote */
+      /* a relayed emote carries the original player's id; c.peer would be
+         whoever forwarded it, i.e. the host */
+      const pl=NET.players[d.from||c.peer];
+      if(pl) pl.em={i:emoteIndexOf(d.e), t:0};
+      /* clients only talk to the host, so without this relay an emote is seen
+         by the host alone and nobody else in the party */
+      if(NET.mode==='host'){
+        const s2=JSON.stringify({t:'emote', e:d.e, from:c.peer});
+        for(const p2 of netPeers()){ try{ if(p2.open&&p2.peer!==c.peer) p2.send(s2); }catch(e){} }
+      }
+      break;
+    }
     case 'skin': {                                /* someone changed outfit */
       const pl=NET.players[c.peer];
       if(pl){ pl.skin=d.s;
@@ -7738,7 +7779,7 @@ function netRenderTick(dt){
       const x=pl.p0.x+(pl.p1.x-pl.p0.x)*a;
       const y=pl.p0.y+(pl.p1.y-pl.p0.y)*a;
       const z=pl.p0.z+(pl.p1.z-pl.p0.z)*a;
-      _netV.set(x,y-1.7,z);
+      _netV.set(x,y-1.7+(o.userData.dropY||0),z);
       /* a big jump means a teleport (phase change, respawn) - do not glide */
       if(o.position.distanceToSquared(_netV)>36){
         o.position.copy(_netV);
@@ -7783,6 +7824,7 @@ function netRenderTick(dt){
       pl.lx=x; pl.lz=z;
     }
     if(pl.mixer)pl.mixer.update(dt);
+    if(pl.em && pl.em.i!=null && !emoteTick(o, pl.em, dt)) pl.em.i=null;
   }
   if(NET.mode!=='client')return;
 
@@ -7969,7 +8011,10 @@ function skinSelect(i){
       if(made&&made.obj){
         const parent=cur.parent;
         made.obj.position.copy(cur.position);
-        made.obj.rotation.copy(cur.rotation);
+        /* Only the facing carries over. Copying the whole rotation wiped the
+           up-axis correction skinMake had just applied for this rig, which is
+           why a model skin lay flat on the pad instead of standing on it. */
+        made.obj.rotation.y=cur.rotation.y;
         parent&&parent.add(made.obj);
         cur.removeFromParent();
         LOBBY.dolls[0]=made.obj;
@@ -8017,6 +8062,19 @@ function skinMake(idx){
       M.fit=1; M.drop=0;
       let sk0=null; M.proto.traverse(o=>{ if(!sk0&&o.isSkinnedMesh&&o.skeleton) sk0=o; });
       if(sk0&&sk0.skeleton.bones.length){
+        /* Measure the rig in the pose it will actually be SEEN in. This one's
+           rest pose and its clips disagree by 180 degrees - the clips carry a
+           root rotation the rest pose does not - so measuring the rest pose
+           stood the model on its head the moment the idle started playing.
+           Pose it with the clip the avatars will play, then measure. */
+        let _tm=null;
+        const _ic=(M.clips&&M.clips.length)
+          ? (M.clips.find(c=>/idle/i.test(c.name))||M.clips[0]) : null;
+        if(_ic){
+          _tm=new THREE.AnimationMixer(M.proto);
+          _tm.clipAction(_ic).play();
+          _tm.update(0);
+        }
         M.proto.updateMatrixWorld(true);
         /* updateMatrixWorld on the root is not enough here: the skeleton's
            bones hang off a node the loader has not resolved yet, so every one
@@ -8028,32 +8086,60 @@ function skinMake(idx){
            height. */
         const v=new THREE.Vector3();
         const lo=[Infinity,Infinity,Infinity], hi=[-Infinity,-Infinity,-Infinity];
+        let headB=null, hipsB=null;
         for(const b of sk0.skeleton.bones){
           b.updateWorldMatrix(true,false);
           b.getWorldPosition(v);
           const c=[v.x,v.y,v.z];
           for(let k=0;k<3;k++){ lo[k]=Math.min(lo[k],c[k]); hi[k]=Math.max(hi[k],c[k]); }
+          const n=(b.name||'').toLowerCase();
+          if(!headB && /head$/.test(n)) headB=b;
+          if(!hipsB && /(hips|pelvis)$/.test(n)) hipsB=b;
         }
         const span=[hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]];
         const up=span.indexOf(Math.max(...span));
         M.upAxis=up;                       /* 1 = already Y-up */
+        /* A span is sign-blind, and this rig's up turned out to be NEGATIVE z:
+           standing it with the same rotation a +z rig needs put the model on
+           its head. Take the direction from the skeleton - head above hips -
+           and fall back to assuming positive when a rig names them something
+           else. */
+        let sgn=1;
+        if(headB&&hipsB){
+          const a1=new THREE.Vector3(), b1=new THREE.Vector3();
+          headB.getWorldPosition(a1); hipsB.getWorldPosition(b1);
+          const d=[a1.x-b1.x, a1.y-b1.y, a1.z-b1.z][up];
+          if(d<0) sgn=-1;
+        }
+        M.upSign=sgn;
         /* bones stop at the neck joint, not the crown - the same 1.07 head
            allowance attachHostileModel uses */
         const natural=span[up]*1.07;
-        if(natural>0.2){ M.fit=SKIN_TARGET_H/natural; M.drop=lo[up]*M.fit; }
-        M.dbg={bones:sk0.skeleton.bones.length, up:['x','y','z'][up],
-               span:span.map(n=>+n.toFixed(2)), natural:+natural.toFixed(3)};
+        /* the feet are whichever end of the up axis points down once sgn is
+           applied */
+        if(natural>0.2){ M.fit=SKIN_TARGET_H/natural; M.drop=(sgn>0?lo[up]:-hi[up])*M.fit; }
+        M.dbg={bones:sk0.skeleton.bones.length, up:(sgn<0?'-':'')+['x','y','z'][up],
+               span:span.map(n=>+n.toFixed(2)), natural:+natural.toFixed(3),
+               posed:!!_ic};
+        if(_tm){ _tm.stopAllAction(); _tm.uncacheRoot(M.proto); }
       }
       console.info('skin model fit:', sk.id, 'scale', M.fit.toFixed(3), 'drop', M.drop.toFixed(2),
                    JSON.stringify(M.dbg||{note:'no skinned mesh found'}));
     }
-    /* stand a Z-up rig on its feet before fitting it */
-    if(M.upAxis===2) a.rotation.x=-Math.PI/2;
-    else if(M.upAxis===0) a.rotation.z=Math.PI/2;
+    /* stand a Z-up rig on its feet before fitting it, the right way up */
+    const _s=(M.upSign===undefined?1:M.upSign);
+    if(M.upAxis===2)      a.rotation.x=-_s*Math.PI/2;
+    else if(M.upAxis===0) a.rotation.z= _s*Math.PI/2;
+    else if(_s<0)         a.rotation.x= Math.PI;      /* Y-up but inverted */
     a.scale.setScalar(M.fit);
     a.position.y=-M.drop;
+    /* Anything that repositions this avatar has to preserve the lift, or the
+       model stands 1.05 m underground. Carry it on the object so callers do
+       not have to know which skin they were handed. */
+    a.userData.dropY=-M.drop;
     a.userData.skin=sk.id;
     a.userData.skinFitted=true;
+    a.userData.emUp=M.upAxis;   /* emotes solve against this rig's up axis */
     return {obj:a, clips:M.clips};
   }
   if(!vmModel) return null;
@@ -8067,6 +8153,270 @@ function skinIdleClip(clips){
   if(!clips||!clips.length) return null;
   return clips.find(c=>/idle/i.test(c.name)) || clips.find(c=>/aim/i.test(c.name)) || clips[0];
 }
+/* ---------- EMOTES ---------------------------------------------------------
+   Neither rig ships an emote clip: the operator puppet animates idle/walk/run/
+   aim/fire/reload/crouch, and the suit model's Mixamo set is all locomotion.
+   So an emote is posed here rather than played back.
+
+   The two rigs disagree twice over. On names, which is trivial (Forearm_R
+   against mixamorigRightForeArm), and on REST POSE, which is not: the operator
+   rests in an A-pose and the Mixamo rig near a T. One fixed set of local
+   quaternions would therefore read correctly on one rig and dislocated on the
+   other. So a key names the direction, in character space, that the bone
+   should point along, and the local rotation is solved per skeleton from that
+   skeleton's own bind pose. One definition stays correct on any rig - which
+   also means the next imported model gets emotes for free. */
+const EM_MAP={
+  hips :[/^mixamorighips$/i,          /^hips$/i],
+  spine:[/^mixamorigspine$/i,         /^spine$/i],
+  chest:[/^mixamorigspine2$/i,        /^chest$/i],
+  neck :[/^mixamorigneck$/i,          /^neck$/i],
+  head :[/^mixamorighead$/i,          /^head$/i],
+  armR :[/^mixamorigrightarm$/i,      /^upperarm_r$/i],
+  foreR:[/^mixamorigrightforearm$/i,  /^forearm_r$/i],
+  handR:[/^mixamorigrighthand$/i,     /^hand_r$/i],
+  armL :[/^mixamorigleftarm$/i,       /^upperarm_l$/i],
+  foreL:[/^mixamorigleftforearm$/i,   /^forearm_l$/i],
+  handL:[/^mixamoriglefthand$/i,      /^hand_l$/i],
+};
+/* which bone each aimed bone points AT - its own direction is the offset to
+   this child in the bind pose */
+const EM_CHILD={armR:'foreR', foreR:'handR', armL:'foreL', foreL:'handL',
+                chest:'neck', spine:'chest', hips:'spine'};
+/* parents before children: the solve reads the chain's current local
+   rotations, so a bone must be posed after everything above it */
+const EM_ORDER=['hips','spine','chest','neck','head','armR','foreR','armL','foreL'];
+
+const _emQ=new THREE.Quaternion(), _emQ2=new THREE.Quaternion();
+const _emV=new THREE.Vector3(), _emE=new THREE.Euler();
+
+/* Build (once per avatar) the name->bone table, each aimed bone's bind-pose
+   direction, and the rotation taking character space into this rig's local
+   space. skinMake already measured which axis is up; reuse that rather than
+   assuming glTF's promised Y. */
+function emoteRig(root){
+  if(root.userData.emRig!==undefined) return root.userData.emRig;
+  const found={};
+  root.traverse(o=>{
+    if(!o.isBone && !/bone/i.test(o.type||'')){ /* operator rig is plain nodes */ }
+    for(const k in EM_MAP){
+      if(found[k]) continue;
+      if(EM_MAP[k].some(re=>re.test(o.name||''))) found[k]=o;
+    }
+  });
+  if(!found.armR||!found.foreR){ root.userData.emRig=null; return null; }
+  const rig={b:found, v0:{}};
+  for(const k in EM_CHILD){
+    const b=found[k], c=found[EM_CHILD[k]];
+    if(!b||!c) continue;
+    const v=c.position.clone();
+    if(v.lengthSq()<1e-9) continue;
+    rig.v0[k]=v.normalize();
+  }
+  /* character space is x=right, y=up, z=forward; map it onto whatever this
+     rig calls up */
+  const up=root.userData.emUp;
+  rig.charQ=new THREE.Quaternion();
+  if(up===2)      rig.charQ.setFromAxisAngle(new THREE.Vector3(1,0,0),  Math.PI/2);
+  else if(up===0) rig.charQ.setFromAxisAngle(new THREE.Vector3(0,0,1), -Math.PI/2);
+  root.userData.emRig=rig;
+  return rig;
+}
+/* rotation from the avatar root down to (and including) this bone, built from
+   the live local quaternions - so posing a parent first is picked up here
+   without touching a single world matrix */
+function emChain(bone, root, out){
+  out.identity();
+  const st=[];
+  for(let o=bone; o && o!==root; o=o.parent) st.push(o);
+  for(let i=st.length-1;i>=0;i--) out.multiply(st[i].quaternion);
+  return out;
+}
+/* aim one bone along dir (character space), blended in by w */
+function emAim(rig, root, key, dir, w){
+  const b=rig.b[key], v0=rig.v0[key];
+  if(!b||!v0||w<=0) return;
+  _emV.set(dir[0],dir[1],dir[2]);
+  if(_emV.lengthSq()<1e-9) return;
+  _emV.normalize().applyQuaternion(rig.charQ);          /* -> rig local space */
+  emChain(b.parent, root, _emQ2).invert();              /* -> parent's space  */
+  _emV.applyQuaternion(_emQ2).normalize();
+  _emQ.setFromUnitVectors(v0,_emV);
+  b.quaternion.slerp(_emQ,w);
+}
+function emRot(rig, key, e, w){
+  const b=rig.b[key]; if(!b||w<=0) return;
+  _emE.set(e[0],e[1],e[2]);
+  _emQ.setFromEuler(_emE);
+  b.quaternion.slerp(_emQ,w);
+}
+
+/* Each pose(t,u) returns {aim:{bone:[x,y,z]}, rot:{bone:[x,y,z]}} in character
+   space. dur is the whole emote; loop emotes repeat until cancelled. */
+const EMOTES=[
+  {id:'salute', name:'SALUTE', icon:'✋', dur:2.8, loop:false,
+   pose:(t,u)=>{
+     /* up to the brow over the first third, held, then cut away */
+     const k=clamp(u/.28,0,1)*(1-clamp((u-.78)/.22,0,1));
+     return {aim:{ armR:[.62,.16,.30], foreR:[-.30,.86,.28] },
+             rot:{ head:[-.06,0,0], chest:[-.03,0,0] }, k};
+   }},
+  {id:'wave', name:'WAVE', icon:'👋', dur:2.6, loop:false,
+   pose:(t,u)=>{
+     const k=clamp(u/.2,0,1)*(1-clamp((u-.8)/.2,0,1));
+     const s=Math.sin(t*7.5);
+     return {aim:{ armR:[.66,.52,.16], foreR:[.22+s*.34,.88,.10] },
+             rot:{ head:[0,.10,0] }, k};
+   }},
+  {id:'clap', name:'CLAP', icon:'👏', dur:2.8, loop:false,
+   pose:(t,u)=>{
+     const k=clamp(u/.18,0,1)*(1-clamp((u-.82)/.18,0,1));
+     const s=(Math.sin(t*9)*.5+.5);           /* 0 apart .. 1 together */
+     const g=.10+s*.16;
+     return {aim:{ armR:[.34,-.30,.62], foreR:[-g,.10,.94],
+                   armL:[-.34,-.30,.62], foreL:[ g,.10,.94] },
+             rot:{ head:[-.04,0,0] }, k};
+   }},
+  {id:'point', name:'POINT', icon:'👉', dur:2.2, loop:false,
+   pose:(t,u)=>{
+     const k=clamp(u/.22,0,1)*(1-clamp((u-.78)/.22,0,1));
+     return {aim:{ armR:[.30,-.06,.86], foreR:[.16,-.02,.98] },
+             rot:{ head:[0,-.12,0] }, k};
+   }},
+  {id:'cheer', name:'CHEER', icon:'🙌', dur:2.6, loop:false,
+   pose:(t,u)=>{
+     const k=clamp(u/.18,0,1)*(1-clamp((u-.82)/.18,0,1));
+     const s=Math.sin(t*8)*.10;
+     return {aim:{ armR:[.42,.88,.10], foreR:[.26+s,.94,.08],
+                   armL:[-.42,.88,.10], foreL:[-.26-s,.94,.08] },
+             rot:{ head:[-.12,0,0], chest:[-.06,0,0] }, k};
+   }},
+  {id:'flex', name:'FLEX', icon:'💪', dur:2.8, loop:false,
+   pose:(t,u)=>{
+     const k=clamp(u/.24,0,1)*(1-clamp((u-.78)/.22,0,1));
+     const s=Math.sin(t*4)*.05;
+     return {aim:{ armR:[.90,.10+s,.06], foreR:[.34,.90,.16],
+                   armL:[-.90,.10+s,.06], foreL:[-.34,.90,.16] },
+             rot:{ chest:[-.05,0,0], head:[-.04,0,0] }, k};
+   }},
+];
+function emoteIndexOf(id){ const k=EMOTES.findIndex(e=>e.id===id); return k<0?0:k; }
+
+/* Drive one avatar's emote state. Called every frame AFTER its mixer has
+   written the base pose, so the emote lands on top of idle/walk rather than
+   being overwritten by it. Returns false when the emote has finished. */
+function emoteTick(root, st, dt){
+  if(!root||!st||st.i==null) return false;
+  const def=EMOTES[st.i]; if(!def) return false;
+  st.t=(st.t||0)+dt;
+  const u=st.t/def.dur;
+  if(u>=1 && !def.loop) return false;
+  const rig=emoteRig(root); if(!rig) return false;
+  const p=def.pose(st.t, def.loop?(u%1):u);
+  const w=clamp(p.k==null?1:p.k,0,1)*clamp(st.w==null?1:st.w,0,1);
+  if(w<=0.001) return true;
+  for(const key of EM_ORDER){
+    if(p.aim&&p.aim[key]) emAim(rig,root,key,p.aim[key],w);
+    else if(p.rot&&p.rot[key]) emRot(rig,key,p.rot[key],w);
+  }
+  return true;
+}
+window.__emotes=()=>EMOTES.map(e=>e.id);
+
+/* ---------- emote playback for the local player ----------------------------
+   The game is first person, so an emote you cannot see is pointless: playing
+   one pulls the camera back behind the shoulder for its duration and hides the
+   viewmodel, the way Fortnite does it. The third-person body is built from the
+   same skinMake path as everyone else's, so it wears whatever skin is picked. */
+const EMP={i:null, t:0, body:null, skin:null, cam:0, open:false};
+function emoteHiding(){ return EMP.i!=null || EMP.cam>0.02; }
+function emoteBody(){
+  /* rebuild if the outfit changed since the last emote */
+  if(EMP.body && EMP.skin===SKIN_I) return EMP.body;
+  if(EMP.body){ EMP.body.removeFromParent(); EMP.body=null; EMP.mixer=null; }
+  const made=skinMake(SKIN_I)||skinMake(0);
+  if(!made||!made.obj) return null;
+  EMP.body=made.obj; EMP.skin=SKIN_I;
+  scene.add(EMP.body);
+  EMP.mixer=new THREE.AnimationMixer(EMP.body);
+  let clip=skinIdleClip(made.clips);
+  if(!clip&&vmMixer){
+    const names=Object.keys(vmActions);
+    const idle=names.find(n=>/idle/i.test(n))||names[0];
+    clip=vmMixer._actions.map(a=>a._clip).find(c=>c.name===idle);
+  }
+  if(clip) EMP.mixer.clipAction(clip).play();
+  return EMP.body;
+}
+function emotePlay(i){
+  if(!playing||paused||!player.alive) return;
+  if(phase!=='outside'&&phase!=='inside') return;
+  i=((i|0)%EMOTES.length+EMOTES.length)%EMOTES.length;
+  if(!emoteBody()) return;
+  EMP.i=i; EMP.t=0;
+  emoteWheelClose();
+  try{ if(NET.mode==='host'||NET.mode==='client') netSend({t:'emote', e:EMOTES[i].id}); }catch(e){}
+}
+function emoteStop(){ EMP.i=null; }
+function emoteTickLocal(dt){
+  window.__EMP=EMP;              /* module-scoped otherwise; probes need it */
+  /* ease the camera out and back rather than cutting */
+  const want=(EMP.i!=null)?1:0;
+  EMP.cam+=(want-EMP.cam)*clamp(dt*6,0,1);
+  if(EMP.cam<.002){
+    EMP.cam=0;
+    if(EMP.body) EMP.body.visible=false;
+    if(EMP.hid){ EMP.hid=false; vmGroup.visible=true; gun.visible=true; }
+    return;
+  }
+  if(!EMP.hid){ EMP.hid=true; vmGroup.visible=false; gun.visible=false; }
+  const body=EMP.body; if(!body) return;
+  body.visible=true;
+  body.position.set(player.pos.x, player.pos.y-1.7+(body.userData.dropY||0), player.pos.z);
+  body.rotation.y=player.yaw+Math.PI;
+  if(EMP.mixer) EMP.mixer.update(dt);
+  if(EMP.i!=null && !emoteTick(body,EMP,dt)) EMP.i=null;
+  /* pull back over the right shoulder */
+  const d=2.6*EMP.cam, up=.35*EMP.cam;
+  const sx=Math.sin(player.yaw), cz=Math.cos(player.yaw);
+  camera.position.x+= sx*d + cz*.45*EMP.cam;
+  camera.position.z+= cz*d - sx*.45*EMP.cam;
+  camera.position.y+= up;
+  camera.lookAt(player.pos.x, player.pos.y-.35, player.pos.z);
+}
+/* ---------- the wheel ---------- */
+function emoteWheelBuild(){
+  if(document.getElementById('emote-wheel')) return;
+  const w=document.createElement('div'); w.id='emote-wheel';
+  w.innerHTML='<div class="ew-ring"></div>';
+  const ring=w.firstChild;
+  EMOTES.forEach((e,i)=>{
+    const a=(i/EMOTES.length)*Math.PI*2 - Math.PI/2;
+    const b=document.createElement('button');
+    b.className='ew-slot'; b.dataset.i=i;
+    b.style.left=(50+Math.cos(a)*38)+'%';
+    b.style.top =(50+Math.sin(a)*38)+'%';
+    b.innerHTML='<i>'+e.icon+'</i><span>'+e.name+'</span><b>'+(i+1)+'</b>';
+    b.addEventListener('click',()=>emotePlay(i));
+    ring.appendChild(b);
+  });
+  document.body.appendChild(w);
+}
+function emoteWheelOpen(){
+  if(!playing||paused||!player.alive) return;
+  if(phase!=='outside'&&phase!=='inside') return;
+  emoteWheelBuild();
+  EMP.open=true;
+  document.getElementById('emote-wheel').classList.add('on');
+  try{ document.exitPointerLock&&document.exitPointerLock(); }catch(e){}
+}
+function emoteWheelClose(){
+  EMP.open=false;
+  const w=document.getElementById('emote-wheel');
+  if(w) w.classList.remove('on');
+}
+window.__emotePlay=emotePlay;
+
 /* the markup is above this script, so the row can be built immediately */
 skinBuildUI();
 
@@ -8126,13 +8476,21 @@ function lobbyStageApply(){
   camera.lookAt(LOBBY.camLook);
   camera.fov=52; camera.updateProjectionMatrix();
 }
+function lobbyPlayEmote(i){ LOBBY.em={i:((i|0)%EMOTES.length+EMOTES.length)%EMOTES.length, t:0}; }
 function lobbyTick(dt){
   window.LOBBY=LOBBY;            /* module-scoped otherwise; probes need it */
+  window.__playEmote=lobbyPlayEmote;
   document.body.classList.add('in-lobby');
   if(!LOBBY.built){ lobbyBuild(); return; }
   LOBBY.group.visible=true;
   LOBBY.t+=dt;
   for(const m of LOBBY.mixers) m.update(dt);
+  /* the emote pose goes on AFTER the mixers have written the base idle, or the
+     clip overwrites it every frame */
+  if(LOBBY.em && LOBBY.em.i!=null){
+    const doll=LOBBY.dolls&&LOBBY.dolls[0];
+    if(!doll || !emoteTick(doll, LOBBY.em, dt)) LOBBY.em.i=null;
+  }
   for(const a of LOBBY.avatars){
     const on=!!LOBBY.slots[a.i].name || a.i===0;
     a.obj.visible=on; a.ring.visible=true;
@@ -9868,6 +10226,10 @@ function loop(){
       shake=Math.max(0,shake-dt*2.4);
     }
     if(window.__dust){ window.__dust.rotation.y+=dt*.004; }
+    /* last thing before the cameras sync: the weapon update and the shake both
+       write camera and viewmodel state after the movement step, so an earlier
+       call here was overwritten every frame and never reached the screen */
+    emoteTickLocal(dt);
     vmCamSync();
     /* slide the shadow frustum to wherever the action is */
     {
