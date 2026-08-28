@@ -678,10 +678,18 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const lerp=(a,b,t)=>a+(b-a)*t;
 
 const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'), antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+/* dpr 2 is FOUR times the pixels of dpr 1, which makes it the largest single
+   multiplier on fragment cost in the frame. Capped at 1.5: through a bodycam
+   chain with grain, vignette and barrel distortion the difference is very hard
+   to see, and it buys back ~44% of the pixels on every Retina panel. The
+   quality slider can still push it higher. */
+const DPR_CAP=1.5;
+renderer.setPixelRatio(Math.min(devicePixelRatio,DPR_CAP));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+/* PCFSoft takes many more taps per fragment than PCF for a slightly softer
+   edge. Reserved for the top of the quality slider. */
+renderer.shadowMap.type = THREE.PCFShadowMap;
 /* Every renderer.render() rebuilds the shadow map. There are two scene passes
    per frame - the world, then the view model through its own camera - so the
    map was being rebuilt TWICE for one frame's worth of shadows, and the view
@@ -730,6 +738,8 @@ function settingsApply(){
     /* let the render-quality slider drive shadow resolution too */
     try{
       const want = SETTINGS.res>=150 ? 4096 : SETTINGS.res>=90 ? 2048 : 1024;
+      const wantType = SETTINGS.res>=125 ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+      if(renderer.shadowMap.type!==wantType){ renderer.shadowMap.type=wantType; }
       if(moon.shadow.mapSize.x!==want){
         moon.shadow.mapSize.set(want,want);
         if(moon.shadow.map){ moon.shadow.map.dispose(); moon.shadow.map=null; }
@@ -738,7 +748,7 @@ function settingsApply(){
     /* >100% is supersampling: render above the display's pixel count and let
        the browser downsample. Hard-capped at 4x so a slider drag cannot ask
        for a buffer the GPU refuses to allocate. */
-    renderer.setPixelRatio(Math.min(Math.min(devicePixelRatio,2)*(SETTINGS.res/100), 4));
+    renderer.setPixelRatio(Math.min(Math.min(devicePixelRatio,DPR_CAP)*(SETTINGS.res/100), 3));
     /* The scene renders into the postfx target, not straight to the canvas.
        fxResize was only wired to the window resize event, so moving the
        quality slider changed the canvas and left the target at its old size -
@@ -1005,6 +1015,7 @@ addEventListener('resize', ()=>{
       gl_FragColor = vec4(s, 1.0);
     }`;
   let bloomA=null, bloomB=null, brightMat=null, blurMat=null, fxQuad=null;
+  const BLOOM_ITER = 1;
 
   function fxInit(){
     if (ready) return;
@@ -1021,9 +1032,11 @@ addEventListener('resize', ()=>{
          the ACES curve in the quad pass rolls them off */
       type: THREE.HalfFloatType,
       colorSpace: THREE.LinearSRGBColorSpace,
-      /* the canvas' own antialias:true does nothing once the scene renders
-         into an RT; this is the only MSAA in the pipeline, so it earns 4 */
-      samples: 4,
+      /* The canvas' own antialias:true does nothing once the scene renders
+         into an RT, so this is the only MSAA in the pipeline. 4x on a
+         half-float target is not cheap though, so it is tied to the render
+         quality slider rather than always on. */
+      samples: (typeof SETTINGS!=='undefined' && SETTINGS.res>=125) ? 4 : 2,
     });
     rt.texture.minFilter = THREE.LinearFilter;
     rt.texture.magFilter = THREE.LinearFilter;
@@ -1094,7 +1107,8 @@ addEventListener('resize', ()=>{
     u.exposure.value = renderer.toneMappingExposure;
 
     /* PASS 1: scene -> RT (linear HDR, no tonemap/OETF per r160 RT rules) */
-    renderer.shadowMap.needsUpdate = true;      /* exactly one rebuild a frame */
+    /* was unconditional: a full rebuild of every caster, every frame */
+    renderer.shadowMap.needsUpdate = (typeof shadowsWanted==='function') ? shadowsWanted() : true;
     renderer.setRenderTarget(rt);
     renderer.render(scene, camera);
     /* PASS 1b: view model over the top, own narrower FOV, fresh depth */
@@ -1118,7 +1132,9 @@ addEventListener('resize', ()=>{
       renderer.setRenderTarget(bloomA);
       renderer.render(fxScene, fxCam);
       fxQuad.material = blurMat;
-      for (let i = 0; i < 2; i++) {
+      /* one iteration, not two: the second pass widened the glow slightly and
+         cost two more fullscreen draws a frame for it */
+      for (let i = 0; i < BLOOM_ITER; i++) {
         blurMat.uniforms.tSrc.value = bloomA.texture;
         blurMat.uniforms.dir.value.set(1, 0);
         renderer.setRenderTarget(bloomB);
@@ -1279,6 +1295,26 @@ function cullUpdate(dt){
   }
 }
 
+/* Characters are ~100 small rigid parts each (head_shell, helmet, boots,
+   thighs...), and every avatar path turned frustum culling OFF on all of them.
+   Measured: 1,462 meshes submitted every frame regardless of where the camera
+   was looking. The hostiles were fixed this way already; this is the same
+   treatment for the rest. Disabling culling is only actually necessary for
+   SKINNED meshes, whose bounds are computed in bind space - and even those are
+   fine once the bounding sphere is inflated past anything the animation can
+   reach. */
+function cullFriendly(root, radius){
+  root.traverse(o=>{
+    if(!o.isMesh && !o.isSkinnedMesh) return;
+    o.frustumCulled=true;
+    if(o.geometry){
+      if(!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      if(o.geometry.boundingSphere)
+        o.geometry.boundingSphere.radius=Math.max(o.geometry.boundingSphere.radius, radius||1.6);
+    }
+  });
+}
+
 /* ---- point lights are per-fragment on every lit material in range; keep
    only the handful near the player switched on ---- */
 const MANAGED_LIGHTS=[];
@@ -1294,17 +1330,43 @@ function lightRegister(l,radius){
   return l;
 }
 let _lightT=0;
+/* Keep EXACTLY this many point lights live. Two reasons it is a fixed count
+   rather than a radius test:
+
+   1. Setting intensity=0 saved nothing. three bakes NUM_POINT_LIGHTS into the
+      shader from the count of VISIBLE lights, so a zero-intensity light is
+      still in the array and every lit fragment still evaluates its distance,
+      attenuation and falloff before multiplying by zero. Only visible=false
+      takes it out of the shader.
+   2. But a varying count means a new program every time it changes, and a
+      shader recompile mid-fight is a visible hitch. Holding the count CONSTANT
+      means one program, compiled once, and the per-fragment lighting cost is
+      bounded by this number instead of by how many lights the level has. */
+const LIGHT_BUDGET=6;
+const _lightRank=[];
 function managedLightsUpdate(dt){
   _lightT-=dt; if(_lightT>0)return;
   _lightT=.25;
   const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
   const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  _lightRank.length=0;
   for(const m of MANAGED_LIGHTS){
-    const d=Math.hypot(px-m.wx, pz-m.wz);
-    const on=d<m.r;
+    m.d=Math.hypot(px-m.wx, pz-m.wz);
+    _lightRank.push(m);
+  }
+  _lightRank.sort((a,b)=>a.d-b.d);
+  const k=Math.min(LIGHT_BUDGET,_lightRank.length);
+  for(let i=0;i<_lightRank.length;i++){
+    const m=_lightRank[i];
+    /* inside the budget AND actually in range - a distant light still counts
+       against the budget slot so the program stays stable, but contributes
+       nothing */
+    const near=i<k;
+    const on=near && m.d<m.r;
     m.on=on;                       /* the tube flicker loop reads this */
-    if(on && m.l.intensity===0) m.l.intensity=m.base;
-    else if(!on && m.l.intensity!==0) m.l.intensity=0;
+    if(m.l.visible!==near) m.l.visible=near;
+    const want=on?m.base:0;
+    if(m.l.intensity!==want) m.l.intensity=want;
   }
 }
 
@@ -1399,11 +1461,30 @@ const _texL=new THREE.TextureLoader();
    clone costs one JS object and zero GPU bytes, while repeat/colorSpace stay
    per-caller. Keyed on the relevel params too, since those mutate the bitmap. */
 const _texCache=new Map();
+/* Every texture starts life holding this, so one is never bound to a draw call
+   without an image. That bind is what produced six "Texture marked for update
+   but no image data found" warnings a session, and the object rendered
+   untextured until the file landed. */
+const _texBlank=(()=>{
+  const cv=document.createElement('canvas'); cv.width=cv.height=1;
+  const cx=cv.getContext('2d'); cx.fillStyle='#7f7f7f'; cx.fillRect(0,0,1,1);
+  return cv;
+})();
+const _texClones=new Map();          /* cache key -> clones awaiting the image */
 function surfaceTex(url,repX,repY,srgb,level){
   const key=url+'|'+(level?JSON.stringify(level):'');
   let base=_texCache.get(key);
   if(!base){
-    base=_texL.load(url, (tx)=>{ if(level) relevel(tx,level); }, undefined, ()=>{});
+    const waiting=[]; _texClones.set(key,waiting);
+    base=_texL.load(url, (tx)=>{
+      if(level) relevel(tx,level);
+      /* Texture.clone() copies `image` BY VALUE at clone time, so any clone
+         taken before the file arrived held undefined and would have stayed
+         blank for the whole session. Push the real image out to them. */
+      for(const c of waiting){ c.image=tx.image; c.needsUpdate=true; }
+      waiting.length=0;
+    }, undefined, ()=>{});
+    base.image=_texBlank; base.needsUpdate=true;
     base.wrapS=base.wrapT=THREE.RepeatWrapping;
     base.anisotropy=8;
     _texCache.set(key,base);
@@ -1418,6 +1499,10 @@ function surfaceTex(url,repX,repY,srgb,level){
   t.anisotropy=8;
   if(srgb!==false) t.colorSpace=THREE.SRGBColorSpace;
   t.needsUpdate=true;
+  /* if the source has not landed yet this clone is holding the blank, so
+     register it for the hand-off above */
+  const w=_texClones.get(key);
+  if(w && (!base.image || base.image===_texBlank)) w.push(t);
   return t;
 }
 /* Some of the scanned PBR albedos are photographed dark - the brick wall
@@ -3945,7 +4030,7 @@ function carWheelsBind(m){
   const w={};
   m.traverse(o=>{ if(/^wheel_(FL|FR|BL|BR)/.test(o.name||'')) w[o.name.slice(0,8)]=o; });
   const found=Object.keys(w).map(k=>w[k]);
-  if(!found.length){ console.info('car wheels: none found in car.glb'); return; }
+  if(!found.length){ console.info('car wheels: none found in car2.glb'); return; }
   /* Each wheel node carries whatever orientation the glTF Y-up conversion
      baked into it, so rolling its own rotation.x span it about an arbitrary
      axis - it looked like the wheel was turning on the spot. Hang each one
@@ -4695,7 +4780,10 @@ let everLocked=false, pausedAt=0;
 document.addEventListener('pointerlockchange',()=>{
   locked = document.pointerLockElement===document.body;
   if(locked){ everLocked=true; }
-  if(!locked && playing && player.alive && everLocked){
+  /* The emote wheel releases the mouse ON PURPOSE so a slot can be clicked.
+     Without this guard that read as the player leaving, so pressing B threw the
+     pause overlay straight over the wheel and made it unusable. */
+  if(!locked && playing && player.alive && everLocked && !(typeof EMP!=='undefined' && EMP.open)){
     paused=true; pauseEl.classList.remove('hidden');
     /* these are looping sources driven from the frame loop, which stops
        ticking while paused - so they held their last state and droned on */
@@ -4852,6 +4940,10 @@ function damagePlayer(dmg, fromPos){
   player.hp-=dmg; player.regenDelay=3.6;
   adren=1;
   SFX.playerHit.play(rand(.96,1.05));   /* falls back to Audio.hurt() */
+  if(SFX.say){
+    if(player.hp<35) SFX.say('low_hp',9);
+    else if(Math.random()<.30) SFX.say('hit',5);
+  }
   shake=Math.max(shake,.5);
   dmgFlash=clamp((1-player.hp/100)+.35,0,1);
   if(player.hp<=0){ die(); }
@@ -5073,6 +5165,7 @@ const gunModels={};
 let akModel=null;
 function selectWeapon(i){
   if(!WEAPONS[i])return;
+  if(weaponIndex!==i){ try{ SFX.gun.draw.play(rand(.95,1.06)); }catch(e){} }
   weaponIndex=i;
   const w=WEAPONS[i];
   for(const id in gunModels) gunModels[id].visible=(id===w.id);
@@ -5417,6 +5510,16 @@ function worldHit(h, dir, dmg){
   const kind=brk?brk.userData.brk.def.kind:'concrete';
   impactSpark(h.point, nrm);
   bulletHole(h.point, nrm, kind);
+  /* worldHit already knows what the round landed on, so the impact can sound
+     like that material instead of one generic tick. Quieter with distance. */
+  try{
+    const set=SFX.impact[kind==='crate'?'wood':(SFX.impact[kind]?kind:'concrete')];
+    if(set){
+      const d=h.point.distanceTo(camera.position);
+      const v=clamp(1-d/26,0,1);
+      if(v>.04) set.play(rand(.92,1.09), v*.55);
+    }
+  }catch(e){}
   if(!brk)return;
   const b=brk.userData.brk;
   b.hp-=dmg;
@@ -7159,6 +7262,10 @@ function setPhase(p){
 function onCarParked(){
   if(phase!=='drive')return;
   setPhase('parking');
+  try{ SFX.car.handbrake.play(1); }catch(e){}
+  setTimeout(()=>{ try{ SFX.car.doorOpen.play(1); }catch(e){} }, 700);
+  setTimeout(()=>{ try{ SFX.car.doorClose.play(1); }catch(e){} }, 1700);
+  SFX.say&&SFX.say('parked',6);
   lotCrowdScatter&&lotCrowdScatter();   /* panic first, wake later */
   setObjectiveState&&setObjectiveState('drive','done');
   setObjectiveState&&setObjectiveState('park','done');
@@ -7168,7 +7275,10 @@ function onCarParked(){
     goproIntro(()=>{
       goproSet(true);
       streamStart();
+      try{ SFX.gear.goproOn.play(1); }catch(e){}
+      try{ SFX.gear.strap.play(1); }catch(e){}
       SFX.deploy.play();
+      SFX.say&&SFX.say('camera_live',6);
       if(mission.act===2) player.pos.set(ACT_OFF+11.5,1.7,34.5);
       else                player.pos.set(8.2,1.7,22.6);
       player.vel.set(0,0,0);
@@ -7321,6 +7431,7 @@ function missionUpdate(dt){
         setObjectiveState&&setObjectiveState('rescue','done');
         setObjectiveState&&setObjectiveState('extract','active');
         banner('ALL CLEAR','WALK THE SURVIVORS OUT THE FRONT DOORS');
+        SFX.say&&SFX.say('all_survivors',5);
       }
     }
   }
@@ -8321,7 +8432,8 @@ SKINS.filter(s=>s.glb).forEach(sk=>{
   gltfLoad(sk.glb,(g)=>{
     const proto=g.scene;
     proto.traverse(o=>{ if(o.isMesh||o.isSkinnedMesh){
-      o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+      o.castShadow=true; o.receiveShadow=true; } });
+    cullFriendly(proto, 2.0);
     SKIN_MODELS[sk.id]={proto, clips:g.animations||[]};
     console.info('skin model ready:', sk.id, (g.animations||[]).map(c=>c.name).join(','));
   }, undefined, ()=>console.info(sk.glb+' not reachable - skin unavailable'));
@@ -8451,7 +8563,8 @@ function skinMake(idx){
     if(!M||!M.proto) return null;
     const a=skeletonClone(M.proto);
     a.traverse(o=>{ o.visible=true; o.layers.set(0);
-      if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+      if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.receiveShadow=true; } });
+    cullFriendly(a, 2.0);
     /* A supplied rig arrives at whatever size and origin its author used - the
        Mixamo one is 2.30 m with its feet a metre below the origin, which in
        game is a giant sunk into the floor. Measure the SKELETON (glTF stores a
@@ -8811,9 +8924,15 @@ function emoteWheelOpen(){
   try{ document.exitPointerLock&&document.exitPointerLock(); }catch(e){}
 }
 function emoteWheelClose(){
+  if(!EMP.open) return;
   EMP.open=false;
   const w=document.getElementById('emote-wheel');
   if(w) w.classList.remove('on');
+  /* take the mouse back, or the player is left with no look control and one
+     stray click away from the pause overlay */
+  if(playing && !paused && player.alive){
+    try{ document.body.requestPointerLock&&document.body.requestPointerLock(); }catch(e){}
+  }
 }
 window.__emotePlay=emotePlay;
 
@@ -8825,7 +8944,8 @@ function lobbyAvatar(){
   const a=skeletonClone(vmModel);
   /* the viewmodel hides the head so it never blocks the camera - the lobby
      doll is seen from outside, so put it back */
-  a.traverse(o=>{ o.visible=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; o.frustumCulled=false; } });
+  a.traverse(o=>{ o.visible=true; if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+  cullFriendly(a, 1.8);
   a.layers.set(0); a.traverse(o=>o.layers.set(0));
   a.rotation.y=0; a.scale.setScalar(1);
   return a;
@@ -9216,6 +9336,7 @@ function survivorsUpdate(dt,now){
         s.state='following';
         if(by==='@me'){
           banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
+       SFX.say&&SFX.say('survivor',5);
           addPoints(150,'SURVIVOR +150');
         }else{
           /* credit the player who actually found them */
@@ -10541,6 +10662,18 @@ function startGame(keepRound){
    Shrinks after a sustained miss, grows back once there is headroom, and only
    ever moves one step per decision so it cannot oscillate visibly. The user's
    quality slider still sets the ceiling via renderer.setPixelRatio. */
+/* The shadow map was rebuilt from scratch EVERY frame - autoUpdate is off, but
+   needsUpdate was being set unconditionally in the render path, which is the
+   same thing. With 3,232 casters that was the single biggest item in the
+   frame. The world is static; only the actors and the car move, and a
+   PCF-soft shadow refreshed every other frame is indistinguishable. The
+   cadence backs off further when the frame budget is already blown. */
+const SHADOW={tick:0, every:2};
+function shadowsWanted(){
+  if(++SHADOW.tick < SHADOW.every) return false;
+  SHADOW.tick=0; return true;
+}
+window.__shadow=()=>({every:SHADOW.every});
 const DRS={acc:0,n:0,win:0,scale:1,last:performance.now()};
 function drsUpdate(){
   const now=performance.now(), ft=now-DRS.last; DRS.last=now;
@@ -10554,6 +10687,9 @@ function drsUpdate(){
      transient dip left it at, since it can never report faster than 16.7. */
   if(avg>21)        DRS.scale=Math.max(.55, DRS.scale-.10);   /* below ~48fps */
   else if(avg<17.5) DRS.scale=Math.min(1,   DRS.scale+.05);   /* holding 60fps */
+  /* shadows are the most expensive thing that can be spread over frames, so
+     they give way before resolution does */
+  SHADOW.every = avg>26 ? 4 : avg>21 ? 3 : 2;
   if(DRS.scale!==before){ try{ window.fxSetResScale&&window.fxSetResScale(DRS.scale); }catch(e){} }
 }
 window.__drs=()=>({scale:DRS.scale});
@@ -10668,7 +10804,7 @@ function loop(){
   netTick(dt,now);
   if(window.fxRender&&SETTINGS.fx&&!location.hash.includes('nfx')) fxRender(dt);
   else {
-    renderer.shadowMap.needsUpdate = true;
+    renderer.shadowMap.needsUpdate = (typeof shadowsWanted==='function') ? shadowsWanted() : true;
     renderer.render(scene,camera);
     const ac=renderer.autoClear, bg=scene.background;
     renderer.autoClear=false; scene.background=null;
