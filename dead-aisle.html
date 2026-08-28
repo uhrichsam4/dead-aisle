@@ -1575,9 +1575,16 @@ const MAT = {
      inside of the front wall. Oversize it so it tucks under the walls; the
      overhang sits at y=0, below the lot and grass planes outside, so it is
      hidden from the other side. */
+  /* roughness .72 is a dry matte floor, so the tube lights landed on it as
+     flat pools with no specular at all. A supermarket floor is polished vinyl
+     and in the reference footage it throws long wet-looking highlights - which
+     is most of what makes that shot read the way it does. Drop the roughness
+     and let the roughnessMap keep the worn patches dull, so it is glossy where
+     it is clean and matte where it is scuffed. */
   const f=new THREE.Mesh(new THREE.PlaneGeometry(47,33), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR,
-    color:0x8d8b86, roughness:.72, metalness:.04 }));
+    color:0x8d8b86, roughness:.34, metalness:.10,
+    envMapIntensity:.85 }));
   f.rotation.x=-Math.PI/2; f.receiveShadow=true;
   /* Oversizing this to tuck under the walls put it in the same plane as the
      1240x46 town ground, and coplanar surfaces z-fight - grass flickered
@@ -2077,7 +2084,15 @@ for(let i=0;i<FZ_N;i++){
    Placed by rejection sampling - dropping them at pure random buried boxes
    inside the shelf rows and the checkout, where they clip through and can
    never be reached. */
-const debrisMats=[new THREE.MeshStandardMaterial({color:0xb9b4a4,roughness:.95}), new THREE.MeshStandardMaterial({color:0x6d5638,roughness:.9})];
+/* 0xb9b4a4 is nearly white under the store's tube lights, and 46 pale slabs
+   scattered across the floor read as glitch rectangles rather than litter.
+   Dirty paper, flattened card, and a couple of grubbier tones. */
+const debrisMats=[
+  new THREE.MeshStandardMaterial({color:0x8f8a7c,roughness:.97}),
+  new THREE.MeshStandardMaterial({color:0x6d5638,roughness:.92}),
+  new THREE.MeshStandardMaterial({color:0x746f63,roughness:.96}),
+  new THREE.MeshStandardMaterial({color:0x5a4f3e,roughness:.93}),
+];
 function floorFree(x,z,pad){
   pad=pad||0;
   for(const rz of [-8.2,-2.9,2.9,8.2])
@@ -2095,13 +2110,16 @@ function floorSpot(minX,maxX,minZ,maxZ,pad){
   }
   return null;
 }
-for(let i=0;i<46;i++){
+/* 46 was too many and they were too big - the floor looked strewn with white
+   panels. Fewer, smaller, thinner, and tilted a touch so they lie like dropped
+   paper instead of tiles laid flat. */
+for(let i=0;i<20;i++){
   const sp=floorSpot(-20,20,-13,14,.15); if(!sp)continue;
-  /* y was a constant .03 against a thickness of .02-.08, so the thicker
-     slabs sank through the floor plane and the thin ones hovered */
-  const dt=rand(.02,.08);
-  const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.15,.5),dt,rand(.15,.4)), debrisMats[rint(0,1)]);
-  d.position.set(sp[0],dt*.5,sp[1]); d.rotation.y=rand(0,6.3); scene.add(d);
+  const dt=rand(.012,.035);
+  const d=new THREE.Mesh(new THREE.BoxGeometry(rand(.12,.34),dt,rand(.10,.28)), debrisMats[rint(0,3)]);
+  d.position.set(sp[0],dt*.5,sp[1]);
+  d.rotation.set(rand(-.05,.05), rand(0,6.3), rand(-.05,.05));
+  scene.add(d);
 }
 for(let i=0;i<8;i++){
   const sp=floorSpot(-19,19,-13,13,.5); if(!sp)continue;
@@ -4558,15 +4576,28 @@ function storeDressing(){
     c.rotation.y=rand(0,6.3); scene.add(c);
   }
   { /* toppled shelf section */
+    /* This was ONE SOLID 5 x 2.6 x 0.9 box laid flat, which is exactly what it
+       looked like in game: a giant grey slab lying across the aisle. A real
+       gondola is an open frame - a thin back panel, two end panels and a few
+       boards - and you can see through it when it goes over. Build that
+       instead, and make it shorter so it does not span the whole aisle. */
     const g=new THREE.Group();
-    const fr=new THREE.Mesh(dr_box,dr_frameMat); fr.scale.set(5,2.6,.9); g.add(fr);
-    for(const py of[-.2,.55]){
-      const pk=new THREE.Mesh(dr_box,dr_frameMat); pk.scale.set(5,.07,1); pk.position.y=py; g.add(pk);
+    const W=3.2, H=1.9, D=.62;
+    const back=new THREE.Mesh(dr_box,dr_frameMat);
+    back.scale.set(W,H,.05); back.position.z=-D/2; g.add(back);
+    for(const ex of [-W/2, W/2]){
+      const end=new THREE.Mesh(dr_box,dr_frameMat);
+      end.scale.set(.05,H,D); end.position.x=ex; g.add(end);
     }
-    /* Toppled means fallen ONTO ITS BACK. rotation.z=1.42 spun the 5 m long
-       frame about its own length instead, standing it on end - it read as a
-       big grey slab leaning in mid-air halfway down the hall. */
-    g.position.set(-16,.55,-2.9); g.rotation.set(1.46,.12,0); scene.add(g);
+    for(const py of [-H/2+.12, -H/2+.66, -H/2+1.2, H/2-.06]){
+      const bd=new THREE.Mesh(dr_box,dr_frameMat);
+      bd.scale.set(W-.1,.05,D-.06); bd.position.y=py; g.add(bd);
+    }
+    /* fallen onto its back, resting on the end panel - not floating */
+    g.position.set(-15.4, D/2, -3.4);
+    g.rotation.set(Math.PI/2*.97, .18, 0);
+    g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
+    scene.add(g);
     for(let i=0;i<12;i++){ /* spill cone off the fallen end */
       const s=new THREE.Mesh(dr_box,dr_boxMats[rint(0,3)]);
       s.scale.set(rand(.2,.42),rand(.18,.4),rand(.2,.45));
@@ -4726,6 +4757,8 @@ function muzzleDecay(dt){
 }
 const keys={};
 addEventListener('keydown',e=>{ keys[e.code]=true;
+  /* a cutscene you cannot skip is one you resent the second time */
+  if(typeof CUT!=='undefined' && CUT.on){ window.__cutSkip&&__cutSkip(); return; }
   /* These are on-foot actions. Without the gate they fired on the menu, the
      pause overlay, the death screen and mid-drive - F in particular grabbed a
      throwable off the death screen and carried it into the next run, which
@@ -7259,6 +7292,197 @@ function setPhase(p){
   else if(p==='win'||p==='dead'){ hint.textContent=''; }
 }
 
+/* ===================== ARRIVAL CUTSCENE =====================
+   You park, get out, walk to the boot, open it, lift the camera out, put it on
+   your head - and only THEN does the view become the GoPro - then take the
+   rifle and play starts.
+
+   Two things make it work rather than just being a camera move:
+
+   1. Until the camera is on your head you are looking with your own EYES. The
+      bodycam lens is dialled all the way out - no barrel distortion, no
+      aberration, almost no vignette, and no OSD. The moment it goes on, all of
+      that ramps in at once off a single 0..1 mix. That contrast is the whole
+      point of the beat.
+   2. The hands are posed with the same direction-solve engine the emotes use,
+      so the arms actually reach into the boot and lift to the head instead of
+      a clip playing over a static body.
+
+   Skippable on any key - a cutscene you cannot skip is a cutscene you resent
+   the second time. */
+const CUT={on:false, t:0, stage:0, lid:null, lidA:0, mix:0, skip:false, done:null};
+
+/* the bodycam look, dialled out to bare eyes and back */
+const CUT_EYES={k1:.012, k2:0, aberration:.05, vignette:.10, grain:.03, bloom:.32};
+const CUT_GOPRO={k1:.16, k2:.04, aberration:.45, vignette:.40, grain:.11, bloom:.60};
+function cutApplyMix(m){
+  CUT.mix=m;
+  const L=(a,b)=>a+(b-a)*m;
+  try{
+    window.fxSetLook&&fxSetLook({
+      distort:{k1:L(CUT_EYES.k1,CUT_GOPRO.k1), k2:L(CUT_EYES.k2,CUT_GOPRO.k2)},
+      aberration:L(CUT_EYES.aberration,CUT_GOPRO.aberration),
+      vignette:  L(CUT_EYES.vignette,  CUT_GOPRO.vignette),
+      grain:     L(CUT_EYES.grain,     CUT_GOPRO.grain),
+      bloom:     L(CUT_EYES.bloom,     CUT_GOPRO.bloom),
+    });
+  }catch(e){}
+  const hud=document.getElementById('goprohud');
+  if(hud) hud.style.opacity=String(Math.max(0,(m-.45)/.55));
+}
+function cutFindLid(){
+  if(CUT.lid) return CUT.lid;
+  if(typeof townCar==='undefined'||!townCar) return null;
+  townCar.traverse(o=>{ if(!CUT.lid && /trunk_lid/i.test(o.name||'')) CUT.lid=o; });
+  if(CUT.lid) CUT.lid.userData.rest=CUT.lid.rotation.x;
+  return CUT.lid;
+}
+/* the boot in world space: behind the car, at bumper height */
+function cutBootPoint(out){
+  const c=townCar;
+  const s=Math.sin(c.rotation.y), co=Math.cos(c.rotation.y);
+  /* townCar's forward is -Z, so the boot is +Z in its local frame */
+  return out.set(c.position.x + s*2.55, .95, c.position.z + co*2.55);
+}
+const _cutV=new THREE.Vector3(), _cutV2=new THREE.Vector3();
+/* Each stage: how long, where the camera goes, and what the hands do. Camera
+   positions are in the car's frame so this works wherever it parked. */
+const CUT_STAGES=[
+  {id:'out',    dur:2.2},   /* door opens, you step out and the world settles */
+  {id:'walk',   dur:1.8},   /* round to the back */
+  {id:'open',   dur:1.6},   /* boot lifts */
+  {id:'reach',  dur:1.8},   /* hands go in */
+  {id:'lift',   dur:1.4},   /* camera comes out */
+  {id:'mount',  dur:1.6},   /* onto the head - the view becomes the GoPro here */
+  {id:'rifle',  dur:1.8},   /* and the rifle out */
+];
+const CUT_TOTAL=CUT_STAGES.reduce((a,s)=>a+s.dur,0);
+
+function cutStart(done){
+  CUT.on=true; CUT.t=0; CUT.stage=0; CUT.skip=false; CUT.done=done; CUT.lidA=0;
+  cutFindLid();
+  cutApplyMix(0);
+  try{ goproSet(false); }catch(e){}
+  const hud=document.getElementById('goprohud');
+  if(hud) hud.style.opacity='0';
+  /* your own hands, no rifle yet */
+  gun.visible=false; vmGroup.visible=true;
+  banner('','');
+}
+function cutFinish(){
+  if(!CUT.on) return;
+  CUT.on=false;
+  const hud=document.getElementById('goprohud');
+  if(hud) hud.style.opacity='';
+  cutApplyMix(1);
+  if(CUT.lid && CUT.lid.userData.rest!==undefined) CUT.lid.rotation.x=CUT.lid.userData.rest;
+  const cb=CUT.done; CUT.done=null;
+  if(cb) cb();
+}
+window.__cutSkip=()=>{ if(CUT.on){ CUT.skip=true; } };
+
+/* posed with the emote engine: same solver, so the arms really reach */
+function cutPose(root,u){
+  const rig=emoteRig(root); if(!rig) return;
+  const st=CUT_STAGES[CUT.stage].id;
+  const A=(k,d,w)=>emAim(rig,root,k,d,w===undefined?1:w);
+  if(st==='reach'||st==='lift'){
+    const k=(st==='reach')?u:1;
+    /* down and forward into the boot, then back up holding it */
+    const y=(st==='lift')? -0.25+u*0.75 : -0.55+k*0.30;
+    A('armR',[ .34, y, .86]); A('foreR',[ .16, y+.30, .92]);
+    A('armL',[-.34, y, .86]); A('foreL',[-.16, y+.30, .92]);
+    emRot(rig,'head',[0.22-u*0.10,0,0],1);
+  } else if(st==='mount'){
+    /* both hands to the temples */
+    const k=Math.min(1,u*1.25);
+    A('armR',[ .58, .10+k*.42, .34]); A('foreR',[-.24, .62+k*.30, .30]);
+    A('armL',[-.58, .10+k*.42, .34]); A('foreL',[ .24, .62+k*.30, .30]);
+    emRot(rig,'head',[-.05*k,0,0],1);
+  } else if(st==='rifle'){
+    A('armR',[ .40,-.30+u*.42, .80]); A('foreR',[ .20,-.05+u*.40, .92]);
+    A('armL',[-.30,-.24+u*.34, .78]); A('foreL',[-.10,-.02+u*.36, .90]);
+  }
+}
+
+function cutTick(dt){
+  if(!CUT.on) return false;
+  if(CUT.skip){ cutFinish(); return false; }
+  CUT.t+=dt;
+  /* which stage, and how far through it */
+  let acc=0, i=0;
+  for(; i<CUT_STAGES.length; i++){
+    if(CUT.t < acc+CUT_STAGES[i].dur) break;
+    acc+=CUT_STAGES[i].dur;
+  }
+  if(i>=CUT_STAGES.length){ cutFinish(); return false; }
+  CUT.stage=i;
+  const st=CUT_STAGES[i], u=clamp((CUT.t-acc)/st.dur,0,1);
+  const ease=u*u*(3-2*u);
+  if(!townCar) { cutFinish(); return false; }
+
+  const c=townCar;
+  const s=Math.sin(c.rotation.y), co=Math.cos(c.rotation.y);
+  /* handy frame: F is forward (-Z local), R is the car's right */
+  const fx=-s, fz=-co, rx=co, rz=-s;
+  const boot=cutBootPoint(_cutV);
+  const P=(ax,ay,az)=>_cutV2.set(
+    c.position.x + rx*ax + fx*az, ay, c.position.z + rz*ax + fz*az);
+
+  let look=boot;
+  if(st.id==='out'){
+    /* out of the driver's door, standing */
+    const a=P(-1.35, 1.05+ease*.62, -0.35);
+    camera.position.copy(a);
+    look=P(-2.6, 1.5, 1.2);
+  } else if(st.id==='walk'){
+    /* round the back */
+    const ax=-1.35+ease*1.05, az=-0.35+ease*3.4;
+    camera.position.copy(P(ax, 1.67, az));
+    look=boot;
+  } else if(st.id==='open'){
+    camera.position.copy(P(-0.30, 1.67, 3.05));
+    look=boot;
+    CUT.lidA=ease;
+  } else {
+    camera.position.copy(P(-0.20, 1.62-((st.id==='mount')?ease*.06:0), 2.75));
+    look=boot;
+    CUT.lidA=1;
+  }
+  camera.lookAt(look.x, look.y, look.z);
+
+  const lid=cutFindLid();
+  if(lid && lid.userData.rest!==undefined)
+    lid.rotation.x = lid.userData.rest - CUT.lidA*1.05;
+
+  /* the hand-off: the view becomes the GoPro as it goes on the head */
+  if(st.id==='mount')      cutApplyMix(clamp((u-.35)/.5,0,1));
+  else if(i>CUT_STAGES.findIndex(x=>x.id==='mount')) cutApplyMix(1);
+  else                     cutApplyMix(0);
+
+  if(vmModel && vmGroup.visible){
+    const body=vmModel;
+    cutPose(body,ease);
+  }
+
+  /* one-shots on stage entry */
+  if(!st._fired && u>0.02){
+    st._fired=true;
+    try{
+      if(st.id==='out')        SFX.car.doorOpen.play(1);
+      if(st.id==='walk')       SFX.car.doorClose.play(1);
+      if(st.id==='open'){      SFX.car.trunkOpen.play(1); SFX.say&&SFX.say('trunk',4); }
+      if(st.id==='mount'){     SFX.gear.goproOn.play(1); SFX.gear.strap.play(1);
+                               SFX.say&&SFX.say('camera_live',5); }
+      if(st.id==='rifle')      SFX.gun.draw.play(1);
+    }catch(e){}
+  }
+  return true;
+}
+/* stages are module-level objects, so their fired flags have to be cleared
+   between runs or the second arrival is silent */
+function cutReset(){ for(const s of CUT_STAGES) s._fired=false; }
+
 function onCarParked(){
   if(phase!=='drive')return;
   setPhase('parking');
@@ -7270,28 +7494,27 @@ function onCarParked(){
   setObjectiveState&&setObjectiveState('drive','done');
   setObjectiveState&&setObjectiveState('park','done');
   setObjectiveState&&setObjectiveState('enter','active');
-  banner('GEARED UP','GOPRO ON — GOING LIVE');
-  setTimeout(()=>{
-    goproIntro(()=>{
-      goproSet(true);
-      streamStart();
-      try{ SFX.gear.goproOn.play(1); }catch(e){}
-      try{ SFX.gear.strap.play(1); }catch(e){}
-      SFX.deploy.play();
-      SFX.say&&SFX.say('camera_live',6);
-      if(mission.act===2) player.pos.set(ACT_OFF+11.5,1.7,34.5);
-      else                player.pos.set(8.2,1.7,22.6);
-      player.vel.set(0,0,0);
-      player.yaw=mission.act===2?Math.PI*0.02:0; player.pitch=0;
-      gun.visible=true; vmGroup.visible=true;
-      carCamYaw=null;
-      lotCrowdScatter();
-      for(const p of OUTSIDE_PTS) spawnZombie(3,{pos:p,flee:Math.random()<.35});
-      setPhase('outside');
-      banner('THEY KNOW YOU ARE HERE', mission.act===2?'GET THROUGH THE GATE':'GET TO THE DOORS');
-      Audio.waveSting();
-    });
-  },600);
+  /* The arrival is played out now instead of cutting: out of the car, round to
+     the boot, open it, lift the camera out, put it on - and the view only
+     becomes the GoPro at that moment - then the rifle. cutTick drives it from
+     the frame loop; this is just what happens when it ends. */
+  cutReset();
+  cutStart(()=>{
+    goproSet(true);
+    streamStart();
+    SFX.deploy.play();
+    if(mission.act===2) player.pos.set(ACT_OFF+11.5,1.7,34.5);
+    else                player.pos.set(8.2,1.7,22.6);
+    player.vel.set(0,0,0);
+    player.yaw=mission.act===2?Math.PI*0.02:0; player.pitch=0;
+    gun.visible=true; vmGroup.visible=true;
+    carCamYaw=null;
+    lotCrowdScatter();
+    for(const p of OUTSIDE_PTS) spawnZombie(3,{pos:p,flee:Math.random()<.35});
+    setPhase('outside');
+    banner('THEY KNOW YOU ARE HERE', mission.act===2?'GET THROUGH THE GATE':'GET TO THE DOORS');
+    Audio.waveSting();
+  });
 }
 
 function enterStore(){
@@ -10780,6 +11003,8 @@ function loop(){
       shake=Math.max(0,shake-dt*2.4);
     }
     if(window.__dust){ window.__dust.rotation.y+=dt*.004; }
+    /* the arrival owns the camera while it plays */
+    if(typeof cutTick==='function') cutTick(dt);
     /* last thing before the cameras sync: the weapon update and the shake both
        write camera and viewmodel state after the movement step, so an earlier
        call here was overwritten every frame and never reached the screen */
@@ -10845,6 +11070,7 @@ window.__game={player, zombies, scene, camera, renderer, zombiesUpdate, spawnZom
   startGame:()=>{ menuEl.classList.add('hidden'); deadEl.classList.add('hidden'); startGame(); },
   bloodPool, bloodBurst, pointsRef:()=>points, statsRef:()=>stats,
   setPhase, threatCount, CAR_CAM, VM_ANCHOR, GUN_GRIP_P, GUN_FOLLOW, AK_FIT,
+  onCarParked, cutRef:()=>CUT,
   throwables:THROWABLES, heldRef:()=>heldItem, pickUp, throwHeld, nearestThrowable,
   GUN_GRIP, applyGunGrip, handRef:()=>vmHandR,
   CAR_FIT, applyCarFit, carRef:()=>carModel,
