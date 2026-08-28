@@ -4718,7 +4718,10 @@ let everLocked=false, pausedAt=0;
 document.addEventListener('pointerlockchange',()=>{
   locked = document.pointerLockElement===document.body;
   if(locked){ everLocked=true; }
-  if(!locked && playing && player.alive && everLocked){
+  /* The emote wheel releases the mouse ON PURPOSE so a slot can be clicked.
+     Without this guard that read as the player leaving, so pressing B threw the
+     pause overlay straight over the wheel and made it unusable. */
+  if(!locked && playing && player.alive && everLocked && !(typeof EMP!=='undefined' && EMP.open)){
     paused=true; pauseEl.classList.remove('hidden');
     /* these are looping sources driven from the frame loop, which stops
        ticking while paused - so they held their last state and droned on */
@@ -4875,6 +4878,10 @@ function damagePlayer(dmg, fromPos){
   player.hp-=dmg; player.regenDelay=3.6;
   adren=1;
   SFX.playerHit.play(rand(.96,1.05));   /* falls back to Audio.hurt() */
+  if(SFX.say){
+    if(player.hp<35) SFX.say('low_hp',9);
+    else if(Math.random()<.30) SFX.say('hit',5);
+  }
   shake=Math.max(shake,.5);
   dmgFlash=clamp((1-player.hp/100)+.35,0,1);
   if(player.hp<=0){ die(); }
@@ -5096,6 +5103,7 @@ const gunModels={};
 let akModel=null;
 function selectWeapon(i){
   if(!WEAPONS[i])return;
+  if(weaponIndex!==i){ try{ SFX.gun.draw.play(rand(.95,1.06)); }catch(e){} }
   weaponIndex=i;
   const w=WEAPONS[i];
   for(const id in gunModels) gunModels[id].visible=(id===w.id);
@@ -5440,6 +5448,16 @@ function worldHit(h, dir, dmg){
   const kind=brk?brk.userData.brk.def.kind:'concrete';
   impactSpark(h.point, nrm);
   bulletHole(h.point, nrm, kind);
+  /* worldHit already knows what the round landed on, so the impact can sound
+     like that material instead of one generic tick. Quieter with distance. */
+  try{
+    const set=SFX.impact[kind==='crate'?'wood':(SFX.impact[kind]?kind:'concrete')];
+    if(set){
+      const d=h.point.distanceTo(camera.position);
+      const v=clamp(1-d/26,0,1);
+      if(v>.04) set.play(rand(.92,1.09), v*.55);
+    }
+  }catch(e){}
   if(!brk)return;
   const b=brk.userData.brk;
   b.hp-=dmg;
@@ -7182,6 +7200,10 @@ function setPhase(p){
 function onCarParked(){
   if(phase!=='drive')return;
   setPhase('parking');
+  try{ SFX.car.handbrake.play(1); }catch(e){}
+  setTimeout(()=>{ try{ SFX.car.doorOpen.play(1); }catch(e){} }, 700);
+  setTimeout(()=>{ try{ SFX.car.doorClose.play(1); }catch(e){} }, 1700);
+  SFX.say&&SFX.say('parked',6);
   lotCrowdScatter&&lotCrowdScatter();   /* panic first, wake later */
   setObjectiveState&&setObjectiveState('drive','done');
   setObjectiveState&&setObjectiveState('park','done');
@@ -7191,7 +7213,10 @@ function onCarParked(){
     goproIntro(()=>{
       goproSet(true);
       streamStart();
+      try{ SFX.gear.goproOn.play(1); }catch(e){}
+      try{ SFX.gear.strap.play(1); }catch(e){}
       SFX.deploy.play();
+      SFX.say&&SFX.say('camera_live',6);
       if(mission.act===2) player.pos.set(ACT_OFF+11.5,1.7,34.5);
       else                player.pos.set(8.2,1.7,22.6);
       player.vel.set(0,0,0);
@@ -7344,6 +7369,7 @@ function missionUpdate(dt){
         setObjectiveState&&setObjectiveState('rescue','done');
         setObjectiveState&&setObjectiveState('extract','active');
         banner('ALL CLEAR','WALK THE SURVIVORS OUT THE FRONT DOORS');
+        SFX.say&&SFX.say('all_survivors',5);
       }
     }
   }
@@ -8834,9 +8860,15 @@ function emoteWheelOpen(){
   try{ document.exitPointerLock&&document.exitPointerLock(); }catch(e){}
 }
 function emoteWheelClose(){
+  if(!EMP.open) return;
   EMP.open=false;
   const w=document.getElementById('emote-wheel');
   if(w) w.classList.remove('on');
+  /* take the mouse back, or the player is left with no look control and one
+     stray click away from the pause overlay */
+  if(playing && !paused && player.alive){
+    try{ document.body.requestPointerLock&&document.body.requestPointerLock(); }catch(e){}
+  }
 }
 window.__emotePlay=emotePlay;
 
@@ -9239,6 +9271,7 @@ function survivorsUpdate(dt,now){
         s.state='following';
         if(by==='@me'){
           banner('SURVIVOR FOUND','THEY ARE FOLLOWING YOU');
+       SFX.say&&SFX.say('survivor',5);
           addPoints(150,'SURVIVOR +150');
         }else{
           /* credit the player who actually found them */
