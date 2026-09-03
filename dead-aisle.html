@@ -2083,26 +2083,36 @@ function stockWorld(parent, local){
   parent.updateMatrixWorld(true);
   return new THREE.Matrix4().multiplyMatrices(parent.matrixWorld, local);
 }
+/* The gondola stock, the wall stock and the knocked-over floor stock each
+   built their own InstancedMesh per item type: three batches for every one
+   of the 22 types, 66 draws for what is 22 static sets. Accumulate per
+   source and rebuild, so each type is one batch however many stages add to
+   it (the stages arrive in different orders depending on which pack lands
+   last). */
+const STOCK_INST=new Map();          /* src -> {mats:[], meshes:[]} */
 function instanceStock(src, mats, parent){
   if(!src||!mats.length)return 0;
+  let e=STOCK_INST.get(src); if(!e){ e={mats:[],meshes:[]}; STOCK_INST.set(src,e); }
+  for(const m of mats) e.mats.push(m);
+  for(const im of e.meshes){ if(im.parent) im.parent.remove(im); im.dispose(); }
+  e.meshes.length=0;
   src.updateWorldMatrix(true,true);
   _instInv.copy(src.matrixWorld).invert();
-  let made=0;
   src.traverse(m=>{
     if(!m.isMesh||!m.geometry)return;
     /* a source may be a Group of sub-meshes; each keeps its offset from the
        source root so the instanced copy is assembled the same way */
     _instLocal.multiplyMatrices(_instInv, m.matrixWorld);
-    const im=new THREE.InstancedMesh(m.geometry, m.material, mats.length);
-    for(let i=0;i<mats.length;i++){
-      _instTmp.multiplyMatrices(mats[i], _instLocal);
+    const im=new THREE.InstancedMesh(m.geometry, m.material, e.mats.length);
+    for(let i=0;i<e.mats.length;i++){
+      _instTmp.multiplyMatrices(e.mats[i], _instLocal);
       im.setMatrixAt(i, _instTmp);
     }
     im.instanceMatrix.needsUpdate=true;
     im.castShadow=false; im.receiveShadow=true; im.frustumCulled=true;
-    parent.add(im); made++;
+    parent.add(im); e.meshes.push(im);
   });
-  return made;
+  return e.meshes.length;
 }
 /* position + Y rotation + uniform scale -> matrix, the only transform stock uses */
 const _instQ=new THREE.Quaternion(), _instE=new THREE.Euler(), _instV=new THREE.Vector3();
