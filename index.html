@@ -587,7 +587,8 @@ let _gltfActive=0, _gltfSeen=0, _gltfDone=0, _gltfIdleT=null;
 const _gltfQ=[];
 function gltfLoad(url,onLoad,onProgress,onError){
   _gltfSeen++;
-  _gltfQ.push({url,onLoad,onError,tries:0});
+  const done=(g)=>{ try{ onLoad&&onLoad(g); } finally { if(typeof scheduleStaticPass==='function') scheduleStaticPass(); } };
+  _gltfQ.push({url,onLoad:done,onError,tries:0});
   _gltfProgress();
   _gltfPump();
 }
@@ -683,7 +684,11 @@ const renderer = new THREE.WebGLRenderer({canvas:document.getElementById('c'), a
    chain with grain, vignette and barrel distortion the difference is very hard
    to see, and it buys back ~44% of the pixels on every Retina panel. The
    quality slider can still push it higher. */
-const DPR_CAP=1.5;
+/* 1.5 on a Retina MacBook is a 3000 x 1650 HalfFloat MSAA scene buffer plus
+   the bloom chain - five megapixels a frame for a picture the lens pass then
+   blurs, grains and vignettes anyway. Bodycam footage is not 3K. Native CSS
+   resolution is what the GoPro look wants, and it halves the fill work. */
+const DPR_CAP=1.0;
 renderer.setPixelRatio(Math.min(devicePixelRatio,DPR_CAP));
 renderer.setSize(innerWidth,innerHeight);
 renderer.shadowMap.enabled = true;
@@ -1239,10 +1244,11 @@ scene.add(sunFill); scene.add(sunFill.target);
 
 /* flickering fluorescent rig */
 const tubeLights = [];
+const TUBE_FIX_MAT=new THREE.MeshStandardMaterial({color:0x777d76, roughness:.6, metalness:.5});
+const TUBE_DEAD_MAT=new THREE.MeshStandardMaterial({color:0x2c302c, roughness:.9});
 function makeTube(x,z,on=true){
   const g = new THREE.Group();
-  const fixture = new THREE.Mesh(new THREE.BoxGeometry(2.4,.06,.34),
-    new THREE.MeshStandardMaterial({color:0x777d76, roughness:.6, metalness:.5}));
+  const fixture = new THREE.Mesh(new THREE.BoxGeometry(2.4,.06,.34), TUBE_FIX_MAT);
   g.add(fixture);
   if(on){
     const tubeMat = new THREE.MeshBasicMaterial({color:0xd8f0e2});
@@ -1255,12 +1261,11 @@ function makeTube(x,z,on=true){
     tubeLights.push({mat:tubeMat, light:pt, base:44, t:rand(0,10), state:1,
                      managed:lightRegister(pt,70)&&MANAGED_LIGHTS[MANAGED_LIGHTS.length-1]});
   } else {
-    const tube = new THREE.Mesh(new THREE.BoxGeometry(2.2,.05,.2),
-      new THREE.MeshStandardMaterial({color:0x2c302c, roughness:.9}));
+    const tube = new THREE.Mesh(new THREE.BoxGeometry(2.2,.05,.2), TUBE_DEAD_MAT);
     tube.rotation.z=rand(-.06,.06); g.add(tube);
   }
   g.position.set(x,4.15,z);
-  scene.add(g);
+  scene.add(g); STATIC_GROUPS.push(g);
 }
 
 const emergency = new THREE.PointLight(0xff2a18, 14, 26, 1.6);
@@ -1277,10 +1282,26 @@ const worldHits = []; // solid meshes bullets should stop on
    before a single triangle is drawn. Registering a GROUP lets one visibility
    flag skip its entire subtree. */
 const CULL=[];
+/* phPlace derives a prop's cull radius from its size and caps it here. This
+   constant was referenced from the day that was written and never declared,
+   so every phPlace call WITHOUT an explicit cull: threw ReferenceError - and
+   the try/catch around each pack's placement swallowed it as a warning. The
+   store's cash registers, barrels, boxes and bottles, the street barriers and
+   hydrants, the back-office furniture, the map2 set and the whole mosque
+   interior have been silently absent since. Largest hand-set radius in use
+   is 230 (the courtyard railing); 240 keeps buildings drawn that far. */
+const CULL_FAR=240;
 function cullRegister(obj, cx, cz, radius){
   if(!obj)return obj;
   CULL.push({obj, cx, cz, r:radius});
   return obj;
+}
+/* Inside the hall the town is only visible through the 4.2 m door opening
+   at z=15 (the windows are boarded). True when the line from (px,pz) to the
+   object crosses the opening, allowing for the object's own radius. */
+function doorWedge(px,pz,cx,cz,sz){
+  const t=(15-pz)/(cz-pz);
+  return t>0 && Math.abs(px+(cx-px)*t) < 2.1 + (sz||1)*t;
 }
 let _cullT=0;
 function cullUpdate(dt){
@@ -1288,9 +1309,24 @@ function cullUpdate(dt){
   _cullT=.2;                                   /* 5 Hz is plenty for this */
   const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
   const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
+  const inHall = phase==='inside';
   for(const c of CULL){
     const d=Math.hypot(px-c.cx, pz-c.cz);
-    const on=d<c.r;
+    let on=d<c.r;
+    /* Inside the hall the only way to see the town is through the 4.2 m door
+       opening at z=15 - the windows are boarded. Frustum culling knows nothing
+       about walls, so every facade, bench and lamp post behind the front wall
+       was still submitted: ~200 draws a frame of scenery the wall then painted
+       over. Keep an outdoor object only if the line from the player to it
+       actually crosses the opening, allowing for the object's own size. */
+    if(on && inHall && c.cz>15.6){
+      if(c.sz===undefined){
+        const bb=new THREE.Box3().setFromObject(c.obj);
+        c.sz=isFinite(bb.max.x)?Math.max(bb.max.x-bb.min.x,bb.max.z-bb.min.z)*.5:4;
+      }
+      on = doorWedge(px,pz,c.cx,c.cz,c.sz);
+    }
+    c.hid=!on;                        /* culled or occluded - NOT hidden for real */
     if(c.obj.visible!==on) c.obj.visible=on;
   }
 }
@@ -1413,10 +1449,196 @@ function addBox(w,h,d,x,y,z, mat, rotY=0, collide=true){
 function retireMesh(m){
   if(!m)return;
   m.visible=false;
+  const ci=CULL.findIndex(c=>c.obj===m); if(ci>=0) CULL.splice(ci,1);
   const col=m.userData&&m.userData.collider;
   if(col){ const i=colliders.indexOf(col); if(i>=0) colliders.splice(i,1); }
   m.traverse(o=>{ if(o.isMesh){ const j=worldHits.indexOf(o); if(j>=0) worldHits.splice(j,1); } });
 }
+/* ===================== STATIC BATCHING =====================
+   Measured in the hall: 627 draw calls a frame, 1,254 in the car park, and
+   every one of them a separate JS->driver round trip - on a MacBook that is
+   the frame budget gone before a pixel is shaded. Most of it is scenery that
+   never moves: forty gondola clones, twenty-eight wall units, the shell, the
+   trolley bars, the facades. Fold every mesh in a group that shares a
+   material into ONE mesh with the world transforms baked into the vertices.
+   The originals stay in the graph, hidden: raycasts (worldHits) ignore
+   visibility, so bullets still hit them, and colliders are separate anyway.
+   Only what never moves and never breaks goes through here. */
+function mergeGeoms(list){
+  const names=['position','normal','uv','uv1','color'].filter(n=>list.every(g=>g.attributes[n]));
+  let vc=0, ic=0;
+  for(const g of list){ const c=g.attributes.position.count; vc+=c; ic+=g.index?g.index.count:c; }
+  const out=new THREE.BufferGeometry(), arrs={};
+  for(const n of names) arrs[n]={item:list[0].attributes[n].itemSize, arr:new Float32Array(vc*list[0].attributes[n].itemSize)};
+  const index=new (vc>65535?Uint32Array:Uint16Array)(ic);
+  let vo=0, io=0;
+  for(const g of list){
+    const c=g.attributes.position.count;
+    for(const n of names){
+      const a=g.attributes[n], A=arrs[n];
+      for(let i=0;i<c;i++){ const o=(vo+i)*A.item;
+        A.arr[o]=a.getX(i); if(A.item>1)A.arr[o+1]=a.getY(i); if(A.item>2)A.arr[o+2]=a.getZ(i); }
+    }
+    if(g.index){ const ia=g.index.array; for(let i=0;i<ia.length;i++) index[io++]=ia[i]+vo; }
+    else for(let i=0;i<c;i++) index[io++]=vo+i;
+    vo+=c;
+  }
+  for(const n of names) out.setAttribute(n,new THREE.BufferAttribute(arrs[n].arr,arrs[n].item));
+  out.setIndex(new THREE.BufferAttribute(index,1));
+  return out;
+}
+const MERGED=[];
+/* one component of one vertex, for plain and interleaved attributes alike
+   (getComponent only exists on newer three builds) */
+function attrGet(a,i,k){
+  if(a.getComponent) return a.getComponent(i,k);
+  if(a.isInterleavedBufferAttribute) return a.data.array[i*a.data.stride+a.offset+k];
+  return a.array[i*a.itemSize+k];
+}
+/* the vertices one material group of a multi-material mesh actually uses,
+   re-indexed, so the group can join the batch for that material */
+function sliceGeometry(geo, start, count){
+  const idx=geo.index, out=new THREE.BufferGeometry(), map=new Map(), newIdx=[];
+  const names=Object.keys(geo.attributes), cols={};
+  for(const n of names) cols[n]={a:geo.attributes[n], d:[]};
+  for(let i=start;i<start+count;i++){
+    const vi=idx?idx.getX(i):i;
+    let ni=map.get(vi);
+    if(ni===undefined){
+      ni=map.size; map.set(vi,ni);
+      for(const n of names){ const a=cols[n].a; for(let k=0;k<a.itemSize;k++) cols[n].d.push(attrGet(a,vi,k)); }
+    }
+    newIdx.push(ni);
+  }
+  for(const n of names){ const a=cols[n].a; out.setAttribute(n,new THREE.BufferAttribute(new (a.array.constructor)(cols[n].d), a.itemSize, a.normalized)); }
+  out.setIndex(newIdx);
+  return out;
+}
+/* opts.force  - merge a root even while the distance cull has it hidden
+   opts.parent - bake into that object's local frame and parent there (the car)
+   opts.skip   - predicate: leave this subtree alone (doors, wheels)
+   opts.prune  - drop the folded originals from the graph (prototypes that get cloned) */
+function mergeStatic(roots, label, opts){
+  opts=opts||{};
+  const groups=new Map(); const folded=new Set();
+  const add=(mat,geo,mesh)=>{
+    if(!mat) return;
+    let g=groups.get(mat.uuid); if(!g){ g={mat, items:[]}; groups.set(mat.uuid,g); }
+    g.items.push({geo,mesh});
+  };
+  const walk=(o,isRoot)=>{
+    if(!o.visible && !(isRoot&&opts.force)) return;
+    if(o.userData.brk || o.userData.noMerge || o.userData.mergedInto) return;   /* breakables are removed when they shatter */
+    if(opts.skip && opts.skip(o)) return;
+    if(o.isMesh && !o.isInstancedMesh && !o.isSkinnedMesh && o.geometry && o.geometry.attributes.position && !o.morphTargetInfluences){
+      if(Array.isArray(o.material)){
+        /* the gondolas, the wall units and the facades are all multi-material:
+           one mesh, several draws. Each material group joins its own batch. */
+        const gs=o.geometry.groups&&o.geometry.groups.length?o.geometry.groups:[{start:0,count:o.geometry.index?o.geometry.index.count:o.geometry.attributes.position.count,materialIndex:0}];
+        for(const gr of gs) add(o.material[gr.materialIndex||0], sliceGeometry(o.geometry, gr.start, gr.count), o);
+      } else add(o.material, o.geometry, o);
+    }
+    for(const c of o.children) walk(c,false);
+  };
+  for(const r of roots) if(r){ r.updateWorldMatrix(true,true); walk(r,true); }
+  const parent=opts.parent||scene; let inv=null;
+  if(opts.parent){ parent.updateWorldMatrix(true,true); inv=new THREE.Matrix4().copy(parent.matrixWorld).invert(); }
+  const made=[]; const rel=new THREE.Matrix4();
+  for(const g of groups.values()){
+    if(g.items.length<2) continue;
+    const geos=g.items.map(it=>{ const gg=it.geo.clone(); gg.applyMatrix4(inv? rel.multiplyMatrices(inv,it.mesh.matrixWorld) : it.mesh.matrixWorld); return gg; });
+    const merged=new THREE.Mesh(mergeGeoms(geos), g.mat);
+    merged.name='merged:'+label;
+    merged.castShadow=opts.castShadow!==undefined?opts.castShadow:g.items.some(it=>it.mesh.castShadow);
+    merged.receiveShadow=g.items.some(it=>it.mesh.receiveShadow);
+    merged.frustumCulled=true; merged.matrixAutoUpdate=false;
+    merged.geometry.computeBoundingSphere();
+    for(const it of g.items){ it.mesh.visible=false; it.mesh.userData.mergedInto=merged; folded.add(it.mesh); }
+    for(const gg of geos) gg.dispose();
+    parent.add(merged); MERGED.push(merged); made.push(merged);
+  }
+  if(opts.prune) for(const m of folded){ if(m.parent) m.parent.remove(m); }
+  if(made.length){ const line='batched '+label+': '+folded.size+' meshes -> '+made.length; console.info(line); (window.__staticLog=window.__staticLog||[]).push(line); }
+  return made;
+}
+/* scene-direct meshes and groups built synchronously at load - the shell,
+   the fixtures, the litter, the tipped trolleys. Everything that appears
+   later is either cull-registered (and batched through that) or moves. */
+const STATIC_GROUPS=[];
+let INIT_STATIC=null;
+/* Runs once the asset queue has drained (re-armed by every load, so a late
+   pack simply gets its own pass): switch off shadow casting for everything
+   inside the hall, then fold the static scenery. */
+let _staticT=null, _staticRuns=0;
+function scheduleStaticPass(){ clearTimeout(_staticT); _staticT=setTimeout(staticPass, 1800); }
+function staticPass(){
+  if(_gltfActive || _gltfQ.length){ scheduleStaticPass(); return; }
+  const t0=performance.now(); _staticRuns++;
+  /* 1. The moon is the only shadow caster and the ceiling already puts the
+        whole hall in its shadow, so the 624 casters inside it - every gondola,
+        crate and product - were re-drawn into the shadow map for nothing. The
+        shell (anything spanning the room) keeps casting. */
+  let castOff=0; const wp=new THREE.Vector3();
+  scene.traverse(o=>{
+    if(!o.isMesh || o.isSkinnedMesh || !o.castShadow || o.userData.mergedInto) return;
+    o.getWorldPosition(wp);
+    if(Math.abs(wp.x)>21.9 || Math.abs(wp.z)>14.9 || wp.y>4.3) return;
+    if(o.geometry){
+      if(!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      if(o.geometry.boundingSphere && o.geometry.boundingSphere.radius*Math.max(o.scale.x,o.scale.y,o.scale.z)>9) return;
+    }
+    o.castShadow=false; castOff++;
+  });
+  /* 2. the shelving - forty gondola clones and twenty-eight wall units */
+  if(typeof shelfRows!=='undefined') mergeStatic(shelfRows,'gondola rows',{force:true,castShadow:false});
+  if(typeof WALL_UNITS!=='undefined') mergeStatic(WALL_UNITS,'wall units',{force:true,castShadow:false});
+  /* 3. everything the distance cull manages - facades, props, furniture -
+        folded per 100 m cell so each merged mesh still has a bounding sphere
+        the frustum test can reject, and re-registered with the cull under the
+        widest radius any of its members had. */
+  const px=player.pos.x, pz=player.pos.z, cells=new Map();
+  for(const c of CULL){
+    const o=c.obj;
+    if(o.userData.mergedCell) continue;
+    const d=Math.hypot(px-c.cx, pz-c.cz);
+    if(!o.visible && !c.hid && d<c.r) continue;        /* hidden for real, not by the cull */
+    /* Near the store the cells are finer, and split at the front wall and
+       again at the kerb: from inside the hall only the cells that actually
+       fall in the door wedge get drawn, instead of one 100 m mesh that spans
+       the whole lot and always passes the test. */
+    /* The hall is one cell: it is either entirely in view or not at all.
+       The lot band (kerb to shopfront) is small unique props, so it is cut
+       into 40 m cells for the door-wedge test to reject. The facade row is
+       few materials shared by many clones, and from inside it passes the
+       wedge test whatever its size, so it stays coarse - one 100 m mesh per
+       material rather than three 40 m ones. */
+    const near=Math.abs(c.cx)<140;
+    const zb=c.cz<15.6?0:(c.cz<31?1:2);
+    const key = (near&&zb===0) ? 'hall' : zb+'|'+Math.floor((c.cx+1200)/((near&&zb===1)?40:100))+(near&&zb===1?'n':'');
+    let e=cells.get(key); if(!e){ e={roots:[],maxR:0}; cells.set(key,e); }
+    e.roots.push(o); e.maxR=Math.max(e.maxR,c.r);
+  }
+  let cellMeshes=0;
+  for(const [key,e] of cells){
+    for(const mm of mergeStatic(e.roots,'cell '+key,{force:true})){
+      const sp=mm.geometry.boundingSphere;
+      mm.userData.mergedCell=true;
+      CULL.push({obj:mm, cx:sp.center.x, cz:sp.center.z, r:e.maxR+sp.radius, sz:sp.radius, hid:false});
+      cellMeshes++;
+    }
+  }
+  /* 4. the shell, the tube fixtures, the litter and the trolleys */
+  if(INIT_STATIC){
+    const inCull=new Set(CULL.map(c=>c.obj));
+    const shell=INIT_STATIC.filter(o=>o.parent===scene && !inCull.has(o) && !o.userData.mergedInto);
+    mergeStatic(shell.concat(STATIC_GROUPS.filter(g=>g.parent===scene)),'shell',{});
+  }
+  const line='static pass #'+_staticRuns+': '+castOff+' hall casters off, '+cellMeshes+' cell meshes, '+(performance.now()-t0).toFixed(0)+' ms';
+  console.info(line); (window.__staticLog=window.__staticLog||[]).push(line);
+}
+window.__staticPass=staticPass; window.__staticRuns=()=>_staticRuns;
+window.__merged=()=>MERGED.map(m=>({name:m.name,tris:m.geometry.index.count/3}));
+
 /* zombies roam the union of every phase box; only the PLAYER clamp shrinks
    when we go inside, so keep a separate immutable box for actors. */
 /* Act 1 is the TOPS supermarket around x=0. Act 2 is the Al-Salaam mosque
@@ -1561,12 +1783,65 @@ const TEX={
   metal :surfaceTex('assets/tex/metal.jpg',  1, 1),
 };
 
+/* The hall's walls used the same scanned block as the exterior: dark
+   olive-brown concrete with deep mortar joints, which under the tube rig read
+   as a dungeon rather than a shop - every screenshot of the store had castle
+   walls behind the cereal. A supermarket sales floor is painted blockwork:
+   off-white, flat, scuffed at trolley height. Paint it - same running bond,
+   drawn once on a canvas, with the joints carried as a bump map so the relief
+   survives without the scanned normal map (whose blocks would not line up). */
+const WALL_PAINT=(()=>{
+  const S=512, cv=document.createElement('canvas'); cv.width=cv.height=S;
+  const g=cv.getContext('2d');
+  g.fillStyle='#b4b1a8'; g.fillRect(0,0,S,S);                         /* mortar */
+  const COLS=8, ROWS=13, bw=S/COLS, bh=S/ROWS, J=3;
+  for(let r=0;r<ROWS;r++){
+    const off=(r%2)?bw/2:0;
+    for(let c=-1;c<=COLS;c++){
+      const v=Math.round(rand(-8,8));
+      g.fillStyle=`rgb(${214+v},${210+v},${200+v})`;
+      g.fillRect(c*bw+off+J/2, r*bh+J/2, bw-J, bh-J);
+    }
+  }
+  for(let k=0;k<9000;k++){ g.fillStyle=`rgba(40,36,30,${rand(.04,.16)})`; g.fillRect(rand(0,S),rand(0,S),rand(1,2.4),rand(1,2.4)); }
+  for(let k=0;k<30;k++){ g.fillStyle=`rgba(60,52,40,${rand(.03,.09)})`; g.fillRect(rand(0,S),rand(0,S),rand(20,110),rand(4,30)); }
+  const map=new THREE.CanvasTexture(cv); map.colorSpace=THREE.SRGBColorSpace;
+  map.wrapS=map.wrapT=THREE.RepeatWrapping; map.anisotropy=8; map.repeat.set(14,2);
+  const bump=new THREE.CanvasTexture(cv);                              /* darker mortar = recessed */
+  bump.wrapS=bump.wrapT=THREE.RepeatWrapping; bump.anisotropy=4; bump.repeat.set(14,2);
+  return {map,bump};
+})();
+/* The ceiling was a flat 0x5a5d55 slab. At night that is close enough to
+   black that the tube fixtures read as slabs floating in a void - nothing
+   to see them against. A suspended acoustic-tile grid gives the fixtures a
+   plane to hang from and bounces the tube light back down the aisles. */
+const CEIL_TILE=(()=>{
+  const S=512, cv=document.createElement('canvas'); cv.width=cv.height=S;
+  const g=cv.getContext('2d');
+  g.fillStyle='#4a4b48'; g.fillRect(0,0,S,S);                         /* T-bar grid */
+  const TW=S/2, TH=S/4, G=3;                                          /* 2 x 4 tiles = 1.2 x 0.6 m each */
+  for(let r=0;r<4;r++)for(let c=0;c<2;c++){
+    const x=c*TW+G/2, y=r*TH+G/2, v=Math.round(rand(-6,6)), p=Math.random();
+    g.fillStyle = p<.03 ? '#2a2b29' : `rgb(${190+v},${191+v},${185+v})`;   /* the odd missing tile */
+    g.fillRect(x,y,TW-G,TH-G);
+    if(p>=.03&&p<.16){                                                /* water stain */
+      const rg=g.createRadialGradient(x+TW*rand(.3,.7),y+TH*rand(.3,.7),4,x+TW*.5,y+TH*.5,TW*.5);
+      rg.addColorStop(0,'rgba(120,96,60,.35)'); rg.addColorStop(1,'rgba(120,96,60,0)');
+      g.fillStyle=rg; g.fillRect(x,y,TW-G,TH-G);
+    }
+  }
+  for(let k=0;k<7000;k++){ g.fillStyle=`rgba(30,30,28,${rand(.03,.1)})`; g.fillRect(rand(0,S),rand(0,S),rand(1,2),rand(1,2)); }
+  const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace;
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=8; t.repeat.set(44/2.4,30/2.4);
+  return t;
+})();
+
 const MAT = {
   floor:  new THREE.MeshStandardMaterial({color:0xb9b6ad, roughness:.72, map:TEX.floor, normalMap:TEX.floorN}),
   floorD: new THREE.MeshStandardMaterial({color:0x8f8d85, roughness:.78, map:TEX.floor, normalMap:TEX.floorN}),
-  wall:   new THREE.MeshStandardMaterial({color:0x9a9c94, roughness:.95, map:TEX.wall,  normalMap:TEX.wallN}),
-  wallIn: new THREE.MeshStandardMaterial({color:0xa8aa9e, roughness:.9,  map:TEX.wall,  normalMap:TEX.wallN}),
-  ceil:   new THREE.MeshStandardMaterial({color:0x5a5d55, roughness:.95}),
+  wall:   new THREE.MeshStandardMaterial({color:0xe2e0da, roughness:.93, map:WALL_PAINT.map, bumpMap:WALL_PAINT.bump, bumpScale:.35}),
+  wallIn: new THREE.MeshStandardMaterial({color:0xe8e6e0, roughness:.92, map:WALL_PAINT.map, bumpMap:WALL_PAINT.bump, bumpScale:.35}),
+  ceil:   new THREE.MeshStandardMaterial({color:0x8e8f8a, roughness:1, map:CEIL_TILE}),
   metal:  new THREE.MeshStandardMaterial({color:0x9ba0a2, roughness:.4, metalness:.75}),
   metalD: new THREE.MeshStandardMaterial({color:0x565b5e, roughness:.55, metalness:.6}),
   board:  new THREE.MeshStandardMaterial({color:0x7a5f43, roughness:.95}),
@@ -1594,8 +1869,8 @@ const MAT = {
      it is clean and matte where it is scuffed. */
   const f=new THREE.Mesh(new THREE.PlaneGeometry(47,33), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, roughnessMap:TEX.floorR,
-    color:0x8d8b86, roughness:.34, metalness:.10,
-    envMapIntensity:.85 }));
+    color:0x8d8b86, roughness:.46, metalness:.05,
+    envMapIntensity:.7 }));
   f.rotation.x=-Math.PI/2; f.receiveShadow=true;
   /* Oversizing this to tuck under the walls put it in the same plane as the
      1240x46 town ground, and coplanar surfaces z-fight - grass flickered
@@ -1808,26 +2083,36 @@ function stockWorld(parent, local){
   parent.updateMatrixWorld(true);
   return new THREE.Matrix4().multiplyMatrices(parent.matrixWorld, local);
 }
+/* The gondola stock, the wall stock and the knocked-over floor stock each
+   built their own InstancedMesh per item type: three batches for every one
+   of the 22 types, 66 draws for what is 22 static sets. Accumulate per
+   source and rebuild, so each type is one batch however many stages add to
+   it (the stages arrive in different orders depending on which pack lands
+   last). */
+const STOCK_INST=new Map();          /* src -> {mats:[], meshes:[]} */
 function instanceStock(src, mats, parent){
   if(!src||!mats.length)return 0;
+  let e=STOCK_INST.get(src); if(!e){ e={mats:[],meshes:[]}; STOCK_INST.set(src,e); }
+  for(const m of mats) e.mats.push(m);
+  for(const im of e.meshes){ if(im.parent) im.parent.remove(im); im.dispose(); }
+  e.meshes.length=0;
   src.updateWorldMatrix(true,true);
   _instInv.copy(src.matrixWorld).invert();
-  let made=0;
   src.traverse(m=>{
     if(!m.isMesh||!m.geometry)return;
     /* a source may be a Group of sub-meshes; each keeps its offset from the
        source root so the instanced copy is assembled the same way */
     _instLocal.multiplyMatrices(_instInv, m.matrixWorld);
-    const im=new THREE.InstancedMesh(m.geometry, m.material, mats.length);
-    for(let i=0;i<mats.length;i++){
-      _instTmp.multiplyMatrices(mats[i], _instLocal);
+    const im=new THREE.InstancedMesh(m.geometry, m.material, e.mats.length);
+    for(let i=0;i<e.mats.length;i++){
+      _instTmp.multiplyMatrices(e.mats[i], _instLocal);
       im.setMatrixAt(i, _instTmp);
     }
     im.instanceMatrix.needsUpdate=true;
     im.castShadow=false; im.receiveShadow=true; im.frustumCulled=true;
-    parent.add(im); made++;
+    parent.add(im); e.meshes.push(im);
   });
-  return made;
+  return e.meshes.length;
 }
 /* position + Y rotation + uniform scale -> matrix, the only transform stock uses */
 const _instQ=new THREE.Quaternion(), _instE=new THREE.Euler(), _instV=new THREE.Vector3();
@@ -1870,10 +2155,56 @@ function stockWallUnits(){
 /* grocery boxes from the convenience-store pack, mixed in with the food so
    the shelves carry packaged goods as well as loose produce */
 const shelfExtras=[];
+/* The pack's boxed goods carry Unsplash photographs of whole supermarket
+   shelves as their textures - an aisle of colour squashed onto a 20 cm carton
+   at 256 px, which on the shelf reads as rainbow static (the "glitchy chip
+   bags"). The cans have no texture at all. Give each carton and can its own
+   packaging instead: a colour field, a label band, a name and a barcode,
+   drawn once per item, so a shelf of them reads as a shelf of brands. */
+const PACK_ART=(()=>{
+  const brands=[['OATS','#e63b1f','#ffd43a'],['CRISP','#1f5fa8','#ffffff'],['POPS','#2a9d5c','#fff2a8'],
+    ['CHOC','#5a2d1a','#f2c078'],['BRAN','#b8641c','#fff6dc'],['TEA','#b3112e','#ffe8b0'],
+    ['PASTA','#f0b429','#1d3b6b'],['BISCO','#7a1fa2','#ffd7f2'],['SOAP','#0f7fbf','#e9fbff'],['CRAX','#c8102e','#ffffff']];
+  const cans=[['#1c6fb8'],['#c8102e'],['#d7263d'],['#f0b429'],['#2a6fb0'],['#2a9d5c'],['#a80f1e']];
+  const mk=(fn)=>{ const cv=document.createElement('canvas'); cv.width=cv.height=256; fn(cv.getContext('2d'));
+    const t=new THREE.CanvasTexture(cv); t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4; t.flipY=false; return t; };
+  let bi=0, ci=0;
+  return {
+    box(){ const [nm,bg,fg]=brands[bi++%brands.length];
+      return mk(g=>{
+        g.fillStyle=bg; g.fillRect(0,0,256,256);
+        g.fillStyle=fg; g.beginPath(); g.arc(128,118,66,0,6.3); g.fill();
+        g.fillStyle=bg; g.font='900 34px Arial'; g.textAlign='center'; g.textBaseline='middle'; g.fillText(nm,128,120);
+        g.fillStyle='rgba(255,255,255,.85)'; g.fillRect(96,206,64,30);
+        g.fillStyle='#111'; for(let x=100;x<156;x+=4){ if(Math.random()<.6) g.fillRect(x,210,rand(1,2.4),22); }
+        g.fillStyle='rgba(0,0,0,.18)'; g.fillRect(0,0,256,10); g.fillRect(0,246,256,10);
+      }); },
+    can(){ const [bg]=cans[ci++%cans.length];
+      return mk(g=>{
+        g.fillStyle='#b9bcc0'; g.fillRect(0,0,256,256);          /* tinplate top and bottom */
+        g.fillStyle=bg; g.fillRect(0,34,256,188);
+        g.fillStyle='#ffffff'; g.beginPath(); g.arc(128,128,40,0,6.3); g.fill();
+        g.fillStyle='rgba(0,0,0,.22)'; g.fillRect(0,34,256,6); g.fillRect(0,216,256,6);
+      }); }
+  };
+})();
+function packArt(o, isCan){
+  o.traverse(m=>{
+    if(!m.isMesh) return;
+    const mats=[].concat(m.material).map(mt=>{
+      if(!mt) return mt;
+      const c=mt.clone(); c.map=isCan?PACK_ART.can():PACK_ART.box(); c.color.setHex(0xffffff);
+      c.roughness=isCan?.4:.85; c.metalness=isCan?.35:0; c.needsUpdate=true; return c;
+    });
+    m.material=Array.isArray(m.material)?mats:mats[0];
+  });
+}
 gltfLoad('assets/cstore.glb', (g3)=>{
   for(const o of g3.scene.children.slice()){
     if(/^box_|^can_/.test(o.name)){
-      o.userData.shelfScale = /^can_/.test(o.name) ? .30 : .26;
+      const isCan=/^can_/.test(o.name);
+      o.userData.shelfScale = isCan ? .30 : .26;
+      packArt(o, isCan);
       shelfExtras.push(o);
     }
     if(o.name==='cs_desk'||o.name==='cs_monitor'||o.name==='cs_register'){
@@ -1905,7 +2236,8 @@ gltfLoad('assets/food.glb', (gltf)=>{
   for(const row of shelfRows){
     for(const child of row.children.slice()){
       if(!child.userData||!child.userData.product)continue;
-      if(Math.random()>.5) continue;                /* leave some as boxes */
+      /* every slot: the half that stayed as flat-coloured blocks read as
+         Minecraft cubes on the shelves, and each block was its own draw */
       /* a single 8 cm cupcake reads as an empty shelf where a 40 cm block
          used to be - fill the slot with a small cluster instead */
       const n=2+((Math.random()*3)|0);
@@ -1935,6 +2267,7 @@ gltfLoad('assets/food.glb', (gltf)=>{
   for(const [si,mats] of allMats) batches+=instanceStock(items[si], mats, scene);
   SHELF_ITEMS=items;
   stockWallUnits();
+  floorStockSwap();
   console.info('shelf stock:',swapped,'food items from',items.length,
                'types in',batches,'instanced batches');
 }, undefined, ()=>console.info('assets/food.glb not reachable - block products stay'));
@@ -1990,6 +2323,21 @@ gltfLoad('assets/props.glb', (gltf)=>{
           row.add(c);
         }
       }
+    }
+    /* The toppled section was a hand-built grey wire frame and read as a
+       scaffold lying in the aisle. Use the real unit: same gondola as the
+       rows, on its back with the shelves facing up, seated by its bounds. */
+    if(window.__drToppled){
+      window.__drToppled.visible=false;
+      const t=gond.clone(true);
+      t.rotation.x=-Math.PI/2*.96;
+      t.rotateOnWorldAxis(new THREE.Vector3(0,1,0), .22);
+      t.position.set(-15.2,0,-3.4);
+      t.traverse(m=>{ if(m.isMesh){ m.castShadow=false; m.receiveShadow=true; worldHits.push(m); } });
+      scene.add(t); t.updateWorldMatrix(true,true);
+      const tb=new THREE.Box3().setFromObject(t);
+      t.position.y-=tb.min.y; t.updateWorldMatrix(true,true); tb.setFromObject(t);
+      colliders.push({minX:tb.min.x+.15,maxX:tb.max.x-.15,minZ:tb.min.z+.15,maxZ:tb.max.z-.15,h:tb.max.y});
     }
   }
   /* dress the checkout line and the back wall */
@@ -2150,7 +2498,7 @@ for(let i=0;i<8;i++){
 }
 /* shopping carts tipped */
 function cart(x,z,rot){
-  const g=new THREE.Group();
+  const g=new THREE.Group(); STATIC_GROUPS.push(g);
   /* wireframe:true on a box draws its twelve EDGES, which reads as a floating
      wire outline rather than a trolley. Build the basket from actual bars. */
   const W=1.0, H=.5, D=.7, BAR=.022;
@@ -2798,7 +3146,11 @@ function phPlace(pack, name, x, z, opts){
   o.updateWorldMatrix(true,true);
   const b=new THREE.Box3().setFromObject(o);
   const h=Math.max(.001, b.max.y-b.min.y);
-  const sc=(opts&&opts.h) ? (opts.h/h) : 1;
+  /* w: fit the largest horizontal extent instead. Fitting a flat prop by
+     height is a scale accident - {h:.05} on a notepad made it a metre wide,
+     which is what the glowing white slabs on the checkouts were. */
+  const wmax=Math.max(.001, b.max.x-b.min.x, b.max.z-b.min.z);
+  const sc=(opts&&opts.h) ? (opts.h/h) : (opts&&opts.w) ? (opts.w/wmax) : 1;
   o.scale.setScalar(sc);
   /* Packs vary: some models have their origin on the base, others at the
      centre of the bounding box. Placing by origin buried every centre-origin
@@ -2854,12 +3206,26 @@ function phPlace(pack, name, x, z, opts){
    asphalt) keep their character. */
 const PH_BLACK_FLOOR=0.055;      /* linear luminance a lit surface needs */
 function phLiftDarkMaterials(root, packName){
-  const seen=new Set(); let lifted=0;
+  const seen=new Set(); let lifted=0, demetalled=0, cutouts=0;
   root.traverse(o=>{
     if(!o.isMesh && !o.isSkinnedMesh) return;
     for(const m of [].concat(o.material)){
       if(!m || !m.color || seen.has(m.uuid)) continue;
       seen.add(m.uuid);
+      /* glTF's default metallicFactor is 1, and several of the packs ship
+         materials with no metallic-roughness texture and the factor left at
+         that default. A fully metallic surface has no diffuse term at all, so
+         the tree canopies and the dead tree rendered as a mirror of the night
+         sky: solid black with a pixelated alpha edge - the black blobs beside
+         the road in every drive screenshot. Nothing in these packs is bare
+         metal without a texture saying so. */
+      if(m.metalness===1 && !m.metalnessMap){ m.metalness=0; demetalled++; }
+      /* foliage cards: cut out rather than blend, so the leaves sort against
+         each other and the MSAA resolves the edge instead of a hard stair */
+      const tag=(o.name||'')+' '+(o.parent&&o.parent.name||'')+' '+(m.name||'');
+      if(m.map && m.transparent && m.opacity>=1 && /tree|leaf|leaves|foliage|plant|bush/i.test(tag)){
+        m.transparent=false; m.alphaTest=.45; m.alphaToCoverage=true; m.side=THREE.DoubleSide; m.depthWrite=true; cutouts++;
+      }
       const c=m.color;
       const lum=0.2126*c.r+0.7152*c.g+0.0722*c.b;
       if(lum>=PH_BLACK_FLOOR) continue;
@@ -2876,7 +3242,7 @@ function phLiftDarkMaterials(root, packName){
       lifted++;
     }
   });
-  if(lifted) console.info('prop pack',packName,'lifted',lifted,'near-black materials');
+  if(lifted||demetalled||cutouts) console.info('prop pack',packName,'lifted',lifted,'near-black,',demetalled,'default-metallic,',cutouts,'foliage cutouts');
 }
 function phLoad(pack, url, then){
   gltfLoad(url,(g)=>{
@@ -2884,7 +3250,7 @@ function phLoad(pack, url, then){
     for(const c of g.scene.children.slice()) if(c.name) lib[c.name]=c;
     phLiftDarkMaterials(g.scene, pack);
     PH_PACKS[pack]=lib;
-    try{ then&&then(lib); }catch(e){ console.warn('prop placement failed',pack,e); }
+    try{ then&&then(lib); }catch(e){ console.warn('prop placement failed',pack,(e&&e.message)||e,(e&&e.stack||'').split('\n').slice(0,3).join(' | ')); }
     console.info('prop pack',pack,Object.keys(lib).length);
   }, undefined, ()=>console.info(url+' not reachable'));
 }
@@ -3017,13 +3383,12 @@ phLoad('map2','assets/map2.glb',(lib)=>{
   P('shelfdisp',  -13.5, 5.4, {h:1.86, ry:Math.PI/2, solid:true, brk:'crate'});
   P('shelfdisp',   13.5, 5.4, {h:1.86, ry:-Math.PI/2, solid:true, brk:'crate'});
   P('shelfdisp',    0.0,-12.4,{h:1.86, ry:0,          solid:true, brk:'crate'});
-  P('shelfangled',-19.4,-6.2, {h:1.60, ry:Math.PI/2, solid:true, brk:'crate'});
-  P('shelfangled', 19.4,-6.2, {h:1.60, ry:-Math.PI/2,solid:true, brk:'crate'});
-  P('shelfempty', -19.4, 1.4, {h:1.36, ry:Math.PI/2, solid:true, brk:'crate'});
-  P('shelfempty',  19.4, 1.4, {h:1.36, ry:-Math.PI/2,solid:true, brk:'crate'});
+  /* the four free-standing empty racks that stood 1.8 m in front of the
+     stocked wall units are gone: bare red shelving beside full shelving read
+     as unfinished, and they hid the wall run behind them */
   /* loose stock on the floor and the checkout run */
   for(const [sx,sz] of [[-6.4,10.2],[7.1,9.6],[-15.2,-9.4],[16.0,-10.1],[2.4,-13.6]])
-    P('steaktray', sx, sz, {h:.06, y:.02, cull:90});
+    P('steaktray', sx, sz, {w:.28, y:.02, cull:90});
   for(let i=0;i<14;i++)
     P('sodacan', rand(-19,19), rand(-13,10), {h:.13, y:.01, cull:80});
   P('cartboxes', -9.2, 12.4, {h:1.0, ry:.6, solid:true});
@@ -3051,13 +3416,13 @@ phLoad('extra','assets/ph_extra.glb',(lib)=>{
   const shopFloor=[
     ['plastic_crate_01',.42],['plastic_crate_02',.42],['plastic_crate_03',.40],
     ['plastic_container',.44],['industrial_pastic_container',.52],
-    ['metal_trash_can',.62],['plastic_broom',1.18],['dustpan',.30],
-    ['plastic_monobloc_chair_01',.82],['hand_truck',1.24],['cement_bag',.26],
+    ['metal_trash_can',.62],['plastic_broom',1.18],['dustpan',{w:.32}],
+    ['plastic_monobloc_chair_01',.82],['hand_truck',1.24],['cement_bag',{w:.62}],
   ];
-  for(const [nm,h] of shopFloor){
+  for(const [nm,fit] of shopFloor){
     for(let i=0;i<3;i++){
       const s=spot(-19,19,-12.5,12.5);
-      if(s) P(nm, s[0], s[1], {h, solid:true, brk:'crate', cull:95});
+      if(s) P(nm, s[0], s[1], Object.assign({solid:true, brk:'crate', cull:95}, typeof fit==='number'?{h:fit}:fit));
     }
   }
   /* stacked crates in the back corners, where a stockroom run would be */
@@ -3074,13 +3439,13 @@ phLoad('extra','assets/ph_extra.glb',(lib)=>{
              'plastic_bottle_gallon'][i], s[0], s[1], {h:[.30,.24,.24,.20,.30][i], cull:80});
   }
   for(const [cx,cz] of [[-13,10.4],[-4.5,10.4],[4.5,10.4],[13,10.4]]){
-    P('office_notepads', cx+rand(-.5,.5), cz, {h:.05, y:.96, cull:70});
-    if(Math.random()<.5) P('clipboard', cx+rand(-.6,.6), cz, {h:.32, y:.95, cull:70});
+    P('office_notepads', cx+rand(-.5,.5), cz, {w:.24, y:.96, cull:70});
+    if(Math.random()<.5) P('clipboard', cx+rand(-.6,.6), cz, {w:.24, y:.95, cull:70});
   }
   /* safety kit by the doors and the back wall */
   P('korean_fire_extinguisher_01', -2.6, 12.9, {h:.62, cull:90});
   P('korean_fire_extinguisher_01',  2.6, 12.9, {h:.62, cull:90});
-  P('medical_box', -20.0, -6.0, {h:.34, y:1.5, ry:Math.PI/2, cull:80});
+  P('medical_box', -20.0, -6.0, {w:.36, y:1.5, ry:Math.PI/2, cull:80});
   for(const [fx,fz] of [[-20.2,4],[20.2,4],[0,-13.4]])
     P('fire_alarm', fx, fz, {h:.22, y:2.3, cull:80});
   /* a back office in the corner the shelving does not reach */
@@ -3167,7 +3532,7 @@ gltfLoad('assets/street.glb', (gltf)=>{
     return m;
   };
   /* hide the block buildings on the main strip - facades take over */
-  for(const g of (window.__boxBuildings||[])) g.visible=false;
+  for(const g of (window.__boxBuildings||[])){ g.visible=false; const ci=CULL.findIndex(c=>c.obj===g); if(ci>=0) CULL.splice(ci,1); }
 
   /* Facade_F is left out on purpose: it is a bare glass atrium - three
      materials, no solid wall - so on its own it reads as a see-through
@@ -3186,7 +3551,12 @@ gltfLoad('assets/street.glb', (gltf)=>{
     const b=new THREE.Box3().setFromObject(src);
     return dims[nm]={minX:b.min.x,maxX:b.max.x,minY:b.min.y,maxY:b.max.y,maxZ:b.max.z};
   };
-  const backMat=new THREE.MeshStandardMaterial({color:0x4b4741,roughness:.95,metalness:.02});
+  /* the mass behind each facade shows its bare end face wherever a row
+     stops (either side of the store lot) - a 13 m flat grey slab against the
+     sky. Brick it, so an exposed end reads as the building's side wall. */
+  const backMat=new THREE.MeshStandardMaterial({color:0x8a7f76,roughness:.95,metalness:.02,
+    map:surfaceTex('assets/tex/brick.jpg', 8, 5, true, {gain:1.5,lift:34}),
+    normalMap:surfaceTex('assets/tex/brick_n.jpg', 8, 5, false)});
   /* facing -1 = fronts look toward -z (north side of the road), +1 = toward +z */
   const row=(x0,x1,zFront,facing,sc)=>{
     const ry = facing<0 ? Math.PI : 0;
@@ -3207,6 +3577,7 @@ gltfLoad('assets/street.glb', (gltf)=>{
         bk.name='facBack';
         bk.position.set(x+w/2, h*.485, zFront - facing*10);
         bk.castShadow=true; bk.receiveShadow=true; scene.add(bk);
+        cullRegister(bk, x+w/2, zFront - facing*10, 220);   /* so the static pass folds them */
         placed++;
       }
       x += w + .3;
@@ -3765,7 +4136,11 @@ function extendTown(){
   t2_mailbox(-88,42.4,-.2);
 
   /* ---------- 3d: trash bag clusters ---------- */
-  const t2_bagMat=new THREE.MeshStandardMaterial({color:0x15171a,roughness:.35,metalness:.1});
+  /* 0x15171a is 0.008 linear - below anything the night rig can lift, so
+     the bags rendered as pure black spheres on the verge, the "black blobs"
+     at the start of every drive. Dark grey with a bit of sheen still reads
+     as a bin bag; it just takes a highlight. */
+  const t2_bagMat=new THREE.MeshStandardMaterial({color:0x2e3136,roughness:.42,metalness:.05});
   function t2_bags(x,z){
     for(let t2_i=0;t2_i<3;t2_i++){
       const t2_s=rand(.28,.42);
@@ -4113,6 +4488,14 @@ gltfLoad('assets/car2.glb',(gltf)=>{
         mat.transparent=true; mat.opacity=.18; mat.depthWrite=false;
         mat.side=THREE.DoubleSide; mat.color&&mat.color.setHex(0x2a3238);
       }
+      /* The build script keys the cabin plastics at 0.03 albedo and the paint
+         at 0.012. At night, with the environment at a tenth of its daytime
+         energy, both sit below anything the lights can lift, and the whole
+         dashboard and bonnet rendered as one flat black cut-out under the HUD
+         - the "black box around the car". Dark grey plastic and a glossier
+         paint still read as a black car; they just take shading. */
+      if(nm.startsWith('interior')){ if(!mat.map) mat.color.setRGB(.075,.072,.068); mat.roughness=.72; }
+      if(nm.startsWith('carpaint')){ mat.color.setRGB(.032,.033,.036); mat.roughness=.24; mat.metalness=.55; mat.envMapIntensity=1.4; }
     }
   });
   carModel=m; applyCarFit();
@@ -4123,6 +4506,11 @@ gltfLoad('assets/car2.glb',(gltf)=>{
     /* hide the block sedan; keep the group, wheels refs and tail material */
     townCar.traverse(o=>{ if(o.isMesh && !m.getObjectById(o.id)) o.visible=false; });
     carWheelsBind(m);
+    /* The Sonata is 116 separate meshes: 116 draws, and 77 more into the
+       shadow map, every frame for one car parked in the frustum for all of
+       act 1. Everything that never moves folds by material; the doors, boot
+       lid and wheels keep their own meshes so the hinges still work. */
+    mergeStatic([m],'car body',{parent:m, skip:o=>/^(wheel_|door_|trunk_lid)/.test(o.name||'')});
     console.info('custom car ready');
   };
   tryAttach();
@@ -4186,25 +4574,22 @@ function buildWrecks(){
     (window.__wreckGroups||[]).forEach(g=>g.visible=false);
     sites.forEach((st,i)=>{
     const w=src.clone(true);
+    /* every non-glass part was already tinted the same colour with its map
+       dropped, but each kept its own cloned material - a dozen draws per
+       wreck. Two materials per wreck lets the batcher fold it to two. */
+    const body=new THREE.MeshStandardMaterial({color:new THREE.Color(WRECK_TINT[i%WRECK_TINT.length]).multiplyScalar(.85), roughness:.9, metalness:.15});
+    const glass=new THREE.MeshStandardMaterial({color:0x1a1e20, roughness:.9, metalness:.15, transparent:true, opacity:.12});
     w.traverse(o=>{
       if(!o.isMesh)return;
       o.castShadow=true; o.receiveShadow=false;
       const ms=Array.isArray(o.material)?o.material:[o.material];
-      o.material=ms.map(mat=>{
-        if(!mat)return mat;
-        const c=mat.clone();
-        const nm=(mat.name||'').toLowerCase();
-        if(nm.includes('glass')){ c.transparent=true; c.opacity=.12; c.color.setHex(0x1a1e20); }
-        else if(c.color){ c.color.set(WRECK_TINT[i%WRECK_TINT.length]).multiplyScalar(.85); if(c.map)c.map=null; }
-        c.roughness=Math.max(c.roughness||0,.9);
-        c.metalness=Math.min(c.metalness??0,.15);
-        return c;
-      });
+      o.material=ms.map(mat=> (mat&&(mat.name||'').toLowerCase().includes('glass')) ? glass : body);
       if(o.material.length===1)o.material=o.material[0];
     });
     w.rotation.set(rand(-.03,.03), Math.PI/2+st[2]+rand(-.25,.25), rand(-.06,.06));
     w.position.set(st[0], -0.04, st[1]);
     scene.add(w);
+    cullRegister(w, st[0], st[1], 170);
     });
     console.info('roadside wrecks: low-poly sedan x'+sites.length);
   }, undefined, ()=>console.info('assets/car-lod.glb not reachable - block wrecks stay'));
@@ -4571,6 +4956,8 @@ function radioToggle(){ return Radio.toggle(); }
    and flickerMats[] (materials with jittered opacity/color). NO new lights. */
 const swayers=[];
 const flickerMats=[];
+/* the coloured floor cubes, so the food pack can replace them once it lands */
+const floorBoxes=[];
 
 function storeDressing(){
 
@@ -4588,6 +4975,7 @@ function storeDressing(){
   const dr_chrome=new THREE.MeshStandardMaterial({color:0x9ba0a2,roughness:.4,metalness:.75});
   const dr_palette=[0x8a3030,0x30604a,0xa07828,0x40548a];
   const dr_boxMats=dr_palette.map(c=>new THREE.MeshStandardMaterial({color:c,roughness:.85}));
+  const dr_card=new THREE.MeshStandardMaterial({color:0x7d6244,roughness:.95});
   const dr_up=V3(0,1,0);
 
   function dr_canvas(w,h,fn){
@@ -4649,11 +5037,11 @@ function storeDressing(){
                      clamp(rz+side*rand(.75,2.55),-12.6,13.4));
       b.rotation.y=rand(0,6.3);
       b.rotation.z=tz;
-      scene.add(b);
+      scene.add(b); floorBoxes.push({mesh:b, base:0});
     }
   }
   for(let i=0;i<8;i++){
-    const c=new THREE.Mesh(dr_box,dr_boxMats[rint(0,3)]);
+    const c=new THREE.Mesh(dr_box,dr_card);          /* flattened cardboard, not a coloured tile */
     /* y was pinned at .035 against a height of .05-.11, so half of these sank
        through the floor and half hovered. And they were dropped anywhere in
        the hall, including inside the shelf rows - floorSpot is the test the
@@ -4687,14 +5075,14 @@ function storeDressing(){
     g.position.set(-15.4, D/2, -3.4);
     g.rotation.set(Math.PI/2*.97, .18, 0);
     g.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
-    scene.add(g);
+    scene.add(g); window.__drToppled=g;   /* props.glb swaps in the real gondola */
     for(let i=0;i<12;i++){ /* spill cone off the fallen end */
       const s=new THREE.Mesh(dr_box,dr_boxMats[rint(0,3)]);
       s.scale.set(rand(.2,.42),rand(.18,.4),rand(.2,.45));
       const t=Math.random();
       s.position.set(-13.4+t*3.6,Math.min(s.scale.x,s.scale.z)/2,-2.9+rand(-1,1)*(2.2-t*1.4));
       s.rotation.y=rand(0,6.3); s.rotation.z=rand(-.5,.5);
-      scene.add(s);
+      scene.add(s); floorBoxes.push({mesh:s, base:0});
     }
   }
 
@@ -4704,7 +5092,7 @@ function storeDressing(){
       const it=new THREE.Mesh(dr_box,dr_boxMats[rint(0,3)]);
       it.scale.set(rand(.14,.3),rand(.1,.24),rand(.14,.3));
       it.position.set(cx+rand(-1.2,1.2),1.09+it.scale.y/2,11.6+rand(-.32,.32));
-      it.rotation.y=rand(0,6.3); scene.add(it);
+      it.rotation.y=rand(0,6.3); scene.add(it); floorBoxes.push({mesh:it, base:.96});
     }
     for(const dx of[-1.35,1.35]){
       const st=new THREE.Mesh(dr_stick,dr_chrome);
@@ -4773,9 +5161,11 @@ function storeDressing(){
     g.fillText('AUTHORIZED PERSONNEL',128,256);
     g.fillText('BEYOND THIS POINT',128,280);
   });
-  dr_poster(dr_dealsTex,2.6,1.7, 21.77,2.3,-5, -Math.PI/2);
-  dr_poster(dr_missTex,1.25,1.65,-21.77,2.2,.5,  Math.PI/2);
-  dr_poster(dr_empTex,1.05,1.35, -21.77,2.1,9.8, Math.PI/2);
+  /* above the 2.1 m wall units, not behind them - the deals poster read as
+     "T DEA" with its lower half hidden by the shelving */
+  dr_poster(dr_dealsTex,2.6,1.7, 21.77,3.15,-5, -Math.PI/2);
+  dr_poster(dr_missTex,1.25,1.65,-21.77,3.1,.5,  Math.PI/2);
+  dr_poster(dr_empTex,1.05,1.35, -21.77,3.0,9.8, Math.PI/2);
   { /* exit sign over front doors */
     const bx=new THREE.Mesh(dr_box,new THREE.MeshStandardMaterial({color:0x0e2a1a,emissive:0x17b558,emissiveIntensity:1.1,roughness:.5}));
     bx.scale.set(.95,.36,.14); bx.position.set(0,3.15,14.42); scene.add(bx);
@@ -4828,6 +5218,55 @@ function storeDressing(){
 }
 
 if(!window.__drDone){ window.__drDone=true; storeDressing(); }
+
+/* The floor mess was sixty-odd flat-coloured cubes - red, teal, ochre, blue -
+   and that is exactly what they looked like: Minecraft blocks scattered down
+   the aisles. Once the food pack has landed, swap each one for a real product
+   knocked over on the same spot, batched through the same instancing the
+   shelves use, and seated by its own bounds in whatever orientation it fell. */
+const _fbC=new THREE.Vector3(), _fbM=new THREE.Matrix4(), _fbQ=new THREE.Quaternion(), _fbE=new THREE.Euler(), _fbS=new THREE.Vector3(), _fbP=new THREE.Vector3();
+function localBox(src){
+  /* bounds in the source's OWN frame - instanceStock places relative to it */
+  src.updateWorldMatrix(true,true);
+  const inv=new THREE.Matrix4().copy(src.matrixWorld).invert(), box=new THREE.Box3(), m4=new THREE.Matrix4();
+  src.traverse(m=>{
+    if(!m.isMesh||!m.geometry) return;
+    m.geometry.computeBoundingBox();
+    const bb=m.geometry.boundingBox; m4.multiplyMatrices(inv, m.matrixWorld);
+    for(let i=0;i<8;i++) box.expandByPoint(_fbC.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(m4));
+  });
+  return box;
+}
+function seatedMatrix(box, x, base, z, ex, ey, ez, sc){
+  _fbE.set(ex,ey,ez); _fbQ.setFromEuler(_fbE); _fbS.set(sc,sc,sc);
+  _fbM.compose(_fbP.set(x,0,z), _fbQ, _fbS);
+  let minY=Infinity;
+  for(let i=0;i<8;i++) minY=Math.min(minY, _fbC.set(i&1?box.max.x:box.min.x, i&2?box.max.y:box.min.y, i&4?box.max.z:box.min.z).applyMatrix4(_fbM).y);
+  return new THREE.Matrix4().compose(new THREE.Vector3(x, base-minY, z), _fbQ, _fbS);
+}
+function floorStockSwap(){
+  if(!SHELF_ITEMS||!SHELF_ITEMS.length||!floorBoxes.length) return;
+  const items=SHELF_ITEMS, boxes=new Map(), mats=new Map();
+  let n=0;
+  for(const fb of floorBoxes){
+    const m=fb.mesh; if(!m.visible) continue;
+    m.visible=false;
+    const k2=Math.random()<.45?2:1;
+    for(let k=0;k<k2;k++){
+      const si=(Math.random()*items.length)|0, src=items[si];
+      let lb=boxes.get(src); if(!lb){ lb=localBox(src); boxes.set(src,lb); }
+      const sc=(src.userData.shelfScale||1)*rand(1.5,2.3);
+      const r=Math.random(), flip=Math.random()<.5?1:-1;
+      const ex = r<.45 ? Math.PI/2*flip : 0;                /* on its face  */
+      const ez = (r>=.45&&r<.75) ? Math.PI/2*flip : 0;      /* on its side  */
+      let bucket=mats.get(si); if(!bucket){ bucket=[]; mats.set(si,bucket); }
+      bucket.push(seatedMatrix(lb, m.position.x+(k?rand(-.35,.35):0), fb.base, m.position.z+(k?rand(-.35,.35):0), ex, rand(0,Math.PI*2), ez, sc));
+      n++;
+    }
+  }
+  let batches=0; for(const [si,ms] of mats) batches+=instanceStock(items[si], ms, scene);
+  console.info('floor stock:',n,'knocked-over products replace',floorBoxes.length,'cubes in',batches,'batches');
+}
 
 
 
@@ -5157,6 +5596,11 @@ muzzleFlash.position.copy(MUZZLE).add(V3(0,0,-.02)); gun.add(muzzleFlash);
 /* parented to the camera, not to `gun` - `gun` is hidden during the drive
    and a changing point-light count recompiles every material in the scene */
 const muzzleLight=new THREE.PointLight(0xffbb66,0,7,2); muzzleLight.position.copy(MUZZLE); camera.add(muzzleLight);
+/* instrument-cluster glow: at night nothing else reaches the dashboard, and
+   an unlit dashboard is a black cut-out under the HUD. Rides the camera like
+   the muzzle light and is dimmed to zero on foot - never hidden, so the
+   point-light count (and every compiled shader) stays constant. */
+const dashLight=new THREE.PointLight(0xffb37a,0,2.6,2); dashLight.position.set(0,-.35,-.75); camera.add(dashLight);
 
 /* ============================== OPERATOR VIEWMODEL ============================== */
 let vmLoaded=false, vmModel=null, vmMixer=null, vmActions={}, vmCurrent=null;
@@ -5272,8 +5716,63 @@ try{ loader.parse(operatorBuffer(), '',(gltf)=>{
     vmLayerize(vmGroup); vmLayerize(gun);
     vmLoaded=true;
     vmPlay('aim',0);
+    try{ vmBatch(); }catch(e){ console.warn('viewmodel batching skipped',e); }
   }catch(e){ console.warn('viewmodel init failed',e); vmLoaded=false; vmGroup.visible=false; gun.visible=true; }
 },(e)=>{ console.warn('glb parse failed - procedural viewmodel stays'); vmLoaded=false; });}catch(e){ console.warn('glb parse threw',e); }
+
+/* ===================== VIEWMODEL BATCHING =====================
+   The operator is ~150 rigid parts, one Mesh each, hung off the bones:
+   213 draws a frame for the arms and rifle - a third of the whole frame's
+   draw calls - over the same eight materials. A rigid part on a bone is
+   exactly what skinning with a single weight expresses, so bake every part
+   into world space, tag its vertices with the node it rides on, and draw the
+   lot as one SkinnedMesh per material. The clips, the emotes and the grip
+   calibration all still drive the bones; the parts just stop being drawn one
+   at a time. The head subtree is already hidden and stays out. */
+const VM_BATCHED=[];
+function vmBatch(){
+  if(!vmModel) return;
+  vmGroup.updateWorldMatrix(true,true);
+  const bones=[], boneIdx=new Map(), groups=new Map(); let parts=0;
+  vmModel.traverse(o=>{
+    if(!o.isMesh || o.isSkinnedMesh || !o.visible || Array.isArray(o.material) || !o.geometry || !o.geometry.attributes.position) return;
+    for(let a=o.parent; a && a!==vmGroup; a=a.parent) if(!a.visible) return;   /* under the hidden head */
+    if(gun.getObjectById(o.id)) return;                                          /* the rifle is its own thing */
+    const node=o.parent;
+    let bi=boneIdx.get(node); if(bi===undefined){ bi=bones.length; bones.push(node); boneIdx.set(node,bi); }
+    const k=o.material.uuid; let g=groups.get(k); if(!g){ g={mat:o.material, items:[]}; groups.set(k,g); }
+    g.items.push({mesh:o, bi}); parts++;
+  });
+  if(parts<8) return;
+  const skeleton=new THREE.Skeleton(bones);      /* inverses from the nodes' world matrices right now */
+  for(const g of groups.values()){
+    const geos=g.items.map(it=>{ const gg=it.mesh.geometry.clone(); gg.applyMatrix4(it.mesh.matrixWorld); return gg; });
+    const merged=mergeGeoms(geos);
+    const n=merged.attributes.position.count, si=new Uint16Array(n*4), sw=new Float32Array(n*4);
+    let v=0;
+    g.items.forEach((it,i)=>{ const c=geos[i].attributes.position.count; for(let j=0;j<c;j++){ si[(v+j)*4]=it.bi; sw[(v+j)*4]=1; } v+=c; });
+    merged.setAttribute('skinIndex', new THREE.BufferAttribute(si,4));
+    merged.setAttribute('skinWeight', new THREE.BufferAttribute(sw,4));
+    for(const gg of geos) gg.dispose();
+    const sm=new THREE.SkinnedMesh(merged, g.mat);
+    sm.name='vm:'+(g.mat.name||'part');
+    sm.frustumCulled=false; sm.castShadow=false; sm.receiveShadow=false;
+    scene.add(sm);                                  /* the world-space bake needs an identity model matrix */
+    sm.bind(skeleton, new THREE.Matrix4());
+    sm.layers.set(VM_LAYER);
+    for(const it of g.items) it.mesh.visible=false;
+    VM_BATCHED.push(sm);
+  }
+  console.info('viewmodel batched:',parts,'parts ->',VM_BATCHED.length,'skinned meshes on',bones.length,'nodes');
+}
+/* the batched body lives at the scene root, so it mirrors the group's
+   visibility by hand (the group is hidden for the drive and the cutscene) */
+function vmSyncBatched(){
+  if(!VM_BATCHED.length) return;
+  let on=vmLoaded&&vmGroup.visible&&vmModel&&vmModel.visible;
+  for(let a=vmGroup.parent; on&&a; a=a.parent) if(!a.visible) on=false;
+  for(const sm of VM_BATCHED) if(sm.visible!==on) sm.visible=on;
+}
 
 /* ===================== AK-74 WEAPON MODEL =====================
    Swaps the procedural rifle for the real model. The procedural meshes are
@@ -6229,8 +6728,12 @@ function buildTownFolk(proto, clips, fit){
 function townFolkUpdate(dt){
   if(!TOWN_FOLK.length)return;
   const cx = (phase==='drive'||phase==='parking') && townCar ? townCar.position.x : player.pos.x;
+  const inHall = phase==='inside';
   for(const f of TOWN_FOLK){
-    const near = Math.abs(f.root.position.x-cx) < FOLK_DRAW;
+    /* from inside the hall a pedestrian is only worth six skinned draws if
+       the door actually frames them */
+    const near = Math.abs(f.root.position.x-cx) < FOLK_DRAW
+              && (!inHall || doorWedge(player.pos.x,player.pos.z,f.root.position.x,f.root.position.z,.7));
     if(f.root.visible!==near) f.root.visible=near;
     if(!near) continue;
     f.root.position.x += f.dir*f.speed*dt;
@@ -6835,6 +7338,7 @@ function spawnThrowable(type,x,z,y){
   const src=throwProto[type]; if(!src)return null;
   const d=THROW_DEFS[type];
   const m=src.clone(true);
+  m.userData.noMerge=true;                 /* it gets picked up and thrown */
   m.scale.setScalar(d.scale);
   m.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=false; } });
   m.position.set(x, 0, z);
@@ -7069,6 +7573,10 @@ gltfLoad('assets/axe.glb', (gltf)=>{
   /* normalise whatever scale the model shipped at to a ~0.75 m hand axe */
   THROW_DEFS.axe.scale = len>1e-4 ? (0.75/len) : 1;
   src.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=false; } });
+  /* forty parts - shaft, collar rings, chevrons, screws - each its own draw,
+     times six axes on the floor. Fold the prototype by material once, and
+     every clone inherits the folded version. */
+  mergeStatic([src],'axe',{parent:src, prune:true});
   throwProto.axe=src;
   for(const [x,z] of [[-16.5,12.5],[15.8,-12.2],[-2.5,-13.4],[19.5,4.5]])
     spawnThrowable('axe',x,z);
@@ -11049,11 +11557,13 @@ window.__drs=()=>({scale:DRS.scale});
 function loop(){
   requestAnimationFrame(loop);
   drsUpdate();
+  vmSyncBatched();
   const dt=Math.min(clock.getDelta(),.05);
   const now=performance.now()/1000;
   if(playing&&!paused){
     if(phase!=='win') runTime+=dt;
     muzzleDecay(dt);          /* gunUpdate does not run while dead or driving */
+    dashLight.intensity=(phase==='drive'||phase==='parking')?1.5:0;
     if(player.alive){
       if(phase==='drive'||phase==='parking'){
         /* the host drives the shared car; a client only rides in it and takes
@@ -11195,6 +11705,9 @@ document.getElementById('btn-win-retry')&&(document.getElementById('btn-win-retr
 window.__carParkedRef=()=>carParked;
 window.__missionRef=()=>mission;
 window.vmLoadedRef=()=>vmLoaded;
+/* snapshot of what the synchronous builders put straight into the scene;
+   the static pass folds these once the packs have landed */
+INIT_STATIC=scene.children.filter(o=>o.isMesh && !o.isSkinnedMesh && !o.isInstancedMesh && !o.userData.brk && !o.userData.noMerge);
 window.__game={player, zombies, scene, camera, renderer, zombiesUpdate, spawnZombie, resetRun,
   startGame:()=>{ menuEl.classList.add('hidden'); deadEl.classList.add('hidden'); startGame(); },
   bloodPool, bloodBurst, pointsRef:()=>points, statsRef:()=>stats,
