@@ -585,9 +585,31 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const GLTF_MAX=3, GLTF_TIMEOUT=45000;
 let _gltfActive=0, _gltfSeen=0, _gltfDone=0, _gltfIdleT=null;
 const _gltfQ=[];
+/* Any material in the scene with transmission > 0 makes three run
+   renderTransmissionPass, which RE-RENDERS THE WHOLE OPAQUE SCENE into a
+   second target every frame, and forces a program-parameter recompute for
+   every material on every draw because the two targets disagree about output
+   colour space. car2.glb ships transmission=1 on FORTY-FIVE materials - not
+   just the glass but the paint, the chrome, the plastics and the interior.
+   Measured: zeroing it takes the frame from 1,596 draw calls to 849 and
+   8.23 ms to 7.01 ms. Nothing here wants real refraction; the glazing gets
+   its look from transparent/opacity. */
+function killTransmission(root){
+  const seen=new Set(); let n=0;
+  root.traverse(o=>{
+    if(!o.isMesh&&!o.isSkinnedMesh) return;
+    for(const m of [].concat(o.material)){
+      if(!m||seen.has(m.uuid)) continue; seen.add(m.uuid);
+      if(m.transmission){ m.transmission=0; m.thickness=0; n++; }
+    }
+  });
+  return n;
+}
 function gltfLoad(url,onLoad,onProgress,onError){
   _gltfSeen++;
-  const done=(g)=>{ try{ onLoad&&onLoad(g); } finally { if(typeof scheduleStaticPass==='function') scheduleStaticPass(); } };
+  const done=(g)=>{
+    try{ const n=killTransmission(g.scene); if(n) console.info(url.split('/').pop(),'transmission zeroed on',n,'materials'); }catch(e){}
+    try{ onLoad&&onLoad(g); } finally { if(typeof scheduleStaticPass==='function') scheduleStaticPass(); } };
   _gltfQ.push({url,onLoad:done,onError,tries:0});
   _gltfProgress();
   _gltfPump();
@@ -1122,7 +1144,14 @@ addEventListener('resize', ()=>{
       renderer.autoClear = false;
       scene.background = null;          /* else it force-clears the colour buffer */
       renderer.clearDepth();
+      /* Pass 1 above has just updated every matrix in the scene, and this
+         pass draws a handful of layer-1 objects - but render() would walk
+         and re-update all of them again for it. Measured at 1.68 ms a frame
+         to produce, in the common case, zero draw calls. */
+      const mw = scene.matrixWorldAutoUpdate;
+      scene.matrixWorldAutoUpdate = false;
       renderer.render(scene, window.__vmCam);
+      scene.matrixWorldAutoUpdate = mw;
       scene.background = bg;
       renderer.autoClear = ac;
     }
@@ -1296,9 +1325,18 @@ function cullRegister(obj, cx, cz, radius){
   CULL.push({obj, cx, cz, r:radius});
   return obj;
 }
-/* Inside the hall the town is only visible through the 4.2 m door opening
-   at z=15 (the windows are boarded). True when the line from (px,pz) to the
-   object crosses the opening, allowing for the object's own radius. */
+/* Inside the TOPS hall the town is only visible through the 4.2 m door
+   opening at z=15 (the windows are boarded), so anything beyond the front
+   wall can be skipped unless the line from the player to it crosses that
+   opening, allowing for the object's own radius.
+
+   THIS IS ACT 1 ONLY. The opening is hardcoded at x=0, z=15 - the TOPS
+   shopfront. Act 2 is the mosque 900 m west, whose own interior starts at
+   z=17.28 (MQ_Z) and runs BACK from there, so every mosque object satisfied
+   cz>15.6 and got wedge-tested against a doorway 900 m away, which nothing
+   can ever pass. Walking into the mosque therefore deleted the mosque. Guard
+   it on the act, and take the doorway from the act rather than a literal. */
+function wedgeActive(){ return phase==='inside' && mission.act!==2; }
 function doorWedge(px,pz,cx,cz,sz){
   const t=(15-pz)/(cz-pz);
   return t>0 && Math.abs(px+(cx-px)*t) < 2.1 + (sz||1)*t;
@@ -1309,7 +1347,7 @@ function cullUpdate(dt){
   _cullT=.2;                                   /* 5 Hz is plenty for this */
   const px=(phase==='drive'||phase==='parking')&&townCar?townCar.position.x:player.pos.x;
   const pz=(phase==='drive'||phase==='parking')&&townCar?townCar.position.z:player.pos.z;
-  const inHall = phase==='inside';
+  const inHall = wedgeActive();
   for(const c of CULL){
     const d=Math.hypot(px-c.cx, pz-c.cz);
     let on=d<c.r;
@@ -1465,6 +1503,10 @@ function retireMesh(m){
    visibility, so bullets still hit them, and colliders are separate anyway.
    Only what never moves and never breaks goes through here. */
 function mergeGeoms(list){
+  /* the INTERSECTION of attributes: one geometry without uv sharing a
+     material with textured ones would silently strip uv from all of them and
+     the whole batch would sample texel (0,0) as one flat colour. Callers
+     must not mix; this is the safety net that makes that visible. */
   const names=['position','normal','uv','uv1','color'].filter(n=>list.every(g=>g.attributes[n]));
   let vc=0, ic=0;
   for(const g of list){ const c=g.attributes.position.count; vc+=c; ic+=g.index?g.index.count:c; }
@@ -1488,6 +1530,11 @@ function mergeGeoms(list){
   return out;
 }
 const MERGED=[];
+/* deliberately never added to the scene: it exists only to own the meshes
+   that have been folded into a batch, keeping them out of every traversal */
+const MERGE_ATTIC=new THREE.Object3D();
+MERGE_ATTIC.matrixWorldAutoUpdate=false;
+window.__attic=()=>MERGE_ATTIC.children.length;
 /* one component of one vertex, for plain and interleaved attributes alike
    (getComponent only exists on newer three builds) */
 function attrGet(a,i,k){
@@ -1510,7 +1557,10 @@ function sliceGeometry(geo, start, count){
     }
     newIdx.push(ni);
   }
-  for(const n of names){ const a=cols[n].a; out.setAttribute(n,new THREE.BufferAttribute(new (a.array.constructor)(cols[n].d), a.itemSize, a.normalized)); }
+  /* attrGet DENORMALISES (a Uint8 127 comes back as 0.498), so writing it
+     into the source's integer constructor would truncate every value to 0 or
+     1 while the normalized flag still claimed otherwise. Always widen. */
+  for(const n of names){ const a=cols[n].a; out.setAttribute(n,new THREE.BufferAttribute(new Float32Array(cols[n].d), a.itemSize, false)); }
   out.setIndex(newIdx);
   return out;
 }
@@ -1557,7 +1607,19 @@ function mergeStatic(roots, label, opts){
     for(const gg of geos) gg.dispose();
     parent.add(merged); MERGED.push(merged); made.push(merged);
   }
-  if(opts.prune) for(const m of folded){ if(m.parent) m.parent.remove(m); }
+  /* visible=false skips DRAWING, not traversal: updateMatrixWorld and
+     projectObject still walked all 2,935 folded originals on every one of the
+     six render() calls a frame. Move them to a holder that is never in the
+     scene, so the walk skips them entirely while worldHits raycasts (which
+     read matrixWorld directly and never update it) still hit them exactly
+     where they were. Their world matrices are frozen first, because in the
+     holder their local matrix no longer means anything.
+     Measured: 8.23 -> 6.67 ms/frame, 9,747 -> 1,529 nodes. */
+  for(const m of folded){
+    m.updateMatrixWorld(true);
+    m.matrixAutoUpdate=false; m.matrixWorldAutoUpdate=false;
+    MERGE_ATTIC.add(m);
+  }
   if(made.length){ const line='batched '+label+': '+folded.size+' meshes -> '+made.length; console.info(line); (window.__staticLog=window.__staticLog||[]).push(line); }
   return made;
 }
@@ -1612,6 +1674,9 @@ function staticPass(){
        few materials shared by many clones, and from inside it passes the
        wedge test whatever its size, so it stays coarse - one 100 m mesh per
        material rather than three 40 m ones. */
+    /* The fine cells and the z-bands describe the TOPS lot, so they are keyed
+       off distance from TOPS (x=0). The mosque, 900 m west, simply falls into
+       the coarse 100 m cells - it has no shopfront to occlude through. */
     const near=Math.abs(c.cx)<140;
     const zb=c.cz<15.6?0:(c.cz<31?1:2);
     const key = (near&&zb===0) ? 'hall' : zb+'|'+Math.floor((c.cx+1200)/((near&&zb===1)?40:100))+(near&&zb===1?'n':'');
@@ -1759,9 +1824,16 @@ function relevel(tex,{gain=1,lift=0}={}){
 const TEX={
   /* AmbientCG scanned sets: Road008A, Ground110, Grass005, Tiles141.
      Colour maps are sRGB; normal and roughness must stay linear. */
-  road : surfaceTex('assets/tex/road2_c.jpg', 54, 2),    /* plane is 270 x 8  */
-  roadN: surfaceTex('assets/tex/road2_n.jpg', 54, 2, false),
-  roadR: surfaceTex('assets/tex/road2_r.jpg', 54, 2, false),
+  /* The road and the grass verge were authored when the map was 270 m long
+     and were never rescaled when it was extended to 1240 m, so both have
+     been stretched along the direction you drive for the whole trip: the
+     road 23.0 m per tile across vs 4.0 m along (5.7:1) and the grass 12.9
+     vs 2.8 (4.6:1). That is 66,000 square metres - every surface visible
+     from the car - smeared into horizontal bands, which reads as permanent
+     motion blur that never resolves. 248 restores the original 5 m tile. */
+  road : surfaceTex('assets/tex/road2_c.jpg', 248, 2),   /* plane is 1240 x 8 */
+  roadN: surfaceTex('assets/tex/road2_n.jpg', 248, 2, false),
+  roadR: surfaceTex('assets/tex/road2_r.jpg', 248, 2, false),
   /* the lot is asphalt like the road, just at a tighter repeat - Ground110's
      gravel read as a rubble field under the parked car */
   lot  : surfaceTex('assets/tex/road2_c.jpg', 14, 5),    /* lot is 48 x 15    */
@@ -1769,8 +1841,8 @@ const TEX={
   lotR : surfaceTex('assets/tex/road2_r.jpg', 14, 5, false),
   dirt : surfaceTex('assets/tex/ground2_c.jpg', 30, 10),
   dirtN: surfaceTex('assets/tex/ground2_n.jpg', 30, 10, false),
-  grass: surfaceTex('assets/tex/grass2_c.jpg', 96, 16),  /* plane is 1240 x 45.3 */
-  grassN:surfaceTex('assets/tex/grass2_n.jpg', 96, 16, false),
+  grass: surfaceTex('assets/tex/grass2_c.jpg', 438, 16), /* plane is 1240 x 45.3 */
+  grassN:surfaceTex('assets/tex/grass2_n.jpg', 438, 16, false),
   /* a supermarket has a tiled floor, not floorboards */
   floor: surfaceTex('assets/tex/tiles2_c.jpg', 20, 14),  /* hall is 44 x 30   */
   floorN:surfaceTex('assets/tex/tiles2_n.jpg', 20, 14, false),
@@ -1964,6 +2036,15 @@ for(const wx of [-16,-8,0,8,16]){
    dressing: parapet, pilasters, entrance canopy, apron and roof plant. */
 (function storefront(){
   const clad  =new THREE.MeshStandardMaterial({color:0xd6d8cc,roughness:.92,map:TEX.wall,normalMap:TEX.wallN});
+  /* TEX.wall carries ONE repeat (14,2), tuned for a wide wall, and it is
+     shared by every box that uses this material - so the 1.1 m pilasters
+     rendered it at 0.08 m across against 2.45 m down, a 31:1 pinstripe
+     beside a parapet 40x coarser. Narrow members get their own repeat. */
+  const cladNarrow=clad.clone();
+  cladNarrow.map=TEX.wall.clone(); cladNarrow.map.needsUpdate=true;
+  cladNarrow.map.wrapS=cladNarrow.map.wrapT=THREE.RepeatWrapping; cladNarrow.map.repeat.set(.5,2);
+  cladNarrow.normalMap=TEX.wallN.clone(); cladNarrow.normalMap.needsUpdate=true;
+  cladNarrow.normalMap.wrapS=cladNarrow.normalMap.wrapT=THREE.RepeatWrapping; cladNarrow.normalMap.repeat.set(.5,2);
   const trim  =new THREE.MeshStandardMaterial({color:0x2b3138,roughness:.7,metalness:.25});
   const accent=new THREE.MeshStandardMaterial({color:0xa8362c,roughness:.75});
   const conc  =new THREE.MeshStandardMaterial({color:0x9a978e,roughness:.95});
@@ -1986,7 +2067,7 @@ for(const wx of [-16,-8,0,8,16]){
 
   /* pilasters between the boarded bays */
   for(const px of [-20.4,-12,-4.6,4.6,12,20.4])
-    put(1.1,4.9,.7, px,2.45,15.3, clad);
+    put(1.1,4.9,.7, px,2.45,15.3, cladNarrow);
 
   /* entrance: recessed reveal, canopy, downlights, bollards */
   put(9.4,.35,3.2, 0,3.62,16.7, trim);                 // canopy slab
@@ -2200,6 +2281,13 @@ function packArt(o, isCan){
   });
 }
 gltfLoad('assets/cstore.glb', (g3)=>{
+  /* This pack and storeprops below never went through the lift, and they are
+     the ones that need it most: SHELVING - the 2,000 square metres of wall
+     racking lining both long walls - ships metalness=1 with no metalness
+     map, and a fully metallic surface has NO diffuse term, so the ceiling
+     tubes never landed on it at all. The register and the monitor are pure
+     black metal, which no rig can light. */
+  phLiftDarkMaterials(g3.scene,'cstore');
   for(const o of g3.scene.children.slice()){
     if(/^box_|^can_/.test(o.name)){
       const isCan=/^can_/.test(o.name);
@@ -2374,6 +2462,7 @@ gltfLoad('assets/props.glb', (gltf)=>{
   place('shelf_tall', 20.6, -8.0, -Math.PI/2);   /* was inside the back-wall run */
   /* the industrial shelving + cashier desk pack */
   gltfLoad('assets/storeprops.glb', (g2)=>{
+  phLiftDarkMaterials(g2.scene,'storeprops');
     const lib2={}; for(const o of g2.scene.children.slice()) lib2[o.name]=o;
     const put2=(nm,x,z,ry,sc)=>{
       const src=lib2[nm]; if(!src)return null;
@@ -2762,6 +2851,10 @@ function buildTown(){
     const hd=new THREE.Mesh(headGeo,lampGlow); hd.position.set(1.25,5.42,0); g.add(hd);
     const pt=new THREE.PointLight(0xffbf80,20,22,1.8); pt.position.set(1.25,5.2,0); g.add(pt);
     g.position.set(x,0,z); g.rotation.y=ry; scene.add(g);
+    /* every lit fragment in range evaluates EVERY point light in the scene,
+       and these were never enrolled, so the six-light budget was capping
+       about ten of sixteen */
+    lightRegister(pt,45);
     colliders.push({minX:x-.14,maxX:x+.14,minZ:z-.14,maxZ:z+.14,h:5.6});
   }
   townLamp(-12,30.9,-Math.PI/2);
@@ -3043,6 +3136,12 @@ function buildMosque(){
   }
 
   /* ---------------- sahn (courtyard) ---------------- */
+  /* TEX.floor's repeat is tuned for the 44 x 30 store hall, so on a 54 x 19
+     courtyard the same tiles come out 2:1 - they visibly change proportion
+     as you walk out of the prayer hall. Its own clone, matching the hall's
+     2.5 m tile. */
+  const yardTex=TEX.floor.clone(); yardTex.needsUpdate=true;
+  yardTex.wrapS=yardTex.wrapT=THREE.RepeatWrapping; yardTex.repeat.set(21.6,7.6);
   const yard=new THREE.Mesh(new THREE.PlaneGeometry(54,19), new THREE.MeshStandardMaterial({
     map:TEX.floor, normalMap:TEX.floorN, color:0xa9a290, roughness:.9}));
   yard.rotation.x=-Math.PI/2; yard.position.set(0,.015,23); yard.receiveShadow=true; G.add(yard);
@@ -3206,7 +3305,7 @@ function phPlace(pack, name, x, z, opts){
    asphalt) keep their character. */
 const PH_BLACK_FLOOR=0.055;      /* linear luminance a lit surface needs */
 function phLiftDarkMaterials(root, packName){
-  const seen=new Set(); let lifted=0, demetalled=0, cutouts=0;
+  const seen=new Set(); let lifted=0, demetalled=0, cutouts=0, badN=0;
   root.traverse(o=>{
     if(!o.isMesh && !o.isSkinnedMesh) return;
     for(const m of [].concat(o.material)){
@@ -3220,10 +3319,24 @@ function phLiftDarkMaterials(root, packName){
          the road in every drive screenshot. Nothing in these packs is bare
          metal without a texture saying so. */
       if(m.metalness===1 && !m.metalnessMap){ m.metalness=0; demetalled++; }
+      /* glTF hands back the SAME Texture instance when one image is
+         referenced as both baseColorTexture and normalTexture, and the sRGB
+         tag from the colour slot sticks. wP_Facade_A's 'conc' does exactly
+         that: its blue channel averages 0.20, so every texel decodes to a
+         NEGATIVE tangent Z and the shading normal points away from every
+         light. A 14 x 15 m wall lit as if it faced backwards - another of
+         the black slabs this function exists to kill. */
+      if(m.normalMap && m.map && (m.normalMap===m.map || m.normalMap.source===m.map.source)){ m.normalMap=null; badN++; }
       /* foliage cards: cut out rather than blend, so the leaves sort against
          each other and the MSAA resolves the edge instead of a hard stair */
       const tag=(o.name||'')+' '+(o.parent&&o.parent.name||'')+' '+(m.name||'');
-      if(m.map && m.transparent && m.opacity>=1 && /tree|leaf|leaves|foliage|plant|bush/i.test(tag)){
+      /* These packs export every cutout as alphaMode BLEND with opacity 1,
+         which is a lie: a blended cutout writes no depth, so overlapping
+         panels sort by draw order and pop in front of each other. The old
+         name whitelist caught foliage and missed the chain-link fencing and
+         the lattice crates. Treat any fully-opaque blended map as a cutout,
+         and exempt the things that really are see-through. */
+      if(m.map && m.transparent && m.opacity>=1 && !/glass|window|water|screen/i.test(tag)){
         m.transparent=false; m.alphaTest=.45; m.alphaToCoverage=true; m.side=THREE.DoubleSide; m.depthWrite=true; cutouts++;
       }
       const c=m.color;
@@ -3242,7 +3355,7 @@ function phLiftDarkMaterials(root, packName){
       lifted++;
     }
   });
-  if(lifted||demetalled||cutouts) console.info('prop pack',packName,'lifted',lifted,'near-black,',demetalled,'default-metallic,',cutouts,'foliage cutouts');
+  if(lifted||demetalled||cutouts||badN) console.info('prop pack',packName,'lifted',lifted,'near-black,',demetalled,'default-metallic,',cutouts,'cutouts,',badN,'colour-as-normal');
 }
 function phLoad(pack, url, then){
   gltfLoad(url,(g)=>{
@@ -3722,6 +3835,13 @@ function buildHighway(){
     normalScale:new THREE.Vector2(.6,.6)});
   const MAT_DOOR=new THREE.MeshStandardMaterial({color:0x6b7075,roughness:.62,metalness:.42,
     map:surfaceTex('assets/tex/metal.jpg', 2, 1.4)});
+  /* unitBox is a shared 1x1x1 whose faces all carry UV 0..1, so a repeat set
+     for a wall face is applied whole to a 10 cm rib as well - the corrugation
+     ribs came out at 0.05 m across against 6.3 m down, a 125:1 smear that
+     aliases into crawling vertical streaks as you drive past. Nothing on a
+     10-50 cm strip is legible anyway: same colour, no map. */
+  const MAT_THIN=new THREE.MeshStandardMaterial({color:0x6b7075,roughness:.62,metalness:.42});
+  const MAT_PIER=new THREE.MeshStandardMaterial({color:0xc6b69c,roughness:.95});
   const MAT_POLE=new THREE.MeshStandardMaterial({color:0x6b5f4e,roughness:.98});
   const MAT_WIRE=new THREE.MeshBasicMaterial({color:0x1a1a1a});
   const MAT_TRUNK=new THREE.MeshStandardMaterial({color:0x6a5a44,roughness:1});
@@ -3792,7 +3912,7 @@ function buildHighway(){
     b.castShadow=true; b.receiveShadow=true; g.add(b);
     solid(b, x-w/2, x+w/2, Math.min(zf,zc-d/2), Math.max(zf,zc+d/2), h);
     for(let rx=-w/2+1.6; rx<w/2-1; rx+=2.8){        /* vertical corrugation ribs */
-      const rib=new THREE.Mesh(unitBox,MAT_DOOR);
+      const rib=new THREE.Mesh(unitBox,MAT_THIN);
       rib.scale.set(.13,h*.94,.1); rib.position.set(x+rx,h*.47,zf+facing*.07); g.add(rib);
     }
     const dw=Math.min(6.5,w*.42);
@@ -3820,7 +3940,7 @@ function buildHighway(){
     seg(x-w/2, zc, .3, d); seg(x+w/2, zc, .3, d);
     seg(x, zf-facing*d, w, .3);
     for(const p of [-1,1]){
-      const pier=new THREE.Mesh(unitBox,MAT_WALL);
+      const pier=new THREE.Mesh(unitBox,MAT_PIER);
       pier.scale.set(.5,3.1,.5); pier.position.set(x+p*gate/2,1.55,zf); g.add(pier);
     }
     const nh=Math.random()<.5?2:1;
@@ -3909,7 +4029,7 @@ function buildHighway(){
     canopy.scale.set(17,.55,9); canopy.position.set(x,5.1,z);
     canopy.castShadow=true; g.add(canopy); worldHits.push(canopy);
     for(const px of [-7,7]) for(const pz of [-3.4,3.4]){
-      const c=new THREE.Mesh(unitBox,MAT_DOOR);
+      const c=new THREE.Mesh(unitBox,MAT_THIN);       /* 0.42 m column: 17:1 under MAT_DOOR's repeat */
       c.scale.set(.42,5,.42); c.position.set(x+px,2.5,z+pz); g.add(c);
       colliders.push({minX:x+px-.5,maxX:x+px+.5,minZ:z+pz-.5,maxZ:z+pz+.5,h:5});
     }
@@ -4494,7 +4614,22 @@ gltfLoad('assets/car2.glb',(gltf)=>{
          dashboard and bonnet rendered as one flat black cut-out under the HUD
          - the "black box around the car". Dark grey plastic and a glossier
          paint still read as a black car; they just take shading. */
-      if(nm.startsWith('interior')){ if(!mat.map) mat.color.setRGB(.075,.072,.068); mat.roughness=.72; }
+      /* interior_bej_door and interior_bej_door2 ship pure white, so the
+         cabin of a black car read as cream leather - and it is the first
+         thing you see in the arrival's third-person shots. */
+      /* The cabin trim is the first thing you see in the arrival's
+         third-person shots, and on an all-black car it was cream. The
+         colour rule below only fired on UNTEXTURED materials, so
+         interior_mratb and gear_nm - which carry a light beige leather map
+         at full white - stayed bright. A textured material keeps its map;
+         the colour multiplies it down instead of replacing it. */
+      if(nm.startsWith('interior')||nm.startsWith('gear_')){
+        if(mat.map) mat.color.setRGB(.26,.25,.24);
+        else        mat.color.setRGB(.075,.072,.068);
+        mat.roughness=.72;
+      }
+      if(nm.includes('bej')||nm.includes('beige')){ mat.color.setRGB(.055,.053,.050); mat.roughness=.80; mat.metalness=0; }
+      if(nm.startsWith('safety_belt')){ mat.color.setRGB(.05,.05,.055); }
       if(nm.startsWith('carpaint')){ mat.color.setRGB(.032,.033,.036); mat.roughness=.24; mat.metalness=.55; mat.envMapIntensity=1.4; }
     }
   });
@@ -4727,6 +4862,12 @@ function carDrive(dt,keys){
 function carCamera(dt){
   if(!townCar)return;
   mdx=0; mdy=0;
+  /* The arrival plays during phase 'parking', and this runs every frame of
+     it - so it switched the operator's body off again one line after
+     cutStart switched it on, and the whole get-out-and-open-the-boot beat
+     played with an invisible actor. The cutscene owns the body and the
+     camera while it is on. */
+  if(typeof CUT!=='undefined' && CUT.on) return;
   gun.visible=false; vmGroup.visible=false;
   townCar.updateMatrixWorld(true);
   /* a passenger sits in the other front seat, not on top of the driver */
@@ -4756,8 +4897,11 @@ function carCamera(dt){
   camera.rotation.set(clamp(-carAccelS*.0045,-.04,.05)+CAR_CAM.pitch,carCamYaw,carCamRoll);
 
   const targetFov=94+spN*8;                     /* wide in the cabin too */
+  const fovWas=camera.fov;
   camera.fov=lerp(camera.fov,targetFov,clamp(dt*9,0,1));
-  camera.updateProjectionMatrix();
+  /* rebuilding the projection matrix and its inverse every frame when the
+     FOV has already settled, which is almost always */
+  if(Math.abs(camera.fov-fovWas)>0.01) camera.updateProjectionMatrix();
 }
 
 /* ===================== CAR RADIO =====================
@@ -5708,6 +5852,7 @@ try{ loader.parse(operatorBuffer(), '',(gltf)=>{
     }
     vmMixer=new THREE.AnimationMixer(vmModel);
     gltf.animations.forEach(c=>{ vmActions[c.name]=vmMixer.clipAction(c); });
+    window.__vmActions=vmActions; window.__vmClips=gltf.animations.map(c=>c.name+':'+c.duration.toFixed(2));
     vmGroup.add(vmModel);
     vmGroup.scale.setScalar(.84);
     vmGroup.position.set(VM_ANCHOR.x,VM_ANCHOR.y,VM_ANCHOR.z);
@@ -5769,8 +5914,14 @@ function vmBatch(){
    visibility by hand (the group is hidden for the drive and the cutscene) */
 function vmSyncBatched(){
   if(!VM_BATCHED.length) return;
-  let on=vmLoaded&&vmGroup.visible&&vmModel&&vmModel.visible;
-  for(let a=vmGroup.parent; on&&a; a=a.parent) if(!a.visible) on=false;
+  /* during the arrival the body is out in the world, not under the camera,
+     so vmGroup's own visibility says nothing about whether to draw it */
+  let on;
+  if(typeof CUT!=='undefined' && CUT.actorOn) on=true;
+  else {
+    on=vmLoaded&&vmGroup.visible&&vmModel&&vmModel.visible;
+    for(let a=vmGroup.parent; on&&a; a=a.parent) if(!a.visible) on=false;
+  }
   for(const sm of VM_BATCHED) if(sm.visible!==on) sm.visible=on;
 }
 
@@ -5810,7 +5961,10 @@ function selectWeapon(i){
   weapon.spread=w.spread;
   const el=document.getElementById('weapon-name');
   if(el) el.textContent=w.name;
-  if(typeof Audio!=='undefined'&&Audio.reload) try{ Audio.reload(); }catch(e){}
+  /* Audio.reload() is the old SYNTHESISED placeholder beep from before there
+     were recorded weapon sounds. selectWeapon already plays SFX.gun.draw
+     above, so this fired a beep over the top of the real draw on every
+     weapon switch. */
 }
 gltfLoad('assets/guns.glb', (gltf)=>{
   for(const w of WEAPONS){
@@ -5845,8 +5999,152 @@ gltfLoad('assets/guns.glb', (gltf)=>{
   gun.traverse(o=>{ if(o.isMesh && o!==muzzleFlash && !Object.values(gunModels).some(m=>m.getObjectById(o.id))) o.visible=false; });
   if(typeof vmLayerize==='function') vmLayerize(gun);
   selectWeapon(weaponIndex);   /* not 0: the player may already have switched */
+  try{ gunDecalApply(); }catch(e){ console.warn('gun decal failed',e&&e.message); }
   console.info('weapons ready:', Object.keys(gunModels).join(', '));
 }, undefined, ()=>console.info('assets/guns.glb not reachable - procedural rifle stays'));
+
+/* ===================== GUN DECAL =====================
+   A sticker on the side of the receiver: your own text, or an image file.
+
+   TO CHANGE THE TEXT: edit GUN_DECAL.text below (and .sub for the small line
+   under it). TO USE AN IMAGE INSTEAD: drop a PNG at assets/decal.png and set
+   GUN_DECAL.img='assets/decal.png' - the image then replaces the text
+   entirely. Transparent PNGs work; the sticker is alpha-blended.
+
+   It is placed on the LEFT flank, which is the side the first-person camera
+   actually sees, by measuring each weapon's own bounding box rather than
+   hardcoding an offset - the three AK builds are different widths.
+
+   Live tuning while the game runs (console):
+     __gunDecal({text:'SAM', color:'#ff3b30', scale:1.2, y:.1, z:-.02}) */
+const GUN_DECAL={
+  on:true,
+  text:'DEAD AISLE',      /* the big line */
+  sub:'',                 /* small line underneath, '' for none */
+  img:'',                 /* 'assets/decal.png' to use an image instead */
+  color:'#e8e2d4',        /* text colour */
+  bg:'rgba(0,0,0,0)',     /* sticker background; use e.g. '#111' for a plate */
+  outline:'rgba(0,0,0,.55)',
+  font:'900',             /* CSS font weight/style prefix */
+  family:'Arial, Helvetica, sans-serif',
+  scale:0.78,             /* overall size multiplier */
+  x:0, y:0.010, z:0.10,   /* nudge along the receiver (metres, weapon space) */
+  /* it goes on BOTH flanks, each facing out, so it always reads correctly */
+  wear:.30,               /* 0 = pristine, 1 = heavily scuffed */
+};
+function gunDecalTex(){
+  const W=512,H=192;
+  const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+  const g=cv.getContext('2d');
+  if(GUN_DECAL.bg && GUN_DECAL.bg!=='rgba(0,0,0,0)'){ g.fillStyle=GUN_DECAL.bg; g.fillRect(0,0,W,H); }
+  const hasSub=!!GUN_DECAL.sub;
+  g.textAlign='center'; g.textBaseline='middle';
+  g.lineJoin='round';
+  const draw=(txt,size,cy)=>{
+    g.font=GUN_DECAL.font+' '+size+'px '+GUN_DECAL.family;
+    /* squeeze to fit rather than overflowing the sticker */
+    let m=g.measureText(txt).width, sx=Math.min(1,(W-40)/Math.max(1,m));
+    g.save(); g.translate(W/2,cy); g.scale(sx,1);
+    if(GUN_DECAL.outline){ g.lineWidth=size*.16; g.strokeStyle=GUN_DECAL.outline; g.strokeText(txt,0,0); }
+    g.fillStyle=GUN_DECAL.color; g.fillText(txt,0,0);
+    g.restore();
+  };
+  draw(GUN_DECAL.text, hasSub?96:118, hasSub?72:H/2);
+  if(hasSub) draw(GUN_DECAL.sub, 52, 142);
+  /* scuff it so it reads as a sticker that has been on a rifle, not a decal
+     pasted on in an editor */
+  const w=GUN_DECAL.wear;
+  if(w>0){
+    g.globalCompositeOperation='destination-out';
+    for(let i=0;i<220*w;i++){ g.globalAlpha=rand(.05,.5);
+      g.fillRect(rand(0,W),rand(0,H),rand(1,14),rand(1,5)); }
+    g.globalAlpha=1; g.globalCompositeOperation='source-over';
+  }
+  const t=new THREE.CanvasTexture(cv);
+  t.colorSpace=THREE.SRGBColorSpace; t.anisotropy=4;
+  return t;
+}
+let _decalMat=null;
+function gunDecalMaterial(){
+  if(_decalMat){ _decalMat.map&&_decalMat.map.dispose(); }
+  /* FrontSide, not DoubleSide: a double-sided sticker shows its own back
+     face through the weapon from the other flank, and a back face is a
+     mirror image - the text came out reversed. */
+  else _decalMat=new THREE.MeshStandardMaterial({transparent:true, roughness:.72, metalness:0,
+    depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2,
+    envMapIntensity:.15, side:THREE.FrontSide});
+  if(GUN_DECAL.img){
+    const tx=new THREE.TextureLoader().load(GUN_DECAL.img,
+      ()=>{ _decalMat.needsUpdate=true; },
+      undefined,
+      ()=>{ console.info('decal image not reachable, using text'); _decalMat.map=gunDecalTex(); _decalMat.needsUpdate=true; });
+    tx.colorSpace=THREE.SRGBColorSpace; tx.anisotropy=4;
+    _decalMat.map=tx;
+  } else _decalMat.map=gunDecalTex();
+  _decalMat.needsUpdate=true;
+  return _decalMat;
+}
+/* The weapon's bounds in its OWN frame. setFromObject returns a WORLD-space
+   AABB, and the rifle is parented to a rotating hand bone, so converting that
+   box's corners back through the inverse gives a skewed, far-too-large box -
+   which is what threw the first sticker a foot off the gun. */
+const _gdBox=new THREE.Box3(), _gdV=new THREE.Vector3(), _gdM=new THREE.Matrix4();
+function gunLocalBox(m){
+  _gdBox.makeEmpty();
+  m.updateWorldMatrix(true,true);
+  const inv=new THREE.Matrix4().copy(m.matrixWorld).invert();
+  m.traverse(o=>{
+    if(!o.isMesh||!o.geometry||o.name==='gun_decal') return;
+    if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const bb=o.geometry.boundingBox; if(!bb) return;
+    _gdM.multiplyMatrices(inv,o.matrixWorld);
+    for(let i=0;i<8;i++)
+      _gdBox.expandByPoint(_gdV.set(i&1?bb.max.x:bb.min.x, i&2?bb.max.y:bb.min.y, i&4?bb.max.z:bb.min.z).applyMatrix4(_gdM));
+  });
+  return _gdBox;
+}
+function gunDecalApply(){
+  if(!Object.keys(gunModels).length) return 0;
+  const mat=gunDecalMaterial();
+  let n=0;
+  for(const id in gunModels){
+    const m=gunModels[id];
+    const b=gunLocalBox(m);
+    if(!isFinite(b.min.x)) continue;
+    const sc=m.scale.x||1;
+    const lo=b.min, hi=b.max;
+    const cz=(lo.z+hi.z)*.5, cy=(lo.y+hi.y)*.5;
+    const len=Math.abs(hi.z-lo.z), tall=Math.abs(hi.y-lo.y);
+    const w=Math.min(len*.26, .34/sc)*GUN_DECAL.scale;
+    /* One sticker per flank, each facing outward, so it reads the right way
+       round whichever side of the weapon the camera happens to see - and
+       there is no guessing which that is. */
+    let plates=m.userData.decals;
+    if(!plates){
+      plates=[-1,1].map(()=>{
+        const q=new THREE.Mesh(new THREE.PlaneGeometry(1,1), mat);
+        q.name='gun_decal'; q.userData.noMerge=true; m.add(q); return q;
+      });
+      m.userData.decals=plates;
+    }
+    plates.forEach((plate,i)=>{
+      const side=i?1:-1;
+      plate.material=mat;
+      plate.visible=!!GUN_DECAL.on;
+      plate.scale.set(w, w*192/512, 1);
+      plate.position.set((side<0?lo.x:hi.x) + side*(.004/sc) + side*GUN_DECAL.x/sc,
+                         cy + tall*.06 + GUN_DECAL.y/sc,
+                         cz + GUN_DECAL.z/sc);
+      /* a PlaneGeometry faces +Z; turn it to face out along this flank */
+      plate.rotation.set(0, side<0?-Math.PI/2:Math.PI/2, 0);
+      if(typeof vmLayerize==='function') vmLayerize(plate);
+    });
+    n++;
+  }
+  return n;
+}
+window.__gunDecal=(o)=>{ Object.assign(GUN_DECAL,o||{}); const n=gunDecalApply();
+  console.info('gun decal ->',n,'weapons', JSON.stringify(GUN_DECAL).slice(0,160)); return n; };
 
 const weapon={
   magSize:30, mag:30, reserve:Infinity,
@@ -5860,7 +6158,8 @@ function tryReload(){
   if(!playing||!player.alive||weapon.reloading||weapon.mag>=weapon.magSize)return;
   window.vmReloadAnim&&vmReloadAnim();
   weapon.reloading=true; weapon.reloadEnd=performance.now()/1000+weapon.reloadTime;
-  Audio.reload();
+  /* the staged magout/fumble/magin/charge sounds below are the reload now;
+     the placeholder beep played underneath all four of them */
   /* A reload is three events, not one noise: the mag drops, a fresh one seats,
      the bolt goes home. Scheduled as fractions of weapon.reloadTime so it
      tracks whatever weapon is in hand. Under pressure he can fumble it. */
@@ -6182,7 +6481,11 @@ function skidInit(){
   const r2=g2.createRadialGradient(32,32,2,32,32,31);
   r2.addColorStop(0,'rgba(210,205,196,.75)'); r2.addColorStop(1,'rgba(210,205,196,0)');
   g2.fillStyle=r2; g2.fillRect(0,0,64,64);
-  smokeMat=new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv2),transparent:true,
+  /* every other canvas colour map in the file sets this; the smoke was
+     missed, so 210/255 was fed to the shader as if already linear and the
+     puffs rendered ~28% too bright - white blobs instead of grey dust */
+  const smokeTex=new THREE.CanvasTexture(cv2); smokeTex.colorSpace=THREE.SRGBColorSpace;
+  smokeMat=new THREE.SpriteMaterial({map:smokeTex,transparent:true,
     depthWrite:false,opacity:.5});
 }
 function skidMark(x,z,yaw){
@@ -6728,12 +7031,12 @@ function buildTownFolk(proto, clips, fit){
 function townFolkUpdate(dt){
   if(!TOWN_FOLK.length)return;
   const cx = (phase==='drive'||phase==='parking') && townCar ? townCar.position.x : player.pos.x;
-  const inHall = phase==='inside';
+  const inHall = wedgeActive();
   for(const f of TOWN_FOLK){
     /* from inside the hall a pedestrian is only worth six skinned draws if
        the door actually frames them */
     const near = Math.abs(f.root.position.x-cx) < FOLK_DRAW
-              && (!inHall || doorWedge(player.pos.x,player.pos.z,f.root.position.x,f.root.position.z,.7));
+              && (!inHall || doorWedge(player.pos.x,player.pos.z,f.root.position.x,f.root.position.z,.7));   /* act 1 only */
     if(f.root.visible!==near) f.root.visible=near;
     if(!near) continue;
     f.root.position.x += f.dir*f.speed*dt;
@@ -7384,7 +7687,7 @@ function pickUp(t){
   gun.visible=false;
   const el=document.getElementById('weapon-name');
   if(el) el.textContent=THROW_LABEL[t.type]||t.type.toUpperCase();
-  Audio.reload&&Audio.reload();
+  try{ SFX.gear.strap.play(rand(.95,1.05)); }catch(e){}   /* picking a thing up is not a reload */
 }
 /* Put the held item back on the ground and give the rifle back. gunUpdate
    returns early while heldItem is set, so an item that survives a death
@@ -7934,7 +8237,15 @@ function setPhase(p){
 
    Skippable on any key - a cutscene you cannot skip is a cutscene you resent
    the second time. */
-const CUT={on:false, t:0, stage:0, lid:null, lidA:0, mix:0, skip:false, done:null, held:{}};
+const CUT={on:false, t:0, stage:0, lid:null, lidA:0, mix:0, skip:false, done:null, held:{},
+           actor:null, actorOn:false, doorA:0, door:null, fp:false, clip:'', headHid:[],
+           yaw:0, pos:null, camP:null, camL:null, mixer:null};
+/* A dedicated key for the third-person half. Created at load with intensity 0
+   and only turned up during the arrival, so the light COUNT never changes -
+   changing it would recompile every material in the scene. */
+const cutKey=new THREE.DirectionalLight(0xffe6c8, 0);
+const cutFill=new THREE.DirectionalLight(0x8fa8cc, 0);
+scene.add(cutKey); scene.add(cutKey.target); scene.add(cutFill); scene.add(cutFill.target);
 
 /* the bodycam look, dialled out to bare eyes and back */
 const CUT_EYES={k1:.012, k2:0, aberration:.05, vignette:.10, grain:.03, bloom:.32};
@@ -7954,12 +8265,111 @@ function cutApplyMix(m){
   const hud=document.getElementById('goprohud');
   if(hud) hud.style.opacity=String(Math.max(0,(m-.45)/.55));
 }
+/* ---- the actor ----
+   In play the operator is a first-person body: parented under the camera, on
+   VM_LAYER (drawn by the narrow viewmodel camera over the top of everything),
+   with the head hidden so it never fills the lens, and folded into ten rigid
+   skinned meshes by vmBatch.
+
+   For the arrival we want to SEE him get out of the car, so all four of those
+   have to be undone for the duration: move him into the world, put him back on
+   the normal layer, give him his head back, and scale him to human height
+   (under the camera he is 0.84 scale, about 1.4 m, which is fine when you only
+   ever see forearms and would look like a child in a wide shot). */
+function cutActorParts(fn){
+  if(vmModel) vmModel.traverse(o=>{ if(o.isMesh||o.isSkinnedMesh) fn(o); });
+  for(const sm of (typeof VM_BATCHED!=='undefined'?VM_BATCHED:[])) fn(sm);
+}
+function cutActorBegin(){
+  if(!vmModel || CUT.actorOn) return false;
+  CUT.actor=new THREE.Group(); CUT.actor.name='cut_actor';
+  scene.add(CUT.actor);
+  CUT.actor.add(vmModel);                       /* three reparents in place */
+  vmModel.position.set(0,0,0); vmModel.rotation.set(0,Math.PI,0); vmModel.scale.setScalar(1);
+  /* his head back, remembering exactly what was hidden so play resumes clean */
+  CUT.headHid.length=0;
+  let head=null; vmModel.traverse(o=>{ if(!head&&(o.name==='Head'||o.name==='head')) head=o; });
+  if(head) head.traverse(o=>{ if(!o.visible){ CUT.headHid.push(o); o.visible=true; } });
+  /* the model wears its action camera on the helmet. He is about to go and
+     FETCH that camera out of the boot, so it cannot already be on his head -
+     keep it off until the mount. */
+  CUT.cam3p=null;
+  if(head) head.traverse(o=>{ if(!CUT.cam3p && /action_camera/i.test(o.name||'')) CUT.cam3p=o; });
+  if(CUT.cam3p) CUT.cam3p.visible=false;
+  /* onto the world layer so the MAIN camera draws him, not the viewmodel pass */
+  cutActorParts(o=>o.layers.set(0));
+  /* human height, measured rather than assumed */
+  vmModel.updateMatrixWorld(true);
+  const b=new THREE.Box3().setFromObject(vmModel);
+  const h=b.max.y-b.min.y;
+  const sc=(isFinite(h)&&h>.2)?(1.78/h):1;
+  CUT.actor.scale.setScalar(sc);
+  CUT.actor.userData.foot=b.min.y*sc;            /* bind-pose sole, a starting guess */
+  /* The clips move the hips, so a sole height measured once in the bind pose
+     leaves him hovering through the walk. Track the ankles instead and drop
+     the whole rig so the lower sole is always on the tarmac. */
+  CUT.feet=[]; 
+  vmModel.traverse(o=>{ if(/^Foot_[LR]$/i.test(o.name||'')) CUT.feet.push(o); });
+  CUT.ankle=0;
+  if(CUT.feet.length){
+    let lowest=Infinity;
+    for(const f of CUT.feet){ f.updateWorldMatrix(true,false); lowest=Math.min(lowest,f.matrixWorld.elements[13]); }
+    CUT.ankle=lowest-b.min.y*sc;                 /* ankle above sole, both in world units */
+  }
+  /* he is the subject of a wide shot: without a shadow he reads as pasted on */
+  cutActorParts(o=>{ o.userData.cutCast=o.castShadow; o.castShadow=true; });
+  CUT.actorOn=true;
+  cutKey.intensity=1.5; cutFill.intensity=.55;
+  return true;
+}
+function cutActorEnd(){
+  if(!CUT.actorOn) return;
+  CUT.actorOn=false;
+  cutKey.intensity=0; cutFill.intensity=0;
+  if(vmModel){
+    vmGroup.add(vmModel);
+    vmModel.position.set(0,0,0); vmModel.rotation.set(0,Math.PI,0); vmModel.scale.setScalar(1);
+    for(const o of CUT.headHid) o.visible=false;
+    CUT.headHid.length=0;
+    if(CUT.cam3p){ CUT.cam3p.visible=true; CUT.cam3p=null; }
+    cutActorParts(o=>{ if(o.userData.cutCast!==undefined){ o.castShadow=o.userData.cutCast; delete o.userData.cutCast; } });
+    cutActorParts(o=>o.layers.set(VM_LAYER));
+  }
+  if(CUT.actor){ scene.remove(CUT.actor); CUT.actor=null; }
+}
+/* place the actor: world position, and a facing given as a world direction */
+function cutActorPut(x,z,dx,dz){
+  if(!CUT.actor) return;
+  CUT.actor.position.set(x, -(CUT.actor.userData.foot||0), z);
+  if(dx!==undefined){
+    /* the body faces the way a camera with this yaw would look: (-sin,-cos) */
+    CUT.yaw=Math.atan2(-dx,-dz);
+    CUT.actor.rotation.y=CUT.yaw;
+  }
+}
+function cutClip(name,fade){
+  if(!vmActions||CUT.clip===name) return;
+  const next=vmFind(name); if(!next) return;
+  const prev=CUT.clip&&vmFind(CUT.clip);
+  next.reset(); next.setLoop(THREE.LoopRepeat,Infinity); next.enabled=true; next.setEffectiveWeight(1);
+  if(prev&&prev!==next) prev.fadeOut(fade===undefined?.25:fade);
+  next.fadeIn(fade===undefined?.25:fade).play();
+  CUT.clip=name;
+}
 function cutFindLid(){
   if(CUT.lid) return CUT.lid;
   if(typeof townCar==='undefined'||!townCar) return null;
   townCar.traverse(o=>{ if(!CUT.lid && /trunk_lid/i.test(o.name||'')) CUT.lid=o; });
   if(CUT.lid) CUT.lid.userData.rest=CUT.lid.rotation.x;
   return CUT.lid;
+}
+function cutFindDoor(){
+  if(CUT.door!==null) return CUT.door;
+  CUT.door=false;
+  if(typeof townCar==='undefined'||!townCar) return CUT.door;
+  townCar.traverse(o=>{ if(!CUT.door && /door_FL/i.test(o.name||'')) CUT.door=o; });
+  if(CUT.door) CUT.door.userData.rest=CUT.door.rotation.y;
+  return CUT.door;
 }
 /* the boot in world space: behind the car, at bumper height */
 function cutBootPoint(out){
@@ -7971,30 +8381,44 @@ function cutBootPoint(out){
 const _cutV=new THREE.Vector3(), _cutV2=new THREE.Vector3();
 /* Each stage: how long, where the camera goes, and what the hands do. Camera
    positions are in the car's frame so this works wherever it parked. */
+/* The first six stages are THIRD PERSON - you watch yourself do it. The view
+   becomes first person partway through 'mount', at the moment the camera
+   goes on your head, which is the whole point of the beat. */
 const CUT_STAGES=[
-  {id:'out',    dur:2.2},   /* door opens, you step out and the world settles */
-  {id:'walk',   dur:1.8},   /* round to the back */
-  {id:'open',   dur:1.6},   /* boot lifts */
-  {id:'reach',  dur:1.8},   /* hands go in */
-  {id:'lift',   dur:1.4},   /* camera comes out */
-  {id:'mount',  dur:1.6},   /* onto the head - the view becomes the GoPro here */
-  {id:'rifle',  dur:1.8},   /* and the rifle out */
+  {id:'door',   dur:2.3, tp:true},   /* the driver's door swings open, you climb out */
+  {id:'shut',   dur:1.4, tp:true},   /* you push it shut */
+  {id:'walk',   dur:2.7, tp:true},   /* down the flank to the back of the car */
+  {id:'open',   dur:1.7, tp:true},   /* you lift the boot lid */
+  {id:'reach',  dur:1.6, tp:true},   /* you lean in for the camera */
+  {id:'lift',   dur:1.3, tp:true},   /* and straighten up holding it */
+  {id:'mount',  dur:1.9},            /* onto the head - the view becomes the GoPro here */
+  {id:'rifle',  dur:1.7},            /* and the rifle out of the boot */
 ];
 const CUT_TOTAL=CUT_STAGES.reduce((a,s)=>a+s.dur,0);
+/* how far the driver's door swings, in radians. build-car.py set each door's
+   origin on its hinge, so this is a plain rotation about Y. */
+let CUT_DOOR_SWING=1.15;
+window.__cutDoor=(v)=>{ CUT_DOOR_SWING=v; return CUT_DOOR_SWING; };
 
 function cutStart(done){
   CUT.on=true; CUT.t=0; CUT.stage=0; CUT.skip=false; CUT.done=done; CUT.lidA=0;
+  CUT.doorA=0; CUT.fp=false; CUT.clip=''; CUT.door=null;
   /* snapshot what is already down (W, almost always) so its auto-repeat does
      not count as "the player asked to skip" */
   CUT.held={};
   for(const k in keys) if(keys[k]) CUT.held[k]=true;
-  cutFindLid();
+  cutFindLid(); cutFindDoor();
   cutApplyMix(0);
   try{ goproSet(false); }catch(e){}
   const hud=document.getElementById('goprohud');
   if(hud) hud.style.opacity='0';
   /* your own hands, no rifle yet */
   gun.visible=false; vmGroup.visible=true;
+  /* the camera was left at the in-cabin 94 degrees; a cinematic wants a
+     normal lens or the whole car park bends away at the edges */
+  camera.fov=62; camera.updateProjectionMatrix();
+  cutActorBegin();
+  cutClip('idle',0);
   banner('','');
 }
 function cutFinish(){
@@ -8003,11 +8427,24 @@ function cutFinish(){
   const hud=document.getElementById('goprohud');
   if(hud) hud.style.opacity='';
   cutApplyMix(1);
+  cutActorEnd();
   if(CUT.lid && CUT.lid.userData.rest!==undefined) CUT.lid.rotation.x=CUT.lid.userData.rest;
+  if(CUT.door && CUT.door.userData.rest!==undefined) CUT.door.rotation.y=CUT.door.userData.rest;
+  camera.fov=75; camera.updateProjectionMatrix();
+  /* Hand the mixer back cleanly. The clip the arrival was running is still
+     at full weight, and vmUpdate's vmPlay only fades out whatever vmCurrent
+     happens to be - so without this the player walks away permanently
+     blending an idle or a crouch into every other animation. */
+  if(CUT.clip){ const a=vmFind(CUT.clip); if(a){ a.stop(); a.setEffectiveWeight(0); } }
+  CUT.clip='';
+  vmCurrent=null; vmOneShot=null;
   const cb=CUT.done; CUT.done=null;
   if(cb) cb();
 }
 window.__cutSkip=()=>{ if(CUT.on){ CUT.skip=true; } };
+window.__cutRef=()=>CUT;
+/* jump straight to a stage, for verification */
+window.__cutSeek=(id)=>{ let a=0; for(const st of CUT_STAGES){ if(st.id===id){ CUT.t=a+.01; return a; } a+=st.dur; } return -1; };
 
 /* posed with the emote engine: same solver, so the arms really reach */
 function cutPose(root,u){
@@ -8050,55 +8487,155 @@ function cutTick(dt){
   if(!townCar) { cutFinish(); return false; }
 
   const c=townCar;
-  const s=Math.sin(c.rotation.y), co=Math.cos(c.rotation.y);
-  /* handy frame: F is forward (-Z local), R is the car's right */
-  const fx=-s, fz=-co, rx=co, rz=-s;
-  const boot=cutBootPoint(_cutV);
+  const sn=Math.sin(c.rotation.y), co=Math.cos(c.rotation.y);
+  /* Car frame: F is forward (its -Z), R is its right. ax is lateral, az runs
+     along the car, and POSITIVE az is FORWARD - so the boot is at NEGATIVE
+     az. The old sequence walked to az=+3.05, which is three metres in FRONT
+     of the bonnet, and then stared back at a boot 5.6 m behind it. */
+  const fx=-sn, fz=-co, rx=co, rz=-sn;
   const P=(ax,ay,az)=>_cutV2.set(
     c.position.x + rx*ax + fx*az, ay, c.position.z + rz*ax + fz*az);
+  const W=(ax,az)=>[c.position.x + rx*ax + fx*az, c.position.z + rz*ax + fz*az];
+  const dirW=(ax,az)=>[rx*ax + fx*az, rz*ax + fz*az];
+  const mix2=(a,b,k)=>[a[0]+(b[0]-a[0])*k, a[1]+(b[1]-a[1])*k];
+  const boot=cutBootPoint(_cutV);
+  if(!CUT.camP){ CUT.camP=new THREE.Vector3(); CUT.camL=new THREE.Vector3(); }
 
-  let look=boot;
-  if(st.id==='out'){
-    /* out of the driver's door, standing */
-    const a=P(-1.35, 1.05+ease*.62, -0.35);
-    camera.position.copy(a);
-    look=P(-2.6, 1.5, 1.2);
-  } else if(st.id==='walk'){
-    /* round the back */
-    const ax=-1.35+ease*1.05, az=-0.35+ease*3.4;
-    camera.position.copy(P(ax, 1.67, az));
-    look=boot;
-  } else if(st.id==='open'){
-    camera.position.copy(P(-0.30, 1.67, 3.05));
-    look=boot;
-    CUT.lidA=ease;
-  } else {
-    camera.position.copy(P(-0.20, 1.62-((st.id==='mount')?ease*.06:0), 2.75));
-    look=boot;
-    CUT.lidA=1;
+  /* Nothing else ticks the mixer during phase 'parking' - playerUpdate and
+     vmUpdate only run in the on-foot branch - so the body was frozen for the
+     whole arrival even once it was visible. Drive it here. */
+  if(vmMixer) vmMixer.update(dt);
+
+  let camA=[0,1.7,0], camB=[0,1.7,0], lookT=null;
+
+  /* The switch to first person lives inside 'mount', on a fraction of that
+     stage. If time ever lands past it without passing through - a frame-time
+     spike, a tab that was backgrounded, a seek - the actor would be left
+     standing in the world while the camera behaved as if it were his eyes.
+     Catch up here instead. */
+  if(!CUT.fp && !st.tp && CUT.actorOn){
+    CUT.fp=true; cutActorEnd();
+    camera.fov=75; camera.updateProjectionMatrix();
   }
-  camera.lookAt(look.x, look.y, look.z);
+
+  if(st.id==='door'){
+    CUT.doorA=clamp(u*2.0,0,1);                 /* door leads, he follows */
+    const k2=clamp((u-.30)/.70,0,1), e2=k2*k2*(3-2*k2);
+    const pos=mix2([-0.92,0.62],[-1.85,0.30],e2);
+    cutActorPut(...W(pos[0],pos[1]), ...dirW(-1,-0.15));
+    cutClip(u<.34?'crouch':(e2<.92?'walk':'idle'), .30);
+    camA=[-4.5,1.78,3.2]; camB=[-3.9,1.72,1.5];
+  } else if(st.id==='shut'){
+    CUT.doorA=1-ease;
+    cutActorPut(...W(-1.95,0.22), ...dirW(1,0.25));
+    cutClip('idle',.30);
+    camA=[-3.9,1.72,1.0]; camB=[-3.7,1.74,-0.4];
+  } else if(st.id==='walk'){
+    CUT.doorA=0;
+    /* down the flank, round the corner, stop square behind the boot */
+    const way=[[-1.95,0.22],[-1.95,-1.55],[-1.20,-3.05],[-0.15,-3.25]];
+    const f=ease*(way.length-1);
+    const seg=Math.min(way.length-2, Math.floor(f));
+    const pos=mix2(way[seg],way[seg+1],f-seg);
+    const dl=[way[seg+1][0]-way[seg][0], way[seg+1][1]-way[seg][1]];
+    cutActorPut(...W(pos[0],pos[1]), ...dirW(dl[0],dl[1]));
+    cutClip(ease<.94?'walk':'idle', .25);
+    camA=[-4.1,1.76,-1.0]; camB=[-3.0,1.70,-4.9];
+  } else if(st.id==='open'){
+    cutActorPut(...W(-0.10,-3.15), ...dirW(0,1));
+    cutClip('idle',.30);
+    CUT.lidA=ease;
+    camA=[-2.5,1.70,-5.5]; camB=[-1.9,1.62,-5.0];
+  } else if(st.id==='reach'||st.id==='lift'){
+    cutActorPut(...W(-0.10,-3.05), ...dirW(0,1));
+    cutClip(st.id==='reach'?'crouch':'idle',.35);
+    CUT.lidA=1;
+    camA=[-1.7,1.58,-4.9]; camB=[-1.15,1.52,-4.5];
+  } else if(st.id==='mount'){
+    CUT.lidA=1;
+    /* The hand-off. Doing it on a fraction of this stage rather than on a
+       stage boundary lands the cut exactly as the strap goes over. */
+    if(CUT.cam3p && u>0.30) CUT.cam3p.visible=true;   /* it goes on his head */
+    if(!CUT.fp && u>0.55){
+      CUT.fp=true;
+      cutActorEnd();
+      camera.fov=75; camera.updateProjectionMatrix();
+    }
+    if(!CUT.fp){
+      cutActorPut(...W(-0.10,-3.05), ...dirW(0,1));
+      cutClip('idle',.30);
+      camA=[-1.05,1.60,-4.5]; camB=[-0.75,1.62,-4.2];
+    } else {
+      /* standing a metre back from the bumper, not on top of it - at 0.5 m
+         the look-at pointed 55 degrees down and framed the tarmac */
+      camera.position.copy(P(-0.10, 1.66, -3.62));
+      lookT=_cutV.set(boot.x, 1.06, boot.z);
+    }
+  } else if(st.id==='rifle'){
+    CUT.lidA=1-clamp((u-.62)/.38,0,1);          /* boot shuts behind you */
+    /* the beat is "and then you take the rifle", so the rifle has to be in
+       shot: it comes up into the hands as the arms lift out of the boot */
+    gun.visible=true;
+    camera.position.copy(P(-0.10, 1.66-ease*.03, -3.62-ease*.10));
+    lookT=_cutV.set(boot.x, 1.06+ease*.14, boot.z);
+  }
+
+  if(st.tp && !CUT.fp){
+    /* one smooth dolly per shot, always framed on the actor */
+    const a=P(camA[0],camA[1],camA[2]).clone();
+    const b=P(camB[0],camB[1],camB[2]);
+    CUT.camP.copy(a).lerp(b,ease);
+    camera.position.copy(CUT.camP);
+    const tgt=CUT.actor?CUT.actor.position:boot;
+    const ly=(st.id==='open'||st.id==='reach'||st.id==='lift')?1.15:1.30;
+    _cutV2.set(tgt.x,ly,tgt.z);
+    if(CUT.camL.lengthSq()===0) CUT.camL.copy(_cutV2);
+    else CUT.camL.lerp(_cutV2, clamp(dt*7,0,1));   /* the pan lags a little */
+    lookT=CUT.camL;
+  }
+  if(lookT) camera.lookAt(lookT.x, lookT.y, lookT.z);
 
   const lid=cutFindLid();
   if(lid && lid.userData.rest!==undefined)
     lid.rotation.x = lid.userData.rest - CUT.lidA*1.05;
+  const door=cutFindDoor();
+  if(door && door.userData.rest!==undefined)
+    door.rotation.y = door.userData.rest - CUT.doorA*CUT_DOOR_SWING;
 
-  /* the hand-off: the view becomes the GoPro as it goes on the head */
-  if(st.id==='mount')      cutApplyMix(clamp((u-.35)/.5,0,1));
-  else if(i>CUT_STAGES.findIndex(x=>x.id==='mount')) cutApplyMix(1);
+  /* keep the key on him, or the wide shots are a silhouette at night */
+  if(CUT.actorOn && CUT.actor){
+    const a=CUT.actor.position;
+    cutKey.target.position.set(a.x,1.2,a.z);  cutKey.position.set(a.x-2.2,4.2,a.z+2.6);
+    cutFill.target.position.set(a.x,1.2,a.z); cutFill.position.set(a.x+3.0,2.6,a.z-2.2);
+    cutKey.target.updateMatrixWorld(); cutFill.target.updateMatrixWorld();
+  }
+
+  /* the view becomes the GoPro as it goes on the head */
+  if(st.id==='mount')      cutApplyMix(clamp((u-.45)/.45,0,1));
+  else if(st.id==='rifle') cutApplyMix(1);
   else                     cutApplyMix(0);
 
-  if(vmModel && vmGroup.visible){
-    const body=vmModel;
-    cutPose(body,ease);
+  /* the clip carries the body; the direction solver carries the reach */
+  if(vmModel) cutPose(vmModel, ease);
+
+  /* Plant the feet AFTER the pose is final: the walk cycle raises the hips,
+     and a sole height taken from the bind pose leaves him gliding. */
+  if(CUT.actorOn && CUT.actor && CUT.feet && CUT.feet.length){
+    CUT.actor.updateMatrixWorld(true);
+    let lowest=Infinity;
+    for(const f of CUT.feet){ lowest=Math.min(lowest, f.matrixWorld.elements[13]); }
+    if(isFinite(lowest)){
+      const sole=lowest-CUT.ankle;
+      CUT.actor.position.y-=sole;                 /* one frame of lag, invisible */
+    }
   }
 
   /* one-shots on stage entry */
   if(!st._fired && u>0.02){
     st._fired=true;
     try{
-      if(st.id==='out')        SFX.car.doorOpen.play(1);
-      if(st.id==='walk')       SFX.car.doorClose.play(1);
+      if(st.id==='door')       SFX.car.doorOpen.play(1);
+      if(st.id==='shut')       SFX.car.doorClose.play(1);
       if(st.id==='open'){      SFX.car.trunkOpen.play(1); SFX.say&&SFX.say('trunk',4); }
       if(st.id==='mount'){     SFX.gear.goproOn.play(1); SFX.gear.strap.play(1);
                                SFX.say&&SFX.say('camera_live',5); }
