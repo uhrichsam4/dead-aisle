@@ -2766,10 +2766,25 @@ function buildTown(){
      at the car's top speed. */
   const ground=new THREE.Mesh(new THREE.PlaneGeometry(1240,45.3),townMats.ground);
   ground.rotation.x=-Math.PI/2; ground.position.set(WORLD_CX,0,37.85); ground.receiveShadow=true; scene.add(ground);
+  /* The verge runs the whole length of the map and the car park and the road
+     sit ON it, one centimetre up. The scene renders into a HalfFloat target
+     whose depth buffer resolves about a decimetre at car-park range, so one
+     centimetre is inside the noise and the tarmac z-fought the grass - which
+     is why the car park flickered to green from some angles and not others.
+     Raising them further would bury the painted bay lines, so instead the
+     grass is pushed AWAY in depth: everything laid on it now wins, and the
+     relative order of tarmac, paint and kerbs is untouched.
+     They are also kept out of the static batch - folding a 1240 m plane in
+     with anything else saves one draw call and risks culling it as a unit. */
+  townMats.ground.polygonOffset=true;
+  townMats.ground.polygonOffsetFactor=1.6;
+  townMats.ground.polygonOffsetUnits=2;
+  ground.userData.noMerge=true;
 
   const lot=new THREE.Mesh(new THREE.PlaneGeometry(48,15),townMats.lot);
-  lot.rotation.x=-Math.PI/2; lot.position.set(0,.01,22.5);
+  lot.rotation.x=-Math.PI/2; lot.position.set(0,.015,22.5);
   lot.receiveShadow=true;   /* it used to swallow every shadow cast onto it */
+  lot.userData.noMerge=true;
   scene.add(lot);
   for(let x=-21;x<=21;x+=2.625){
     const d=new THREE.Mesh(townDivGeo,townMats.paint);
@@ -2779,7 +2794,8 @@ function buildTown(){
   head.position.set(0,.04,20.5); scene.add(head);
 
   const road=new THREE.Mesh(new THREE.PlaneGeometry(1240,8),townMats.road);
-  road.receiveShadow=true; road.rotation.x=-Math.PI/2; road.position.set(WORLD_CX,.012,36); scene.add(road);
+  road.receiveShadow=true; road.rotation.x=-Math.PI/2; road.position.set(WORLD_CX,.018,36);
+  road.userData.noMerge=true; scene.add(road);
   for(let x=WORLD_X0+6;x<=WORLD_X1-6;x+=6){
     const dash=new THREE.Mesh(townDashGeo,townMats.paintY);
     dash.position.set(x,.045,36); scene.add(dash);
@@ -3327,9 +3343,19 @@ function phLiftDarkMaterials(root, packName){
          light. A 14 x 15 m wall lit as if it faced backwards - another of
          the black slabs this function exists to kill. */
       if(m.normalMap && m.map && (m.normalMap===m.map || m.normalMap.source===m.map.source)){ m.normalMap=null; badN++; }
-      /* foliage cards: cut out rather than blend, so the leaves sort against
-         each other and the MSAA resolves the edge instead of a hard stair */
       const tag=(o.name||'')+' '+(o.parent&&o.parent.name||'')+' '+(m.name||'');
+      /* Foliage is NEVER metal. The rule above only demetals when there is no
+         metalness map, and these canopies ship a packed ARM texture whose
+         metalness channel reads high - so they stayed fully metallic, which
+         means no diffuse term at all and a mirror of the night sky. That is
+         the cluster of black rectangles hanging over the buildings on the
+         drive: a tree, rendering as a hole. Force it off by what the thing
+         IS, not by whether it happens to carry a map. */
+      if(/tree|leaf|leaves|foliage|plant|bush|frond|canopy|shrub|grasstuft/i.test(tag)){
+        if(m.metalness>0){ m.metalness=0; demetalled++; }
+        m.metalnessMap=null; m.roughness=Math.max(m.roughness||0,.75);
+        if(m.envMapIntensity!==undefined) m.envMapIntensity=Math.min(m.envMapIntensity,.4);
+      }
       /* These packs export every cutout as alphaMode BLEND with opacity 1,
          which is a lie: a blended cutout writes no depth, so overlapping
          panels sort by draw order and pop in front of each other. The old
@@ -8239,7 +8265,8 @@ function setPhase(p){
    the second time. */
 const CUT={on:false, t:0, stage:0, lid:null, lidA:0, mix:0, skip:false, done:null, held:{},
            actor:null, actorOn:false, doorA:0, door:null, fp:false, clip:'', headHid:[],
-           yaw:0, pos:null, camP:null, camL:null, mixer:null};
+           yaw:0, pos:null, camP:null, camL:null, mixer:null,
+           kit:null, bootRifle:null, bootCam:null, bootCase:null};
 /* A dedicated key for the third-person half. Created at load with intensity 0
    and only turned up during the arrival, so the light COUNT never changes -
    changing it would recompile every material in the scene. */
@@ -8363,6 +8390,74 @@ function cutFindLid(){
   if(CUT.lid) CUT.lid.userData.rest=CUT.lid.rotation.x;
   return CUT.lid;
 }
+/* The whole point of the walk is what is in the boot, and the boot was
+   empty - he mimed lifting a camera out of nothing and the rifle appeared in
+   his hands. Put the kit in there: the rifle lying across the boot floor and
+   the action camera beside it, each removed at the moment he takes it. */
+/* car-local metres. The lid's hinge measures (0, 1.18, 1.88) in this frame,
+   and the boot floor sits about half a metre under it, so the cavity centre
+   is behind and below the hinge - not in front of it, which is inside the
+   rear seats. */
+const BOOT_KIT={x:0.02, ry:1.55, rz:0.04, s:1.0, camX:-0.34, camZ:-0.16};
+function cutBootKit(){
+  if(CUT.kit || typeof townCar==='undefined' || !townCar) return CUT.kit;
+  const g=new THREE.Group(); g.name='boot_kit'; g.userData.noMerge=true;
+  /* Locate the cavity from the boot lid itself rather than from numbers typed
+     in by hand: the lid's origin IS its hinge (build-car.py put it there), so
+     the floor is a fixed drop below it and the space is just behind it. That
+     survives any change to CAR_FIT or to the model. */
+  /* measured default, in case the lid is not in this build of the model -
+     without it the kit would sit at the car's own origin, in the cabin */
+  g.position.set(0, 0.72, 1.98);
+  const lid0=cutFindLid();
+  if(lid0){
+    lid0.updateWorldMatrix(true,false);
+    const b=new THREE.Vector3().setFromMatrixPosition(lid0.matrixWorld);
+    townCar.worldToLocal(b);
+    if(isFinite(b.y)&&isFinite(b.z)&&b.y>0.4&&b.y<2.2&&Math.abs(b.z)>0.8)
+      g.position.set(0, b.y-0.46, b.z+0.14);
+  }
+  const src=(typeof gunModels!=='undefined') && (gunModels[WEAPONS[weaponIndex].id]||Object.values(gunModels)[0]);
+  if(src){
+    const r=src.clone(true);
+    r.name='boot_rifle';
+    /* the source lives under the camera on VM_LAYER and may be switched off
+       because it is not the selected build - neither is true down here */
+    r.traverse(o=>{ o.layers.set(0); if(o.isMesh){ o.visible=true; o.castShadow=true; o.receiveShadow=true; o.frustumCulled=true; } });
+    r.visible=true;
+    r.position.set(BOOT_KIT.x, 0, 0);
+    r.rotation.set(0, BOOT_KIT.ry, BOOT_KIT.rz);
+    r.scale.setScalar(src.scale.x*BOOT_KIT.s);
+    g.add(r); CUT.bootRifle=r;
+  }
+  /* a small hard case with the camera sitting on it */
+  const caseMat=new THREE.MeshStandardMaterial({color:0x24272b,roughness:.75,metalness:.05});
+  const lensMat=new THREE.MeshStandardMaterial({color:0x0d0f11,roughness:.35,metalness:.5});
+  const kase=new THREE.Mesh(new THREE.BoxGeometry(.30,.09,.20), caseMat);
+  kase.position.set(BOOT_KIT.camX, -.035, BOOT_KIT.camZ);
+  kase.castShadow=true; g.add(kase);
+  const cam=new THREE.Group();
+  const body=new THREE.Mesh(new THREE.BoxGeometry(.075,.055,.045), caseMat); cam.add(body);
+  const lens=new THREE.Mesh(new THREE.CylinderGeometry(.017,.017,.012,10), lensMat);
+  lens.rotation.x=Math.PI/2; lens.position.set(0,.004,.026); cam.add(lens);
+  cam.position.set(BOOT_KIT.camX, .052, BOOT_KIT.camZ);
+  cam.rotation.y=.35;
+  cam.traverse(o=>{ if(o.isMesh) o.castShadow=true; });
+  g.add(cam); CUT.bootCam=cam; CUT.bootCase=kase;
+  townCar.add(g); CUT.kit=g;
+  return g;
+}
+window.__bootKit=(o)=>{ Object.assign(BOOT_KIT,o||{});
+  if(CUT.kit) CUT.kit.position.y+=(o&&o.dy)||0;
+  if(CUT.bootRifle){ CUT.bootRifle.position.set(BOOT_KIT.x,0,0);
+    CUT.bootRifle.rotation.set(0,BOOT_KIT.ry,BOOT_KIT.rz); }
+  if(CUT.bootCam) CUT.bootCam.position.set(BOOT_KIT.camX,.052,BOOT_KIT.camZ);
+  if(CUT.bootCase) CUT.bootCase.position.set(BOOT_KIT.camX,-.035,BOOT_KIT.camZ);
+  return {BOOT_KIT, kitPos:CUT.kit?CUT.kit.position.toArray().map(v=>+v.toFixed(2)):null}; };
+function cutBootKitClear(){
+  if(CUT.kit){ if(CUT.kit.parent) CUT.kit.parent.remove(CUT.kit); }
+  CUT.kit=null; CUT.bootRifle=null; CUT.bootCam=null; CUT.bootCase=null;
+}
 function cutFindDoor(){
   if(CUT.door!==null) return CUT.door;
   CUT.door=false;
@@ -8398,7 +8493,12 @@ const CUT_TOTAL=CUT_STAGES.reduce((a,s)=>a+s.dur,0);
 /* how far the driver's door swings, in radians. build-car.py set each door's
    origin on its hinge, so this is a plain rotation about Y. */
 let CUT_DOOR_SWING=1.15;
+/* build-car.py puts the boot's origin on its front-top edge, so this is one
+   rotation about X - but it was applied NEGATIVE, which swung the lid down
+   through the bumper instead of up over the rear window. */
+let CUT_LID_SWING=1.05;
 window.__cutDoor=(v)=>{ CUT_DOOR_SWING=v; return CUT_DOOR_SWING; };
+window.__cutLid=(v)=>{ CUT_LID_SWING=v; return CUT_LID_SWING; };
 
 function cutStart(done){
   CUT.on=true; CUT.t=0; CUT.stage=0; CUT.skip=false; CUT.done=done; CUT.lidA=0;
@@ -8407,7 +8507,7 @@ function cutStart(done){
      not count as "the player asked to skip" */
   CUT.held={};
   for(const k in keys) if(keys[k]) CUT.held[k]=true;
-  cutFindLid(); cutFindDoor();
+  cutFindLid(); cutFindDoor(); cutBootKit();
   cutApplyMix(0);
   try{ goproSet(false); }catch(e){}
   const hud=document.getElementById('goprohud');
@@ -8428,6 +8528,7 @@ function cutFinish(){
   if(hud) hud.style.opacity='';
   cutApplyMix(1);
   cutActorEnd();
+  cutBootKitClear();
   if(CUT.lid && CUT.lid.userData.rest!==undefined) CUT.lid.rotation.x=CUT.lid.userData.rest;
   if(CUT.door && CUT.door.userData.rest!==undefined) CUT.door.rotation.y=CUT.door.userData.rest;
   camera.fov=75; camera.updateProjectionMatrix();
@@ -8550,6 +8651,8 @@ function cutTick(dt){
     cutActorPut(...W(-0.10,-3.05), ...dirW(0,1));
     cutClip(st.id==='reach'?'crouch':'idle',.35);
     CUT.lidA=1;
+    /* he lifts the camera out on the way up */
+    if(st.id==='lift' && CUT.bootCam && u>0.25) CUT.bootCam.visible=false;
     camA=[-1.7,1.58,-4.9]; camB=[-1.15,1.52,-4.5];
   } else if(st.id==='mount'){
     CUT.lidA=1;
@@ -8576,6 +8679,7 @@ function cutTick(dt){
     /* the beat is "and then you take the rifle", so the rifle has to be in
        shot: it comes up into the hands as the arms lift out of the boot */
     gun.visible=true;
+    if(CUT.bootRifle && u>0.30) CUT.bootRifle.visible=false;   /* it is in your hands now */
     camera.position.copy(P(-0.10, 1.66-ease*.03, -3.62-ease*.10));
     lookT=_cutV.set(boot.x, 1.06+ease*.14, boot.z);
   }
@@ -8597,7 +8701,7 @@ function cutTick(dt){
 
   const lid=cutFindLid();
   if(lid && lid.userData.rest!==undefined)
-    lid.rotation.x = lid.userData.rest - CUT.lidA*1.05;
+    lid.rotation.x = lid.userData.rest + CUT.lidA*CUT_LID_SWING;
   const door=cutFindDoor();
   if(door && door.userData.rest!==undefined)
     door.rotation.y = door.userData.rest - CUT.doorA*CUT_DOOR_SWING;
