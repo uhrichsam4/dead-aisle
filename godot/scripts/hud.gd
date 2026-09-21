@@ -242,7 +242,8 @@ func show_combat_hud(on: bool) -> void:
 func _process(dt: float) -> void:
 	_t += dt
 	flash.color.a = maxf(0.0, flash.color.a - dt * 0.9)
-	if _banner_timer > 0.0:
+	# the end cards carry the "click to redeploy" prompt, so they stay up
+	if _banner_timer > 0.0 and Game.phase not in ["dead", "win"]:
 		_banner_timer -= dt
 		if _banner_timer < 1.0:
 			banner_t.modulate.a = maxf(0.0, _banner_timer)

@@ -20,7 +20,9 @@ const STATIONS := [
 ]
 
 const CAR_CAM := Vector3(-0.37, 1.15, -0.62)
-const PARK := AABB(Vector3(6, 0, 17.5), Vector3(4, 3, 3))       # act 1 bay
+const PARK_ACT1 := AABB(Vector3(6, 0, 17.5), Vector3(4, 3, 3))       # the TOPS bay
+const PARK_ACT2 := AABB(Vector3(-890, 0, 33.5), Vector3(5, 3, 3))     # the kerb by the mosque gate
+var park_box := PARK_ACT1
 const MAX_FWD := 24.0
 const MAX_REV := -7.0
 
@@ -197,7 +199,7 @@ func _physics_process(dt: float) -> void:
 	for w in wheels:
 		(wheels[w] as Node3D).rotate_object_local(Vector3.RIGHT, -speed * dt / 0.34)
 
-	if not is_parked and absf(speed) < 0.45 and PARK.has_point(Vector3(global_position.x, 1, global_position.z)):
+	if not is_parked and absf(speed) < 0.45 and park_box.has_point(Vector3(global_position.x, 1, global_position.z)):
 		is_parked = true
 		speed = 0.0
 		parked.emit()
@@ -216,7 +218,7 @@ func _physics_process(dt: float) -> void:
 func _park_assist(dt: float) -> void:
 	if is_parked or not driving:
 		return
-	var c := PARK.get_center()
+	var c := park_box.get_center()
 	var d := Vector2(global_position.x - c.x, global_position.z - c.z).length()
 	if d < 8.0 and speed > -0.5 and speed < 6.5:
 		var k := clampf(1.0 - d / 8.0, 0.0, 1.0)

@@ -24,6 +24,7 @@ func build() -> void:
 	_storefront()
 	_store_interior()
 	_street()
+	_highway()
 	_setup_navmesh()
 
 # ------------------------------------------------------------------ helpers
@@ -161,8 +162,8 @@ func _materials() -> void:
 		Vector3(4, 4, 4), Color(0.45, 0.44, 0.42), 1.0)
 	M.brick = U.surface_mat("res://assets/tex/brick.jpg", "res://assets/tex/brick_n.jpg", "",
 		Vector3(2.6, 1.6, 2.6), Color(0.85, 0.8, 0.76), 0.95)
-	M.clad = U.surface_mat("res://assets/tex/wall.jpg", "res://assets/tex/wall_n.jpg", "",
-		Vector3(3.2, 2.5, 3.2), Color(1.25, 1.25, 1.2), 0.92)
+	M.clad = U.surface_mat("res://assets/tex/wall_lit.jpg", "res://assets/tex/wall_n.jpg", "",
+		Vector3(3.2, 2.5, 3.2), Color("c6b69c"), 0.95)       # the web's MAT_WALL
 	M.walk = U.flat_mat(Color(0.52, 0.52, 0.5), 0.92)
 	M.metal = U.flat_mat(Color(0.61, 0.63, 0.64), 0.4, 0.75)
 	M.metal_dark = U.flat_mat(Color(0.34, 0.36, 0.37), 0.55, 0.6)
@@ -225,7 +226,10 @@ func _ground() -> void:
 	add_child(mmi)
 
 	# kerbs and pavements (the gap at x 6..18 is the driveway into the lot)
-	for seg in [[-27, 66, 31.15, 1.5], [39, 42, 31.15, 1.5], [0, 120, 41.35, 2.5], [-190, 380, 41.35, 2.5], [120, 100, 41.35, 2.5]]:
+	# the north pavement runs the whole road; the south kerb breaks for the
+	# TOPS driveway (x 6..18) and the mosque gate (x -903..-897)
+	box(Vector3(1200, 0.14, 2.5), Vector3(-430, 0.07, 41.35), M.walk, false)
+	for seg in [[-27, 66, 31.15, 1.5], [39, 42, 31.15, 1.5], [-477.5, 835, 31.15, 1.5], [-966.5, 127, 31.15, 1.5]]:
 		box(Vector3(seg[1], 0.14, seg[3]), Vector3(seg[0], 0.07, seg[2]), M.walk, false)
 
 # ------------------------------------------------------------------ store shell
@@ -459,6 +463,110 @@ func _street() -> void:
 			place(lib, trees[rng.randi() % 4], Vector3(tx + rng.randf_range(-3, 3), 0, 42.0 + rng.randf_range(-1.5, 1.5)),
 				rng.randf_range(0, TAU), rng.randf_range(0.55, 0.85))
 		tx += 17.0
+
+## The 900 m west to the mosque. Frontages both sides from the town's own
+## facade models, pulled in close to the road so they stay in the in-car view
+## (the web build found a sparse row at the town's setback read as empty
+## verge), with gaps so it does not read as one endless terrace; lamp posts,
+## trees, and the roadside dressing from the web build's own props pack.
+func _highway() -> void:
+	var lib := "res://assets/street.glb"
+	var dims := {}
+	for n in FACADES:
+		var src := U.glb(lib).find_child(n, true, false) as Node3D
+		if src:
+			dims[n] = U.local_aabb(src)
+	# frontages in runs, broken for vacant lots and kept clear of the mosque
+	var x := -842.0
+	while x < -140.0:
+		var run := rng.randf_range(60.0, 140.0)
+		var end := minf(x + run, -140.0)
+		_facade_row(lib, dims, x, end, 43.4, -1, rng.randf_range(0.45, 0.55))
+		if not (x < -860.0 and end > -940.0):
+			_facade_row(lib, dims, x, end, 30.0, 1, rng.randf_range(0.42, 0.5))
+		x = end + rng.randf_range(18.0, 45.0)
+	var sx := -136.0
+	while sx > -1020.0:
+		place(lib, "wP_Lampost1", Vector3(sx, 0, 40.6))
+		sx -= 38.0
+	var trees := ["wP_Tree_001", "wP_Tree_002", "wP_Tree_003", "wP_Tree_004"]
+	var tx := -150.0
+	while tx > -1010.0:
+		if absf(tx + 900.0) > 34.0:
+			place(lib, trees[rng.randi() % 4], Vector3(tx + rng.randf_range(-4, 4), 0, 42.0 + rng.randf_range(-1.0, 1.0)),
+				rng.randf_range(0, TAU), rng.randf_range(0.5, 0.8))
+		tx -= rng.randf_range(22.0, 36.0)
+	_map2()
+
+## the web build's supplied roadside set: a liquor store on the way out of
+## town, dead trees, grass tufts, boulders, rubble and culverts in the
+## industrial belt, and a few people standing about
+func _map2() -> void:
+	var lib := "res://assets/map2.glb"
+	var root := U.glb(lib)
+	if root == null:
+		return
+	U.fix_materials(root)
+	var P := func(n: String, x: float, z: float, h: float, ry := -1.0, y := 0.0, collide := false):
+		var p := U.part(lib, n)
+		if p == null:
+			return
+		p.position = Vector3.ZERO
+		p.rotation = Vector3.ZERO
+		p.scale = Vector3.ONE
+		var a := U.local_aabb(p)
+		var s := h / maxf(0.001, a.size.y)
+		p.scale = Vector3.ONE * s
+		p.position = Vector3(x, y - a.position.y * s, z)
+		p.rotation.y = ry if ry >= 0.0 else rng.randf_range(0, TAU)
+		add_child(p)
+		if collide:
+			var w := U.local_aabb(p)
+			var sb := StaticBody3D.new()
+			var cs := CollisionShape3D.new()
+			var sh := BoxShape3D.new()
+			# the body is a child of the scaled prop, so it inherits the scale -
+			# give it the prop's UNSCALED bounds or it is scaled twice
+			sh.size = w.size
+			cs.shape = sh
+			cs.position = w.get_center()
+			sb.add_child(cs)
+			sb.set_meta("surface", "concrete")
+			p.add_child(sb)
+	P.call("liquorstore", -268, 46.1, 9.2, PI, 0.0, true)
+	for i in range(-3, 4):
+		P.call("ironfence", -268 + i * 2.55, 41.2, 2.0, 0.0)
+	var ti := 0
+	var x := -150.0
+	while x > -840.0:
+		P.call("deadtree", x, 42.6 if ti % 2 == 1 else 29.4, rng.randf_range(5.4, 7.2))
+		x -= 37.0
+		ti += 1
+	x = -146.0
+	while x > -840.0:
+		P.call("grasstuft" if rng.randf() < 0.5 else "grasstuft2", x + rng.randf_range(-4, 4), rng.randf_range(41.2, 43.2), rng.randf_range(0.3, 0.5))
+		P.call("grasstuft" if rng.randf() < 0.5 else "grasstuft2", x + rng.randf_range(-4, 4), rng.randf_range(28.8, 30.8), rng.randf_range(0.3, 0.5))
+		x -= 23.0
+	x = -160.0
+	while x > -830.0:
+		P.call("boulder", x, rng.randf_range(43.5, 45.5), rng.randf_range(0.8, 1.5))
+		P.call("rockscatter", x - 24, rng.randf_range(26.5, 28.5), rng.randf_range(0.5, 0.9))
+		x -= 61.0
+	x = -330.0
+	while x > -575.0:
+		P.call("rubblestack", x, rng.randf_range(43.8, 45.2), rng.randf_range(1.3, 1.9), -1.0, 0.0, true)
+		P.call("culvert", x - 26, rng.randf_range(26.8, 28.2), rng.randf_range(1.1, 1.5), -1.0, 0.0, true)
+		x -= 52.0
+	for cx in [-200.0, -402.0, -486.0, -640.0, -790.0]:
+		P.call("cobblepatch", cx, 41.6, 0.16)
+	for f in [[-176, 42.2, "man_hoodie", 4.0], [-241, 29.2, "man_kurta", 1.1], [-402, 26.6, "man_hoodie", 0.4],
+			[-455, 42.4, "man_kurta", 4.4], [-612, 29.0, "man_kurta", 2.6], [-742, 42.6, "man_hoodie", 5.6]]:
+		P.call(f[2], f[0], f[1], 1.79, f[3])
+	# the courtyard railing along the mosque frontage, leaving the gateway open
+	for i in range(-6, 7):
+		if absi(i) < 2:
+			continue
+		P.call("ironfence", -900.0 + i * 2.55 * 0.46, 32.0 * 0.46 + 32.0 * 0.54 + 0.4, 2.0, 0.0)
 
 ## Lay facades edge to edge along a frontage, each placed by its OWN bounds:
 ## left edge on the cursor, front face on the line, base on the ground. The

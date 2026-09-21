@@ -11,6 +11,12 @@ const HostileScript := preload("res://scripts/hostile.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const ArrivalScript := preload("res://scripts/arrival.gd")
 const SurvivorScript := preload("res://scripts/survivor.gd")
+const MosqueScript := preload("res://scripts/mosque.gd")
+# act 2 tables, in mosque-LOCAL coordinates (the web build's own numbers)
+const OUTSIDE_PTS2 := [[-20, 18], [20, 19], [-8, 28], [14, 29], [-16, 24], [6, 22]]
+const INSIDE_PTS2 := [[-21.7, -12.7], [-12.6, -12.7], [-3.5, -12.7], [5.7, -12.7], [14.8, -12.7],
+	[-17.2, -4.9], [-8, -4.9], [1.1, -4.9], [10.2, -4.9], [22, -6.9], [-16.5, 4.2], [-7.4, 4.2], [7, 4.2], [16.1, 4.2]]
+const SURV_SPOTS2 := [[-17.2, -4.9], [10.2, -4.9], [-12.6, -12.7], [14.8, -12.7]]
 const SURV_SPOTS := [[-16.4, 11.0], [16.4, 10.6], [-19.5, -12.5], [18.8, -3.0]]
 
 const CAR_START := Vector3(124, 0, 36.5)
@@ -20,6 +26,7 @@ const INSIDE_PTS := [[-19, -12], [19, -12], [-19, -6], [19, -6], [-8, -11], [8, 
 const POOL := 18
 
 var world: NavigationRegion3D
+var mosque: NavigationRegion3D
 var player: CharacterBody3D
 var car: CharacterBody3D
 var hud: CanvasLayer
@@ -40,6 +47,10 @@ func _ready() -> void:
 	world.name = "World"
 	add_child(world)
 	world.build()
+	mosque = MosqueScript.new()
+	mosque.name = "Mosque"
+	add_child(mosque)
+	mosque.build()
 
 	car = CarScript.new()
 	car.name = "Car"
@@ -87,6 +98,7 @@ func _ready() -> void:
 
 	# bake the navmesh once the world has settled
 	get_tree().create_timer(0.5).timeout.connect(world.bake_nav)
+	get_tree().create_timer(1.2).timeout.connect(mosque.bake_nav)
 	_start_drive()
 
 # ------------------------------------------------------------------ setup
@@ -180,6 +192,21 @@ func _on_parked() -> void:
 	hud.show_combat_hud(false)
 	arrival.begin(car, player, post)
 
+func _mq(p: Array) -> Vector3:
+	return Vector3(MosqueScript.mqx(p[0]), 0.1, MosqueScript.mqz(p[1]))
+
+func _outside_pts() -> Array:
+	var out := []
+	for p in (OUTSIDE_PTS2 if Game.act == 2 else OUTSIDE_PTS):
+		out.append(_mq(p) if Game.act == 2 else Vector3(p[0], 0.1, p[1]))
+	return out
+
+func _inside_pts() -> Array:
+	var out := []
+	for p in (INSIDE_PTS2 if Game.act == 2 else INSIDE_PTS):
+		out.append(_mq(p) if Game.act == 2 else Vector3(p[0], 0.1, p[1]))
+	return out
+
 func _begin_outside() -> void:
 	# the arrival has already put you on your feet behind the boot
 	player.activate(true)
@@ -188,9 +215,9 @@ func _begin_outside() -> void:
 	hud.set_hint("WASD MOVE · SHIFT SPRINT · LMB FIRE · RMB AIM · R RELOAD · 1/2/3 WEAPON")
 	Game.set_phase("outside")
 	Game.play("gear_gopro_beep", -6.0)
-	for p in OUTSIDE_PTS:
-		_spawn(Vector3(p[0], 0.1, p[1]))
-	Game.say_banner("THEY KNOW YOU ARE HERE", "GET TO THE DOORS")
+	for p in _outside_pts():
+		_spawn(p)
+	Game.say_banner("THEY KNOW YOU ARE HERE", "GET THROUGH THE GATE" if Game.act == 2 else "GET TO THE DOORS")
 	Game.play("vo_contact", -2.0)
 
 func _enter_store() -> void:
@@ -199,7 +226,7 @@ func _enter_store() -> void:
 	Game.set_objective("enter", "done")
 	Game.set_objective("clear", "active")
 	Game.set_objective("rescue", "active")
-	Game.say_banner("INSIDE", "CLEAR THE STORE")
+	Game.say_banner("INSIDE", "CLEAR THE PRAYER HALL" if Game.act == 2 else "CLEAR THE STORE")
 	inside_waves = 2
 	_inside_wave()
 
@@ -208,10 +235,10 @@ func _inside_wave() -> void:
 		Game.vo("clear", 6.0)            # a breath between waves
 		get_tree().create_timer(2.2).timeout.connect(func(): Game.vo("contact", 10.0))
 	inside_waves -= 1
-	var pts := INSIDE_PTS.duplicate()
+	var pts := _inside_pts()
 	pts.shuffle()
 	for i in mini(8 + Game.wave * 2, pts.size()):
-		_spawn(Vector3(pts[i][0], 0.1, pts[i][1]))
+		_spawn(pts[i])
 
 func _spawn(pos: Vector3) -> void:
 	for h in hostiles:
@@ -233,7 +260,7 @@ func _on_survivor_found(_s: Node) -> void:
 func _maybe_extract_objective() -> void:
 	if cleared and rescued >= survivors.size():
 		Game.set_objective("extract", "active")
-		Game.say_banner("EVERYONE IS WITH YOU", "WALK THEM OUT THROUGH THE DOORS")
+		Game.say_banner("EVERYONE IS WITH YOU", "WALK THEM OUT THROUGH THE GATE" if Game.act == 2 else "WALK THEM OUT THROUGH THE DOORS")
 		Game.vo("out_front", 5.0)
 
 ## out through the doors with everyone who is following you
@@ -241,7 +268,11 @@ func _check_extract() -> void:
 	if not (cleared and rescued >= survivors.size()):
 		return
 	var p := player.global_position
-	if p.z < 16.2 or absf(p.x) > 6.0:
+	if Game.act == 2:
+		# out through the courtyard gate onto the street
+		if p.z < MosqueScript.mqz(32.6) or absf(p.x - MosqueScript.X) > 5.0:
+			return
+	elif p.z < 16.2 or absf(p.x) > 6.0:
 		return
 	for s in survivors:
 		if s.state == "following" and (s as Node3D).global_position.distance_to(p) > 10.0:
@@ -263,15 +294,55 @@ func _threats() -> int:
 			n += 1
 	return n
 
+## Act 2: back in the car at the TOPS lot, pointed west, 900 m to Al-Salaam.
+func _start_act2() -> void:
+	Game.act = 2
+	Game.wave += 1
+	cleared = false
+	rescued = 0
+	inside_waves = 0
+	for h in hostiles:
+		h.despawn()
+	for i in survivors.size():
+		survivors[i].place(_mq(SURV_SPOTS2[i]) + Vector3(0, -0.05, 0), player)
+	player.activate(false)
+	player.heal_full()
+	player.mag = player.MAG_SIZE
+	car.global_position = Vector3(7.5, 0, 36.5)
+	car.rotation.y = PI / 2
+	car.speed = 0.0
+	car.park_box = car.PARK_ACT2
+	car.is_parked = false
+	car.take_wheel(true)
+	post.set_shader_parameter("mix_amt", 0.25)
+	hud.show_combat_hud(false)
+	hud.set_objectives([["drive", "DRIVE WEST TO THE AL-SALAAM MOSQUE"], ["park", "PARK AT THE GATE"],
+		["enter", "GET INSIDE THE MOSQUE"], ["clear", "CLEAR EVERY THREAT"],
+		["rescue", "FIND THE 4 SURVIVORS"], ["extract", "WALK THEM OUT THROUGH THE GATE"]])
+	Game.set_objective("drive", "active")
+	hud.set_hint("W/S DRIVE · A/D STEER · E RADIO · 1-5 STATION")
+	Game.set_phase("drive")
+	Game.say_banner("NEW OBJECTIVE", "AL-SALAAM MOSQUE — DRIVE WEST")
+	Game.play("car_seatbelt", -8.0)
+	get_tree().create_timer(0.7).timeout.connect(func(): Game.play("car_start", -5.0))
+	get_tree().create_timer(3.0).timeout.connect(func(): Game.vo("driving", 0.0))
+
 func _on_died() -> void:
 	Game.set_phase("dead")
 	Game.say_banner("K.I.A.", "CLICK TO REDEPLOY")
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 func _win() -> void:
+	if Game.act == 1:
+		Game.points += 400
+		Game.say_banner("TOPS CLEAR", "+400 · THE MOSQUE IS NEXT")
+		Game.vo("clear", 0.0)
+		Game.set_phase("between")
+		get_tree().create_timer(4.0).timeout.connect(_start_act2)
+		return
 	Game.set_phase("win")
-	Game.set_objective("clear", "done")
-	Game.say_banner("TOPS CLEAR", "%d KILLS · %d POINTS · CLICK TO PLAY AGAIN" % [Game.kills, Game.points])
+	Game.points += 500
+	Game.say_banner("MISSION COMPLETE", "%d KILLS · %d POINTS · CLICK TO PLAY AGAIN" % [Game.kills, Game.points])
 	Game.vo("clear", 0.0)
 	get_tree().create_timer(1.6).timeout.connect(func(): Game.play_file("vo-win.mp3", -2.0))
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -286,7 +357,11 @@ func _process(dt: float) -> void:
 	match Game.phase:
 		"outside":
 			var p := player.global_position
-			if p.z < 14.6 and absf(p.x) < 2.2:
+			if Game.act == 2:
+				# in through the facade arch into the vestibule
+				if p.z < MosqueScript.mqz(12.4) and absf(p.x - MosqueScript.X) < 11.0:
+					_enter_store()
+			elif p.z < 14.6 and absf(p.x) < 2.2:
 				_enter_store()
 		"inside":
 			if _threats() == 0 and not cleared:
@@ -296,10 +371,11 @@ func _process(dt: float) -> void:
 					cleared = true
 					Game.set_objective("clear", "done")
 					if rescued < survivors.size():
-						Game.say_banner("STORE CLEAR", "FIND THE SURVIVORS - %d LEFT" % (survivors.size() - rescued))
+						Game.say_banner("MOSQUE CLEAR" if Game.act == 2 else "STORE CLEAR", "FIND THE SURVIVORS - %d LEFT" % (survivors.size() - rescued))
 					_maybe_extract_objective()
 			_check_extract()
-	hud.set_center("THREATS: %d" % _threats() if Game.phase == "inside" else "")
+	var n := _threats()
+	hud.set_center("THREATS: %d" % n if Game.phase == "inside" and n > 0 else "")
 	if Game.phase in ["outside", "inside"] and player.alive:
 		_watch_your_back()
 
@@ -319,7 +395,7 @@ func _watch_your_back() -> void:
 func _unhandled_input(e: InputEvent) -> void:
 	# F1 skips the drive: straight to the car park on foot
 	if e is InputEventKey and (e as InputEventKey).pressed and (e as InputEventKey).keycode == KEY_F1 and Game.phase == "drive":
-		car.global_position = Vector3(8.0, 0, 19.0)
+		car.global_position = car.park_box.get_center() * Vector3(1, 0, 1)
 		car.rotation.y = PI / 2
 		car.speed = 0.0
 		return
