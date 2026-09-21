@@ -6,6 +6,18 @@ extends CharacterBody3D
 const U := preload("res://scripts/util.gd")
 
 signal parked
+signal radio_changed(text: String)
+
+## The radio is a real object in the car, not a track over the mix: once you
+## park and walk away it is still playing back there, quieter the further you
+## go. Rename freely - the name is what shows on the dial.
+const STATIONS := [
+	{"name": "STATIC FM",  "file": "radio-song.mp3"},
+	{"name": "NIGHTSHIFT", "file": "radio-nightshift.mp3"},
+	{"name": "LOWRIDER",   "file": "radio-lowrider.mp3"},
+	{"name": "MAGIC VIP",  "file": "radio-magic.mp3"},
+	{"name": "PARKSIDE",   "file": "park-song.mp3"},
+]
 
 const CAR_CAM := Vector3(-0.37, 1.15, -0.62)
 const PARK := AABB(Vector3(6, 0, 17.5), Vector3(4, 3, 3))       # act 1 bay
@@ -23,6 +35,10 @@ var cam_yaw := 0.0
 var look_yaw := 0.0
 var look_pitch := 0.0
 var engine: AudioStreamPlayer3D
+var radio: AudioStreamPlayer3D
+var station := 0
+var radio_on := false
+var _hb_down := false
 
 func _ready() -> void:
 	collision_layer = 8
@@ -72,9 +88,50 @@ func _ready() -> void:
 	engine = AudioStreamPlayer3D.new()
 	var rev: Array = Game.variants("car_rev")
 	if not rev.is_empty():
-		engine.stream = rev[0]
+		var st: AudioStream = rev[0]
+		if st is AudioStreamMP3:
+			(st as AudioStreamMP3).loop = true
+		engine.stream = st
 	engine.volume_db = -14.0
+	engine.unit_size = 6.0
 	add_child(engine)
+	radio = AudioStreamPlayer3D.new()
+	radio.position = Vector3(0, 1.0, -0.9)      # the dash
+	radio.unit_size = 4.0
+	radio.max_distance = 140.0
+	radio.volume_db = -6.0
+	add_child(radio)
+
+# ------------------------------------------------------------------ radio
+
+func radio_toggle() -> void:
+	radio_on = not radio_on
+	if radio_on:
+		_tune(station)
+	else:
+		radio.stop()
+		radio_changed.emit("RADIO OFF")
+	Game.play("gear_gopro_beep", -14.0, 0.7)       # the click of the knob
+
+func radio_select(i: int) -> void:
+	if i < 0 or i >= STATIONS.size():
+		return
+	radio_on = true
+	_tune(i)
+
+func radio_next() -> void:
+	radio_select((station + 1) % STATIONS.size())
+
+func _tune(i: int) -> void:
+	station = i
+	var st := Game.file(STATIONS[i].file)
+	if st is AudioStreamMP3:
+		(st as AudioStreamMP3).loop = true
+	radio.stream = st
+	# drop in partway through, like tuning into something already playing
+	var len := st.get_length() if st else 0.0
+	radio.play(randf_range(0.0, len * 0.6) if len > 10.0 else 0.0)
+	radio_changed.emit("♪  " + STATIONS[i].name)
 
 func take_wheel(on: bool) -> void:
 	driving = on
@@ -85,6 +142,17 @@ func take_wheel(on: bool) -> void:
 		look_pitch = 0.0
 
 func _unhandled_input(e: InputEvent) -> void:
+	if driving and not is_parked:
+		if e.is_action_pressed("radio"):
+			radio_toggle()
+			return
+		for k in 5:
+			if e is InputEventKey and (e as InputEventKey).pressed and not (e as InputEventKey).echo and (e as InputEventKey).physical_keycode == KEY_1 + k:
+				radio_select(k)
+				return
+		if e.is_action_pressed("next_weapon"):
+			radio_next()
+			return
 	if driving and e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		look_yaw = clampf(look_yaw - (e as InputEventMouseMotion).relative.x * 0.002, -1.3, 1.3)
 		look_pitch = clampf(look_pitch - (e as InputEventMouseMotion).relative.y * 0.002, -0.5, 0.4)
@@ -103,8 +171,12 @@ func _physics_process(dt: float) -> void:
 		speed -= (20.0 if speed > 0.4 else 8.0) * brk * dt
 	if thr == 0.0 and brk == 0.0:
 		speed = move_toward(speed, 0.0, 4.0 * dt)
-	if Input.is_action_pressed("handbrake") and driving:
+	var hb := Input.is_action_pressed("handbrake") and driving and not is_parked
+	if hb:
 		speed = move_toward(speed, 0.0, 16.0 * dt)
+		if not _hb_down and absf(speed) > 3.0:
+			Game.play("car_handbrake", -6.0)
+	_hb_down = hb
 	speed = clampf(speed, MAX_REV, MAX_FWD)
 	steer = lerpf(steer, st, clampf(dt * 5.0, 0.0, 1.0))
 	# steering scales with speed and flips in reverse, like a real car
@@ -134,7 +206,8 @@ func _physics_process(dt: float) -> void:
 		if driving and not engine.playing:
 			engine.play()
 		engine.pitch_scale = 0.7 + absf(speed) / MAX_FWD * 1.1
-		if not driving:
+		engine.volume_db = lerpf(-16.0, -8.0, clampf(thr + absf(speed) / MAX_FWD, 0.0, 1.0))
+		if not driving and engine.playing:
 			engine.stop()
 
 ## Hitting a 4 x 3 m box at a dead stop by hand is a coin flip, so once you

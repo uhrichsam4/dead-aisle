@@ -12,6 +12,7 @@ var points := 0
 var kills := 0
 var wave := 1
 var run_time := 0.0
+var god := false          # testing: nothing can hurt you
 
 const SFX_DIR := "res://assets/sfx/"
 var _variants := {}
@@ -101,6 +102,71 @@ func play(fam: String, vol_db := 0.0, pitch := 1.0) -> void:
 	p.volume_db = vol_db
 	p.pitch_scale = pitch * randf_range(0.97, 1.03)
 	p.play()
+
+## one-off files in assets/ (the hostile voices, stingers, the radio)
+var _files := {}
+func file(name: String) -> AudioStream:
+	if _files.has(name):
+		return _files[name]
+	var path := "res://assets/" + name
+	var s: AudioStream = load(path) if ResourceLoader.exists(path) else null
+	_files[name] = s
+	return s
+
+func play_file(name: String, vol_db := 0.0, pitch := 1.0) -> void:
+	var s := file(name)
+	if s == null:
+		return
+	var p: AudioStreamPlayer = _pool[0]
+	for q in _pool:
+		if not q.playing:
+			p = q
+			break
+	p.stream = s
+	p.volume_db = vol_db
+	p.pitch_scale = pitch
+	p.play()
+
+func play_file_at(name: String, pos: Vector3, vol_db := 0.0, pitch := 1.0, range_m := 30.0) -> void:
+	var s := file(name)
+	if s == null or get_tree().current_scene == null:
+		return
+	var p := AudioStreamPlayer3D.new()
+	p.stream = s
+	p.volume_db = vol_db
+	p.pitch_scale = pitch
+	p.unit_size = 5.0
+	p.max_distance = range_m
+	get_tree().current_scene.add_child(p)
+	p.global_position = pos
+	p.play()
+	p.finished.connect(p.queue_free)
+
+## Hostile voices are gated globally, as the web build did: never a chorus,
+## and the reactions have their own gate so a volley does not stack eight.
+var _last_shout := -10.0
+var _last_react := -10.0
+func may_shout(gap := 0.55) -> bool:
+	var now := Time.get_ticks_msec() / 1000.0
+	if now - _last_shout < gap:
+		return false
+	_last_shout = now
+	return true
+func may_react(gap := 0.7) -> bool:
+	var now := Time.get_ticks_msec() / 1000.0
+	if now - _last_react < gap:
+		return false
+	_last_react = now
+	return true
+
+## VO lines are rationed so the operator does not narrate everything
+var _vo_last := {}
+func vo(line: String, cooldown := 8.0, chance := 1.0, vol_db := -2.0) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	if now - _vo_last.get(line, -999.0) < cooldown or randf() > chance:
+		return
+	_vo_last[line] = now
+	play("vo_" + line, vol_db)
 
 func play_at(fam: String, pos: Vector3, vol_db := 0.0, pitch := 1.0) -> void:
 	var s := _pick(fam)

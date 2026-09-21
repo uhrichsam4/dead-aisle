@@ -17,6 +17,8 @@ var flash: ColorRect
 var cross: Control
 var hitmark: Label
 var center_msg: Label
+var radio_lbl: Label
+var _radio_t := 0.0
 var _banner_timer := 0.0
 var _hit_t := 0.0
 var _t := 0.0
@@ -150,6 +152,13 @@ func _ready() -> void:
 	center_msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(center_msg)
 
+	radio_lbl = _lbl("", 18, Color(1, 0.85, 0.5))
+	radio_lbl.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	radio_lbl.offset_left = -400
+	radio_lbl.offset_right = 400
+	radio_lbl.offset_top = -80
+	radio_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	root.add_child(radio_lbl)
 	Game.banner.connect(show_banner)
 	Game.objective.connect(set_objective)
 
@@ -213,6 +222,11 @@ func on_hit(headshot: bool, kill: bool) -> void:
 	hitmark.modulate.a = 1.0
 	_hit_t = 0.18 if not headshot else 0.3
 
+func set_radio(t: String) -> void:
+	radio_lbl.text = t
+	radio_lbl.modulate.a = 1.0
+	_radio_t = 3.0
+
 func set_hint(t: String) -> void:
 	hint.text = t
 
@@ -234,6 +248,9 @@ func _process(dt: float) -> void:
 			banner_t.modulate.a = maxf(0.0, _banner_timer)
 			banner_s.modulate.a = maxf(0.0, _banner_timer)
 	_hit_t = maxf(0.0, _hit_t - dt)
+	if _radio_t > 0.0:
+		_radio_t -= dt
+		radio_lbl.modulate.a = clampf(_radio_t, 0.0, 1.0)
 	hitmark.modulate.a = clampf(_hit_t / 0.18, 0.0, 1.0)
 	rec.modulate.a = 1.0 if fmod(_t, 1.2) < 0.8 else 0.25
 	var s := int(Game.run_time)

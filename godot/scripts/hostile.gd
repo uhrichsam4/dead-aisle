@@ -20,6 +20,11 @@ var agent: NavigationAgent3D
 var head_y := 1.5
 var _anim_now := ""
 var _groan_cd := 0.0
+# audio: one voice per person for their whole life, as the web build did
+var voice: AudioStreamPlayer3D
+var voice_idx := 1
+var seen_player := false
+var _step_t := 0.0
 
 func _ready() -> void:
 	collision_layer = 4
@@ -43,6 +48,11 @@ func _ready() -> void:
 					anim.get_animation(n).loop_mode = Animation.LOOP_LINEAR
 		for mi in model.find_children("*", "MeshInstance3D", true, false):
 			(mi as MeshInstance3D).extra_cull_margin = 1.5   # skinned bounds are bind-pose
+	voice = AudioStreamPlayer3D.new()
+	voice.unit_size = 4.0
+	voice.max_distance = 22.0          # past ~20 m they are silent
+	voice.position.y = 1.55
+	add_child(voice)
 	agent = NavigationAgent3D.new()
 	agent.path_desired_distance = 0.6
 	agent.target_desired_distance = 1.0
@@ -96,10 +106,23 @@ func spawn(pos: Vector3, wave: int, tgt: Node3D) -> void:
 	state = "chase"
 	visible = true
 	process_mode = Node.PROCESS_MODE_INHERIT
+	voice_idx = randi_range(1, 7)
+	seen_player = false
+	_groan_cd = randf_range(1.5, 6.0)
 	collision_layer = 4
 	rotation.y = randf() * TAU
 	_anim_now = ""
 	_play("run", 0.0, speed / 1.6)
+
+## their own shout (the voice they were given), a reaction line, or a scream
+func _say(file: String, vol_db := 0.0, pitch := 1.0) -> void:
+	var st := Game.file(file)
+	if st == null or not visible:
+		return
+	voice.stream = st
+	voice.volume_db = vol_db
+	voice.pitch_scale = pitch
+	voice.play()
 
 func despawn() -> void:
 	state = "idle"
@@ -120,7 +143,11 @@ func take_hit(dmg: float, at: Vector3, dir: Vector3) -> bool:
 	if state == "dead" or state == "idle":
 		return false
 	hp -= dmg
-	Game.play_at("hit_wood", at, -8.0, 0.8)
+	# a wet thud where the round lands, and they yell - gated, so a volley
+	# into a crowd is not eight people shouting at once
+	Game.play_file_at("sfx-body-drop.mp3", at, -14.0, randf_range(1.6, 1.9), 25.0)
+	if hp > 0.0 and Game.may_react():
+		_say("hostile-v%d.mp3" % randi_range(1, 6), -2.0, randf_range(0.95, 1.05))
 	_blood(at, dir)
 	if hp <= 0.0:
 		state = "dead"
@@ -128,6 +155,11 @@ func take_hit(dmg: float, at: Vector3, dir: Vector3) -> bool:
 		collision_layer = 0
 		velocity = Vector3.ZERO
 		_play("death", 0.1)
+		if randf() < 0.6:
+			_say("kill-voice.mp3", -4.0, randf_range(0.85, 1.1))
+		# the body hits the floor as the death clip lands
+		get_tree().create_timer(0.55).timeout.connect(func():
+			if visible: Game.play_file_at("sfx-body-drop.mp3", global_position + Vector3(0, 0.3, 0), -3.0, randf_range(0.9, 1.05), 30.0))
 		killed.emit(self)
 		return true
 	# a hit staggers it back a touch
@@ -178,6 +210,15 @@ func _physics_process(dt: float) -> void:
 	var to := target.global_position - global_position
 	to.y = 0.0
 	var dist := to.length()
+	# the first time they clock you they scream, then they shout as they come
+	if not seen_player and dist < 18.0:
+		seen_player = true
+		if Game.may_react(0.4):
+			_say("sfx-enemy-scream.mp3" if randf() < 0.45 else "hostile-v%d.mp3" % randi_range(1, 6), -1.0, randf_range(0.92, 1.06))
+	elif _groan_cd <= 0.0:
+		_groan_cd = randf_range(3.5, 8.0)
+		if dist < 20.0 and Game.may_shout():
+			_say("hostile-%d.mp3" % voice_idx, -3.0, randf_range(0.96, 1.04))
 	if dist < 1.35:
 		state = "attack"
 		velocity.x = 0.0
@@ -185,6 +226,8 @@ func _physics_process(dt: float) -> void:
 		_play("attack", 0.15)
 		if attack_cd <= 0.0:
 			attack_cd = 1.1
+			if Game.may_shout(0.3):
+				_say("hostile-%d.mp3" % voice_idx, 0.0, randf_range(1.0, 1.1))
 			if target.has_method("take_damage"):
 				target.call("take_damage", 18.0, global_position)
 	else:
@@ -201,6 +244,13 @@ func _physics_process(dt: float) -> void:
 		velocity.x = d.x * speed
 		velocity.z = d.z * speed
 		_play("run", 0.2, clampf(speed / 1.6, 0.6, 2.0))
+		# their feet, quiet, and only when close enough to matter
+		_step_t -= dt * speed
+		if _step_t <= 0.0:
+			_step_t = 0.75
+			if dist < 12.0:
+				var inside := absf(global_position.x) < 22.0 and absf(global_position.z) < 15.0
+				Game.play_at("step_tile" if inside else "step_concrete", global_position, -20.0, randf_range(0.85, 0.95))
 	if not is_on_floor():
 		velocity.y -= 18.0 * dt
 	else:

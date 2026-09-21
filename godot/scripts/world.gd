@@ -40,8 +40,16 @@ func box(size: Vector3, pos: Vector3, mat: Material, solid := true, rot_y := 0.0
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	(parent if parent else self).add_child(mi)
 	if solid:
-		_collider(mi, size)
+		_collider(mi, size).set_meta("surface", _surface_of(mat))
 	return mi
+
+## what a round sounds like when it hits this material
+func _surface_of(mat: Material) -> String:
+	if mat == M.get("board"):
+		return "wood"
+	if mat in [M.get("metal"), M.get("metal_dark"), M.get("fixture"), M.get("red"), M.get("dark")]:
+		return "metal"
+	return "concrete"
 
 func _collider(host: Node3D, size: Vector3, offset := Vector3.ZERO) -> StaticBody3D:
 	var sb := StaticBody3D.new()
@@ -55,8 +63,9 @@ func _collider(host: Node3D, size: Vector3, offset := Vector3.ZERO) -> StaticBod
 	return sb
 
 ## an invisible collider on its own, for props whose meshes are too detailed
-func solid(size: Vector3, pos: Vector3, rot_y := 0.0) -> void:
+func solid(size: Vector3, pos: Vector3, rot_y := 0.0, surface := "metal") -> void:
 	var sb := StaticBody3D.new()
+	sb.set_meta("surface", surface)
 	sb.position = pos
 	sb.rotation.y = rot_y
 	var cs := CollisionShape3D.new()
@@ -97,6 +106,7 @@ func place(lib: String, part_name: String, pos: Vector3, ry := 0.0, sc := 1.0, c
 		cs.shape = sh
 		cs.position = a.get_center()
 		sb.add_child(cs)
+		sb.set_meta("surface", "metal")
 		p.add_child(sb)
 	return p
 
@@ -178,6 +188,7 @@ func _ground() -> void:
 	# one ground collider for everything
 	var ground := StaticBody3D.new()
 	ground.name = "GroundCollider"
+	ground.set_meta("surface", "concrete")
 	var cs := CollisionShape3D.new()
 	var sh := BoxShape3D.new()
 	sh.size = Vector3(1600, 1, 600)
@@ -407,7 +418,7 @@ func _store_interior() -> void:
 		var base := Vector3(sx[i], 3.6, rows[i][0])
 		box(Vector3(2.3, 0.58, 0.05), base, M.dark, false)
 		for s in [-1, 1]:
-			var l := label(rows[i][1], base + Vector3(0, 0, s * 0.03), 80, rows[i][2], 0.0 if s > 0 else PI)
+			var l := label(rows[i][1], base + Vector3(0, 0, s * 0.04), 56, rows[i][2], 0.0 if s > 0 else PI)
 			l.shaded = false
 		for wx in [-0.95, 0.95]:
 			box(Vector3(0.012, 0.47, 0.012), base + Vector3(wx, 0.52, 0), M.dark, false)
@@ -533,7 +544,10 @@ class StockBuilder:
 		var idx := rng.randi() % items.size()
 		var it: Dictionary = items[idx]
 		var a: AABB = it.aabb
-		var s := target_h * rng.randf_range(0.8, 1.25) / a.size.y
+		# size by the LARGEST dimension: sizing by height alone made every flat
+		# product - cakes, cheese wheels, trays - half a metre wide
+		var biggest := maxf(a.size.x, maxf(a.size.y, a.size.z))
+		var s := target_h * rng.randf_range(0.8, 1.2) / biggest
 		var basis := Basis(Vector3.UP, ry).scaled(Vector3(s, s, s))
 		# seat the item by its own bounds on the shelf deck
 		var origin := pos - basis * Vector3(a.get_center().x, a.position.y, a.get_center().z)

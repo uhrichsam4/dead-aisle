@@ -36,6 +36,7 @@ var hp := 100.0
 var max_hp := 100.0
 var alive := true
 var active := false          # false while driving / in cutscenes
+var input_locked := false    # on camera, but the arrival is steering the view
 var yaw := PI
 var pitch := 0.0
 var fov_base := 80.0
@@ -66,6 +67,13 @@ var stride := 0.0
 var regen_cd := 0.0
 var shake := 0.0
 var _anim_now := ""
+# audio state
+var breath: AudioStreamPlayer
+var exertion := 0.0          # 0 calm .. 1 spent; sprinting builds it, rest drains it
+var _was_aiming := false
+var _was_floor := true
+var _rustle_t := 4.0
+var _low_hp_said := false
 
 func _ready() -> void:
 	collision_layer = 2
@@ -86,6 +94,10 @@ func _ready() -> void:
 	camera.cull_mask = 0xFFFFF & ~2   # everything but the viewmodel layer
 	add_child(camera)
 	_build_viewmodel()
+	breath = AudioStreamPlayer.new()
+	breath.volume_db = -16.0
+	add_child(breath)
+	breath.finished.connect(_next_breath)
 
 func activate(on: bool) -> void:
 	active = on
@@ -94,6 +106,10 @@ func activate(on: bool) -> void:
 	if on:
 		camera.current = true
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		if breath and not breath.playing:
+			_next_breath()
+	elif breath:
+		breath.stop()
 
 func place_at(p: Vector3, face_yaw: float) -> void:
 	global_position = Vector3(p.x, maxf(p.y - EYE, 0.0), p.z)
@@ -240,13 +256,44 @@ func _play(name: String, blend := 0.2) -> void:
 	anim.play(name, blend)
 	_anim_now = name
 
+# ------------------------------------------------------------------ breathing
+
+## One breath after another, the family picked by how hard you are working:
+## calm on your feet, medium and heavy as a sprint wears on, spent when you
+## are hurt or blown, and held while you aim.
+func _next_breath() -> void:
+	if not active or not alive:
+		return
+	var fam := "breath_calm"
+	if hp < max_hp * 0.3 or exertion > 0.85:
+		fam = "breath_spent"
+	elif ads_t > 0.6:
+		fam = "breath_hold"
+	elif exertion > 0.55:
+		fam = "breath_heavy"
+	elif exertion > 0.25:
+		fam = "breath_medium"
+	var v: Array = Game.variants(fam)
+	if v.is_empty():
+		return
+	breath.stream = v[randi() % v.size()]
+	breath.volume_db = lerpf(-19.0, -10.0, clampf(exertion, 0.0, 1.0))
+	breath.pitch_scale = randf_range(0.96, 1.04)
+	breath.play()
+
 # ------------------------------------------------------------------ weapons
+
+## the arrival hands you the rifle only when you take it out of the boot
+func show_rifle(on: bool) -> void:
+	if gun_root:
+		gun_root.visible = on
 
 func select_weapon(i: int, silent := false) -> void:
 	if i < 0 or i >= WEAPONS.size():
 		return
 	if i != weapon_index and not silent:
-		Game.play("gun_draw", -4.0)
+		Game.play("gun_holster", -8.0)
+		get_tree().create_timer(0.18).timeout.connect(func(): Game.play("gun_draw", -4.0))
 	weapon_index = i
 	for id in guns:
 		guns[id].visible = (id == WEAPONS[i].id)
@@ -258,6 +305,7 @@ func try_reload() -> void:
 	reloading = true
 	reload_t = 0.0
 	_reload_stage = 0
+	Game.vo("reloading", 14.0, 0.35)
 	if anim and anim.has_animation("reload"):
 		anim.play("reload", 0.12)
 		_anim_now = "reload"
@@ -283,6 +331,7 @@ func _fire() -> void:
 		return
 	if mag <= 0:
 		Game.play("gun_dry", -6.0)
+		Game.vo("need_ammo", 20.0, 0.4)
 		fire_cd = 0.25
 		try_reload()
 		return
@@ -317,13 +366,22 @@ func _fire() -> void:
 		var dmg: float = w.damage * (HEAD_MULT if headshot else 1.0)
 		var killed: bool = target.call("take_hit", dmg, hit.position, dir)
 		hit_marker.emit(headshot, killed)
+		if killed and headshot:
+			Game.vo("nice_shot", 15.0, 0.5)
 	else:
-		_impact(hit.position, hit.normal)
+		var surf := "concrete"
+		var n: Node = col as Node
+		while n:
+			if n.has_meta("surface"):
+				surf = n.get_meta("surface")
+				break
+			n = n.get_parent()
+		# the car is a CharacterBody3D, not tagged - it is a car
+		if col is CharacterBody3D:
+			surf = "metal"
+		_impact(hit.position, hit.normal, surf)
 
-func _impact(pos: Vector3, normal: Vector3) -> void:
-	var kind := "concrete"
-	if pos.y < 0.2 and absf(pos.x) < 22 and absf(pos.z) < 15:
-		kind = "concrete"
+func _impact(pos: Vector3, normal: Vector3, kind := "concrete") -> void:
 	Game.play_at("hit_" + kind, pos, -6.0)
 	# a short-lived spark + dust puff
 	var p := GPUParticles3D.new()
@@ -355,7 +413,7 @@ func _impact(pos: Vector3, normal: Vector3) -> void:
 # ------------------------------------------------------------------ damage
 
 func take_damage(dmg: float, from: Vector3) -> void:
-	if not alive or not active:
+	if not alive or not active or Game.god:
 		return
 	hp = maxf(0.0, hp - dmg)
 	regen_cd = 4.0
@@ -363,8 +421,17 @@ func take_damage(dmg: float, from: Vector3) -> void:
 	damaged.emit(from)
 	hp_changed.emit(hp, max_hp)
 	Game.play("pain_hit", -3.0)
+	Game.play_file("sfx-player-hit.mp3", -6.0, randf_range(0.95, 1.05))
+	Game.vo("hit", 12.0, 0.3)
+	if hp < max_hp * 0.3 and not _low_hp_said and hp > 0.0:
+		_low_hp_said = true
+		Game.vo("low_hp", 20.0)
+	if hp > max_hp * 0.6:
+		_low_hp_said = false
 	if hp <= 0.0:
 		alive = false
+		breath.stop()
+		Game.play_file("sfx-body-drop.mp3", -4.0)
 		died.emit()
 
 func heal_full() -> void:
@@ -375,7 +442,7 @@ func heal_full() -> void:
 # ------------------------------------------------------------------ loop
 
 func _unhandled_input(e: InputEvent) -> void:
-	if not active or not alive:
+	if not active or not alive or input_locked:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var m := e as InputEventMouseMotion
@@ -396,6 +463,9 @@ func _physics_process(dt: float) -> void:
 	if not active:
 		return
 	fire_cd = maxf(0.0, fire_cd - dt)
+	if input_locked:
+		velocity = Vector3.ZERO
+		return
 	if alive:
 		_move(dt)
 		if Input.is_action_pressed("fire") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -419,9 +489,17 @@ func _move(dt: float) -> void:
 	if is_on_floor():
 		if Input.is_action_just_pressed("jump"):
 			velocity.y = JUMP
+			Game.play("pain_effort", -12.0)
+			exertion = minf(1.0, exertion + 0.08)
 	else:
 		velocity.y -= GRAVITY * dt
+	var fall_speed := -velocity.y
 	move_and_slide()
+	if is_on_floor() and not _was_floor and fall_speed > 3.0:
+		Game.play("step_" + _surface(), -3.0, 0.85)       # landing
+		Game.play("gear_rustle", -12.0)
+	_was_floor = is_on_floor()
+	exertion = clampf(exertion + (dt * 0.09 if sprinting else -dt * 0.06), 0.0, 1.0)
 
 	var speed := Vector2(velocity.x, velocity.z).length()
 	bob_t += dt * (11.0 if sprinting else 8.0) * (speed / spd if speed > 0.5 else 0.0)
@@ -429,19 +507,39 @@ func _move(dt: float) -> void:
 	stride += speed * dt
 	if stride > (1.9 if sprinting else 1.6) and is_on_floor():
 		stride = 0.0
-		var p := global_position
-		var inside := absf(p.x) < 22.0 and absf(p.z) < 15.0
-		var surf := "tile" if inside else ("grass" if p.z > 31.9 and p.z < 60.0 and absf(p.z - 36.0) > 4.0 else "concrete")
-		Game.play(("sprint_" if sprinting and surf != "grass" else "step_") + surf, -9.0)
+		var surf := _surface()
+		var sprint_ok := sprinting and (surf == "tile" or surf == "concrete")
+		Game.play(("sprint_" if sprint_ok else "step_") + surf, -9.0 if not sprinting else -7.0)
+	# kit shifting on you as you move
+	if speed > 1.0:
+		_rustle_t -= dt * (1.6 if sprinting else 1.0)
+		if _rustle_t <= 0.0:
+			_rustle_t = randf_range(4.0, 8.0)
+			Game.play("gear_rustle", -16.0)
 	if speed > 0.5:
 		_play("run" if sprinting else "walk", 0.25)
 	elif not reloading:
 		_play("aim", 0.25)
 
+## what you are standing on: tile in the store, asphalt and paving on the lot
+## and road, grass on the verge, gravel on the unmade ground beyond it
+func _surface() -> String:
+	var p := global_position
+	if absf(p.x) < 22.0 and absf(p.z) < 15.0:
+		return "tile"
+	if absf(p.z - 36.0) < 4.2 or (absf(p.x) < 24.0 and p.z < 30.2) or absf(p.z - 31.15) < 0.8 or absf(p.z - 41.35) < 1.3:
+		return "concrete"
+	if p.z > 15.2 and p.z < 60.4:
+		return "grass"
+	return "gravel"
+
 func _process(dt: float) -> void:
 	if not active:
 		return
-	var aiming := Input.is_action_pressed("aim") and alive and not reloading
+	var aiming := Input.is_action_pressed("aim") and alive and not reloading and not input_locked
+	if aiming != _was_aiming:
+		Game.play("gun_adsin" if aiming else "gun_adsout", -10.0)
+		_was_aiming = aiming
 	ads_t = move_toward(ads_t, 1.0 if aiming else 0.0, dt * 6.0)
 	recoil = lerpf(recoil, 0.0, clampf(dt * 10.0, 0.0, 1.0))
 	kick = lerpf(kick, 0.0, clampf(dt * 14.0, 0.0, 1.0))

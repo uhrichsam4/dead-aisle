@@ -9,6 +9,7 @@ const PlayerScript := preload("res://scripts/player.gd")
 const CarScript := preload("res://scripts/car.gd")
 const HostileScript := preload("res://scripts/hostile.gd")
 const HudScript := preload("res://scripts/hud.gd")
+const ArrivalScript := preload("res://scripts/arrival.gd")
 
 const CAR_START := Vector3(124, 0, 36.5)
 const OUTSIDE_PTS := [[-20, 28], [20, 27], [-8, 26], [24, 23.5], [-24, 22], [14, 29]]
@@ -23,7 +24,7 @@ var hud: CanvasLayer
 var post: ShaderMaterial
 var hostiles: Array = []
 var emergency: OmniLight3D
-var cut_t := -1.0
+var arrival: Node
 var inside_waves := 0
 var paused := false
 
@@ -41,6 +42,7 @@ func _ready() -> void:
 	car.global_position = CAR_START
 	car.rotation.y = PI / 2
 	car.parked.connect(_on_parked)
+	car.radio_changed.connect(func(t): hud.set_radio(t))
 
 	player = PlayerScript.new()
 	player.name = "Player"
@@ -56,6 +58,10 @@ func _ready() -> void:
 		hostiles.append(h)
 
 	_post()
+	arrival = ArrivalScript.new()
+	arrival.name = "Arrival"
+	add_child(arrival)
+	arrival.finished.connect(_begin_outside)
 	hud = HudScript.new()
 	add_child(hud)
 	player.hp_changed.connect(hud.set_hp)
@@ -138,11 +144,14 @@ func _start_drive() -> void:
 		["enter", "GET INSIDE"], ["clear", "CLEAR EVERY THREAT"]])
 	Game.set_objective("drive", "active")
 	hud.show_combat_hud(false)
-	hud.set_hint("W/S DRIVE · A/D STEER · SPACE HANDBRAKE · MOUSE LOOK")
+	hud.set_hint("W/S DRIVE · A/D STEER · SPACE HANDBRAKE · E RADIO · 1-5 STATION · F1 SKIP")
 	Game.say_banner("DEAD AISLE", "TOPS SUPERMARKET IS JUST DOWN THE ROAD")
 	car.take_wheel(true)
 	post.set_shader_parameter("mix_amt", 0.25)   # a dashcam, not yet the GoPro
-	Game.play("car_start", -6.0)
+	Game.play("car_seatbelt", -8.0)
+	get_tree().create_timer(0.7).timeout.connect(func(): Game.play("car_start", -5.0))
+	get_tree().create_timer(1.6).timeout.connect(func(): Game.play_file("vo-deploy.mp3", -2.0))
+	get_tree().create_timer(5.0).timeout.connect(func(): Game.vo("driving", 60.0))
 
 func _on_parked() -> void:
 	Game.set_phase("parking")
@@ -152,36 +161,18 @@ func _on_parked() -> void:
 	car.take_wheel(false)
 	Game.play("car_handbrake", -4.0)
 	Game.play("vo_parked", -2.0)
-	hud.set_hint("")
-	cut_t = 0.0
-
-## the arrival, short form for now: out of the door, the camera goes on,
-## the view becomes the GoPro
-func _tick_arrival(dt: float) -> void:
-	cut_t += dt
-	var k := clampf(cut_t / 3.2, 0.0, 1.0)
-	var e := k * k * (3.0 - 2.0 * k)
-	var seat := car.to_global(Vector3(-0.37, 1.15, -0.62))
-	var out := car.to_global(Vector3(-1.9, 1.7, 0.4))
-	car.camera.global_position = seat.lerp(out, e)
-	if cut_t > 0.3 and cut_t - dt <= 0.3:
-		Game.play("car_dooropen", -4.0)
-	if cut_t > 2.0 and cut_t - dt <= 2.0:
-		Game.play("car_doorclose", -4.0)
-		Game.play("gear_gopro_on", -2.0)
-	post.set_shader_parameter("mix_amt", lerpf(0.25, 1.0, clampf((cut_t - 1.8) / 1.2, 0.0, 1.0)))
-	if cut_t >= 3.4:
-		cut_t = -1.0
-		_begin_outside()
+	hud.set_hint("ENTER TO SKIP")
+	hud.show_combat_hud(false)
+	arrival.begin(car, player, post)
 
 func _begin_outside() -> void:
-	var out := car.to_global(Vector3(-1.9, 0, 0.4))
-	player.place_at(Vector3(out.x, 1.7, out.z), 0.0)
+	# the arrival has already put you on your feet behind the boot
 	player.activate(true)
+	player.input_locked = false
 	hud.show_combat_hud(true)
 	hud.set_hint("WASD MOVE · SHIFT SPRINT · LMB FIRE · RMB AIM · R RELOAD · 1/2/3 WEAPON")
 	Game.set_phase("outside")
-	Game.play("gun_draw", -3.0)
+	Game.play("gear_gopro_beep", -6.0)
 	for p in OUTSIDE_PTS:
 		_spawn(Vector3(p[0], 0.1, p[1]))
 	Game.say_banner("THEY KNOW YOU ARE HERE", "GET TO THE DOORS")
@@ -189,6 +180,7 @@ func _begin_outside() -> void:
 
 func _enter_store() -> void:
 	Game.set_phase("inside")
+	Game.vo("moving", 20.0)
 	Game.set_objective("enter", "done")
 	Game.set_objective("clear", "active")
 	Game.say_banner("INSIDE", "CLEAR THE STORE")
@@ -196,6 +188,9 @@ func _enter_store() -> void:
 	_inside_wave()
 
 func _inside_wave() -> void:
+	if inside_waves < 2:
+		Game.vo("clear", 6.0)            # a breath between waves
+		get_tree().create_timer(2.2).timeout.connect(func(): Game.vo("contact", 10.0))
 	inside_waves -= 1
 	var pts := INSIDE_PTS.duplicate()
 	pts.shuffle()
@@ -228,7 +223,8 @@ func _win() -> void:
 	Game.set_phase("win")
 	Game.set_objective("clear", "done")
 	Game.say_banner("TOPS CLEAR", "%d KILLS · %d POINTS · CLICK TO PLAY AGAIN" % [Game.kills, Game.points])
-	Game.play("vo_clear", -2.0)
+	Game.vo("clear", 0.0)
+	get_tree().create_timer(1.6).timeout.connect(func(): Game.play_file("vo-win.mp3", -2.0))
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 # ------------------------------------------------------------------ loop
@@ -239,9 +235,6 @@ func _process(dt: float) -> void:
 	emergency.light_energy = 1.2 + sin(Time.get_ticks_msec() * 0.0024) * 0.5
 	emergency.position.x = sin(Time.get_ticks_msec() * 0.0007) * 8.0
 	match Game.phase:
-		"parking":
-			if cut_t >= 0.0:
-				_tick_arrival(dt)
 		"outside":
 			var p := player.global_position
 			if p.z < 14.6 and absf(p.x) < 2.2:
@@ -253,6 +246,21 @@ func _process(dt: float) -> void:
 				else:
 					_win()
 	hud.set_center("THREATS: %d" % _threats() if Game.phase == "inside" else "")
+	if Game.phase in ["outside", "inside"] and player.alive:
+		_watch_your_back()
+
+## something within arm's reach that you are not looking at
+func _watch_your_back() -> void:
+	var fwd: Vector3 = -player.camera.global_basis.z
+	fwd.y = 0.0
+	for h in hostiles:
+		if not h.is_active():
+			continue
+		var to: Vector3 = h.global_position - player.global_position
+		to.y = 0.0
+		if to.length() < 4.0 and fwd.normalized().dot(to.normalized()) < -0.3:
+			Game.vo("behind_you", 14.0)
+			return
 
 func _unhandled_input(e: InputEvent) -> void:
 	# F1 skips the drive: straight to the car park on foot
@@ -260,6 +268,9 @@ func _unhandled_input(e: InputEvent) -> void:
 		car.global_position = Vector3(8.0, 0, 19.0)
 		car.rotation.y = PI / 2
 		car.speed = 0.0
+		return
+	if Game.phase == "parking" and e.is_action_pressed("skip"):
+		arrival.skip()
 		return
 	if e.is_action_pressed("pause"):
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
