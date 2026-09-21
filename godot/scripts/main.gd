@@ -10,6 +10,8 @@ const CarScript := preload("res://scripts/car.gd")
 const HostileScript := preload("res://scripts/hostile.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const ArrivalScript := preload("res://scripts/arrival.gd")
+const SurvivorScript := preload("res://scripts/survivor.gd")
+const SURV_SPOTS := [[-16.4, 11.0], [16.4, 10.6], [-19.5, -12.5], [18.8, -3.0]]
 
 const CAR_START := Vector3(124, 0, 36.5)
 const OUTSIDE_PTS := [[-20, 28], [20, 27], [-8, 26], [24, 23.5], [-24, 22], [14, 29]]
@@ -25,6 +27,9 @@ var post: ShaderMaterial
 var hostiles: Array = []
 var emergency: OmniLight3D
 var arrival: Node
+var survivors: Array = []
+var cleared := false
+var rescued := 0
 var inside_waves := 0
 var paused := false
 
@@ -56,6 +61,15 @@ func _ready() -> void:
 		add_child(h)
 		h.killed.connect(_on_kill)
 		hostiles.append(h)
+
+	for i in SURV_SPOTS.size():
+		var sv: CharacterBody3D = SurvivorScript.new()
+		sv.name = "Survivor%d" % i
+		sv.add_to_group("survivors")
+		add_child(sv)
+		sv.place(Vector3(SURV_SPOTS[i][0], 0.05, SURV_SPOTS[i][1]), player)
+		sv.found.connect(_on_survivor_found)
+		survivors.append(sv)
 
 	_post()
 	arrival = ArrivalScript.new()
@@ -141,7 +155,8 @@ func _start_drive() -> void:
 	Game.run_time = 0.0
 	Game.set_phase("drive")
 	hud.set_objectives([["drive", "DRIVE TO TOPS SUPERMARKET"], ["park", "PARK IN THE LOT"],
-		["enter", "GET INSIDE"], ["clear", "CLEAR EVERY THREAT"]])
+		["enter", "GET INSIDE"], ["clear", "CLEAR EVERY THREAT"],
+		["rescue", "FIND THE 4 SURVIVORS"], ["extract", "WALK THEM OUT THROUGH THE DOORS"]])
 	Game.set_objective("drive", "active")
 	hud.show_combat_hud(false)
 	hud.set_hint("W/S DRIVE · A/D STEER · SPACE HANDBRAKE · E RADIO · 1-5 STATION · F1 SKIP")
@@ -183,6 +198,7 @@ func _enter_store() -> void:
 	Game.vo("moving", 20.0)
 	Game.set_objective("enter", "done")
 	Game.set_objective("clear", "active")
+	Game.set_objective("rescue", "active")
 	Game.say_banner("INSIDE", "CLEAR THE STORE")
 	inside_waves = 2
 	_inside_wave()
@@ -202,6 +218,39 @@ func _spawn(pos: Vector3) -> void:
 		if h.state == "idle":
 			h.spawn(pos, Game.wave, player)
 			return
+
+func _on_survivor_found(_s: Node) -> void:
+	rescued += 1
+	Game.points += 150
+	Game.say_banner("SURVIVOR FOUND", "%d OF %d - THEY ARE FOLLOWING YOU" % [rescued, survivors.size()])
+	if rescued >= survivors.size():
+		Game.set_objective("rescue", "done")
+		Game.vo("all_survivors", 0.0)
+		_maybe_extract_objective()
+	else:
+		Game.vo("survivor", 4.0)
+
+func _maybe_extract_objective() -> void:
+	if cleared and rescued >= survivors.size():
+		Game.set_objective("extract", "active")
+		Game.say_banner("EVERYONE IS WITH YOU", "WALK THEM OUT THROUGH THE DOORS")
+		Game.vo("out_front", 5.0)
+
+## out through the doors with everyone who is following you
+func _check_extract() -> void:
+	if not (cleared and rescued >= survivors.size()):
+		return
+	var p := player.global_position
+	if p.z < 16.2 or absf(p.x) > 6.0:
+		return
+	for s in survivors:
+		if s.state == "following" and (s as Node3D).global_position.distance_to(p) > 10.0:
+			Game.vo("regroup", 10.0)          # someone is lagging - wait for them
+			return
+	for s in survivors:
+		s.state = "out"
+	Game.set_objective("extract", "done")
+	_win()
 
 func _on_kill(_h: Node) -> void:
 	Game.kills += 1
@@ -240,11 +289,16 @@ func _process(dt: float) -> void:
 			if p.z < 14.6 and absf(p.x) < 2.2:
 				_enter_store()
 		"inside":
-			if _threats() == 0:
+			if _threats() == 0 and not cleared:
 				if inside_waves > 0:
 					_inside_wave()
 				else:
-					_win()
+					cleared = true
+					Game.set_objective("clear", "done")
+					if rescued < survivors.size():
+						Game.say_banner("STORE CLEAR", "FIND THE SURVIVORS - %d LEFT" % (survivors.size() - rescued))
+					_maybe_extract_objective()
+			_check_extract()
 	hud.set_center("THREATS: %d" % _threats() if Game.phase == "inside" else "")
 	if Game.phase in ["outside", "inside"] and player.alive:
 		_watch_your_back()

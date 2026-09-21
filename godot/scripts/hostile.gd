@@ -27,6 +27,7 @@ var seen_player := false
 var _step_t := 0.0
 
 func _ready() -> void:
+	add_to_group("hostiles")
 	collision_layer = 4
 	collision_mask = 1 | 4
 	var cs := CollisionShape3D.new()
