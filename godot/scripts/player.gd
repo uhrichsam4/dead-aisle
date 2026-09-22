@@ -212,6 +212,7 @@ func _build_viewmodel() -> void:
 			g.visible = false
 			gun_root.add_child(g)
 			guns[w.id] = g
+			_gun_decal(g)
 	flash_mesh = MeshInstance3D.new()
 	var q := QuadMesh.new()
 	q.size = Vector2(0.22, 0.22)
@@ -242,6 +243,43 @@ func _build_viewmodel() -> void:
 	camera.add_child(flash_light)
 	select_weapon(0, true)
 	call_deferred("_calibrate_grip")
+
+## GUN_DECAL: "DEAD AISLE" on both flanks of the receiver, each facing out,
+## sized off the weapon's own bounds (the three builds differ in width)
+func _gun_decal(g: Node3D) -> void:
+	var b := U.local_aabb(g)
+	var sc := g.scale.x
+	var lo := b.position
+	var hi := b.end
+	var cz := (lo.z + hi.z) * 0.5
+	var cy := (lo.y + hi.y) * 0.5
+	var ln := absf(hi.z - lo.z)
+	var tall := absf(hi.y - lo.y)
+	var w := minf(ln * 0.26, 0.34 / sc) * 0.78          # GUN_DECAL.scale
+	var f := SystemFont.new()
+	f.font_names = PackedStringArray(["Arial Black", "Arial", "Helvetica Neue"])
+	f.font_weight = 900
+	var fs := 118
+	var tw := f.get_string_size("DEAD AISLE", HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	var squeeze := minf(1.0, 472.0 / maxf(1.0, tw))       # squeezed to fit the 512 px sticker
+	for side in [-1, 1]:
+		var l := Label3D.new()
+		l.name = "gun_decal"
+		l.text = "DEAD AISLE"
+		l.font = f
+		l.font_size = fs
+		l.modulate = Color("e8e2d4")
+		l.outline_modulate = Color(0, 0, 0, 0.55)
+		l.outline_size = int(fs * 0.16)
+		l.pixel_size = w / 512.0
+		l.scale = Vector3(squeeze, 1, 1)
+		l.double_sided = false
+		l.shaded = true
+		l.alpha_cut = Label3D.ALPHA_CUT_DISABLED
+		l.layers = 2
+		l.position = Vector3((lo.x if side < 0 else hi.x) + side * 0.004 / sc, cy + tall * 0.06 + 0.010 / sc, cz + 0.10 / sc)
+		l.rotation.y = -PI / 2 if side < 0 else PI / 2
+		g.add_child(l)
 
 ## Solve the rotation that points the rifle down the camera axis while it
 ## sits in the hand - the hand bone's axes are arbitrary, so guessing Euler

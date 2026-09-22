@@ -84,6 +84,9 @@ func begin(c: Node3D, p: CharacterBody3D, pm: ShaderMaterial) -> void:
 	_build_actor()
 	_build_kit()
 	post.set_shader_parameter("mix_amt", 0.0)   # your own eyes until the camera goes on
+	var hud = get_tree().current_scene.get("hud")
+	if hud:
+		hud.gopro_set(false)            # off until he mounts it again
 
 func skip() -> void:
 	if on:
@@ -351,6 +354,11 @@ func _plant_feet() -> void:
 		actor.global_position.y -= (lowest - ankle)
 
 func _to_first_person() -> void:
+	# goproSet(true) + streamStart(): the camera is on his head now
+	var hud = get_tree().current_scene.get("hud")
+	if hud:
+		hud.gopro_set(true)
+		hud.stream_start()
 	fp = true
 	actor.visible = false
 	var w := P(-0.10, 0, -3.62)

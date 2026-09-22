@@ -46,7 +46,7 @@ var throwables: Node3D
 var menu_cam: Camera3D
 var post_layer: CanvasLayer
 var moon: DirectionalLight3D
-var _orbit := 0.0
+var _drive_t := 0.0
 
 func _ready() -> void:
 	randomize()
@@ -66,7 +66,6 @@ func _ready() -> void:
 	car.global_position = CAR_START
 	car.rotation.y = PI / 2
 	car.parked.connect(_on_parked)
-	car.radio_changed.connect(func(t): hud.set_radio(t))
 
 	player = PlayerScript.new()
 	player.name = "Player"
@@ -97,6 +96,8 @@ func _ready() -> void:
 	arrival.finished.connect(_begin_outside)
 	hud = HudScript.new()
 	add_child(hud)
+	hud.player = player
+	hud.car = car
 	player.hp_changed.connect(hud.set_hp)
 	player.ammo_changed.connect(hud.set_ammo)
 	player.hit_marker.connect(hud.on_hit)
@@ -127,21 +128,151 @@ func _ready() -> void:
 
 ## the lobby sits over the live world: a slow orbit round the car at the
 ## start line, its radio already playing
+## The web's lobby: four pads in the TOPS lot, your operator on the first in
+## the outfit you picked, the other three waiting for a party, and a camera
+## that drifts so the shot is never dead still (LOBBY.camPos / camLook).
+const LOBBY_CAM := Vector3(2.1, 1.5, 26.6)
+const LOBBY_LOOK := Vector3(-0.35, 1.05, 20.6)
+var lobby_group: Node3D
+var lobby_rings: Array[MeshInstance3D] = []
+var lobby_doll: Node3D
+var _lobby_t := 0.0
+
 func _show_lobby() -> void:
 	Game.set_phase("menu")
 	hud.visible = false
 	menu_cam = Camera3D.new()
-	menu_cam.fov = 60.0
+	menu_cam.fov = 70.0
 	menu_cam.far = 900.0
 	menu_cam.cull_mask = 0xFFFFF & ~2
 	add_child(menu_cam)
 	menu_cam.current = true
-	car.radio_select(0)
+	lobby_group = Node3D.new()
+	lobby_group.name = "Lobby"
+	add_child(lobby_group)
+	for i in 4:
+		var x := -2.55 + i * 1.7
+		var pad := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.62
+		cm.bottom_radius = 0.62
+		cm.height = 0.06
+		cm.radial_segments = 28
+		pad.mesh = cm
+		var pm := StandardMaterial3D.new()
+		pm.albedo_color = Color("4a3b16") if i == 0 else Color("2b2f36")
+		pm.roughness = 0.5
+		pm.metallic = 0.4
+		pm.emission_enabled = true
+		pm.emission = Color("6a5410") if i == 0 else Color("101418")
+		pad.material_override = pm
+		pad.position = Vector3(x, 0.04, 20.6)
+		lobby_group.add_child(pad)
+		var ring := MeshInstance3D.new()
+		var tm := TorusMesh.new()
+		tm.inner_radius = 0.62
+		tm.outer_radius = 0.86
+		tm.rings = 36
+		ring.mesh = tm
+		ring.scale = Vector3(1, 0.04, 1)
+		var rm := StandardMaterial3D.new()
+		rm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		rm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		rm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		rm.albedo_color = Color("f6d434") if i == 0 else Color("3d6f8a")
+		rm.albedo_color.a = 0.5
+		ring.material_override = rm
+		ring.position = Vector3(x, 0.09, 20.6)
+		lobby_group.add_child(ring)
+		lobby_rings.append(ring)
+	_lobby_doll(menu.skin_index())
+	menu.skin_changed.connect(_lobby_doll)
 	menu.show_screen("lobby")
+
+## pad 0: you, in your outfit, idling, turned to the camera
+func _lobby_doll(idx: int) -> void:
+	if lobby_doll:
+		lobby_doll.queue_free()
+	var skin: Dictionary = menu.SKINS[idx]
+	var path := "res://assets/skin_suit.glb" if skin.id == "suit" else "res://assets/operator.glb"
+	var ps: PackedScene = load(path)
+	if ps == null:
+		return
+	lobby_doll = Node3D.new()
+	var model := ps.instantiate() as Node3D
+	model.rotation.y = PI
+	lobby_doll.add_child(model)
+	var a := U.local_aabb(model)
+	var s := 1.78 / maxf(0.2, a.size.y)
+	model.scale *= s
+	model.position.y = -a.position.y * s
+	var cam := model.find_child("action_camera", true, false) as Node3D
+	if cam:
+		cam.visible = false
+	if skin.has("pal"):
+		_apply_skin(model, skin)
+	U.set_shadows(model, true)
+	lobby_group.add_child(lobby_doll)
+	lobby_doll.global_position = Vector3(-2.55, 0, 20.6)
+	var d := LOBBY_CAM - lobby_doll.global_position
+	lobby_doll.rotation.y = atan2(-d.x, -d.z) + (0 - 1.5) * 0.11     # fanned, as the web lines them up
+	var ap := model.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	if ap:
+		var names := ap.get_animation_list()
+		var pick := ""
+		for n in names:
+			if str(n).to_lower().contains("idle"):
+				pick = n
+				break
+		if pick == "" and names.size() > 0:
+			pick = names[0]
+		if pick != "":
+			ap.get_animation(pick).loop_mode = Animation.LOOP_LINEAR
+			ap.play(pick)
+
+## skinApply: clothing materials ranked dark to light take the palette in
+## order; anything that reads as skin takes the skin tone
+func _apply_skin(root: Node, skin: Dictionary) -> void:
+	var mats := []
+	var owners := []
+	for mi in root.find_children("*", "MeshInstance3D", true, false):
+		var m3 := mi as MeshInstance3D
+		for si in m3.mesh.get_surface_count():
+			var m := m3.get_active_material(si)
+			if m is StandardMaterial3D:
+				if not mats.has(m):
+					mats.append(m)
+				owners.append([m3, si, m])
+	# skinIsFlesh: HSL lightness > .42, saturation .12-.72, a warm hue
+	var flesh := func(c: Color) -> bool:
+		var mx := maxf(c.r, maxf(c.g, c.b))
+		var mn := minf(c.r, minf(c.g, c.b))
+		var l := (mx + mn) / 2.0
+		var sat := 0.0 if mx == mn else (mx - mn) / (1.0 - absf(2.0 * l - 1.0))
+		return l > 0.42 and sat > 0.12 and sat < 0.72 and (c.h < 0.13 or c.h > 0.94)
+	var cloth := mats.filter(func(m): return not flesh.call((m as StandardMaterial3D).albedo_color))
+	cloth.sort_custom(func(x, y): return (x as StandardMaterial3D).albedo_color.get_luminance() < (y as StandardMaterial3D).albedo_color.get_luminance())
+	var pal: Array = skin.pal
+	var swap := {}
+	for i in cloth.size():
+		var c := (cloth[i] as StandardMaterial3D).duplicate() as StandardMaterial3D
+		c.albedo_color = Color(pal[mini(pal.size() - 1, int(floor(i * pal.size() / float(maxi(1, cloth.size())))))])
+		swap[cloth[i]] = c
+	for m in mats:
+		if not swap.has(m):
+			var c := (m as StandardMaterial3D).duplicate() as StandardMaterial3D
+			c.albedo_color = Color(skin.skin)
+			swap[m] = c
+	for o in owners:
+		(o[0] as MeshInstance3D).set_surface_override_material(o[1], swap[o[2]])
 
 func _on_play() -> void:
 	menu.show_screen("")
 	hud.visible = true
+	if lobby_group:
+		lobby_group.queue_free()
+		lobby_group = null
+		lobby_doll = null
 	if menu_cam:
 		menu_cam.queue_free()
 		menu_cam = null
@@ -164,27 +295,54 @@ func _apply_video() -> void:
 
 # ------------------------------------------------------------------ setup
 
+## LIGHT_DAY / LIGHT_NIGHT from the web build: broad daylight everywhere
+## except inside, where it fades (dt * .55) to the dark bodycam interior
+const DAY := {"fog": Color("8fb6cf"), "fogd": 0.0099, "amb": 0.9, "ambc": Color("cfdbe4"), "sun": 2.6,
+	"sunc": Color("fff2dc"), "fill": 0.95, "fillc": Color("dfe8f2"), "sky": 1.0, "envi": 0.55}
+const NIGHT := {"fog": Color("0b1014"), "fogd": 0.034, "amb": 0.38, "ambc": Color("50606f"), "sun": 1.0,
+	"sunc": Color("9fb4d8"), "fill": 0.20, "fillc": Color("8ea4c4"), "sky": 0.12, "envi": 0.12}
+var env: Environment
+var sky_mat: PanoramaSkyMaterial
+var fill: DirectionalLight3D
+var light_mix := 1.0
+
+func _light_apply(dt: float) -> void:
+	var day := 0.0 if Game.phase == "inside" else 1.0
+	light_mix += (day - light_mix) * clampf(dt * 0.55, 0.0, 1.0)
+	var m := light_mix
+	sky_mat.energy_multiplier = lerpf(NIGHT.sky, DAY.sky, m)
+	env.fog_light_color = (NIGHT.fog as Color).lerp(DAY.fog, m)
+	env.fog_density = lerpf(NIGHT.fogd, DAY.fogd, m)
+	env.ambient_light_color = (NIGHT.ambc as Color).lerp(DAY.ambc, m)
+	env.ambient_light_energy = lerpf(NIGHT.amb, DAY.amb, m)
+	env.ambient_light_sky_contribution = lerpf(NIGHT.envi, DAY.envi, m)
+	moon.light_energy = lerpf(NIGHT.sun, DAY.sun, m) * 0.62
+	moon.light_color = (NIGHT.sunc as Color).lerp(DAY.sunc, m)
+	fill.light_energy = lerpf(NIGHT.fill, DAY.fill, m) * 0.62
+	fill.light_color = (NIGHT.fillc as Color).lerp(DAY.fillc, m)
+
 func _environment() -> void:
-	var env := Environment.new()
+	env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
-	var psm := PanoramaSkyMaterial.new()
-	psm.panorama = U.tex("res://assets/tex/sky.jpg")
-	psm.energy_multiplier = 0.6
-	sky.sky_material = psm
+	sky_mat = PanoramaSkyMaterial.new()
+	sky_mat.panorama = U.tex("res://assets/tex/sky.jpg")
+	sky_mat.energy_multiplier = 1.0
+	sky.sky_material = sky_mat
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = 0.7
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
-	env.tonemap_exposure = 1.1
+	env.tonemap_exposure = 1.05
 	env.glow_enabled = true
 	env.glow_intensity = 0.7
 	env.glow_bloom = 0.06
 	env.glow_hdr_threshold = 1.0
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.2, 0.24, 0.3)
-	env.fog_density = 0.006
+	env.fog_density = DAY.fogd
+	env.fog_sky_affect = 0.0          # three.js fog never touched the backdrop
 	env.fog_aerial_perspective = 0.4
 	env.ssao_enabled = true
 	env.ssao_radius = 1.2
@@ -200,7 +358,25 @@ func _environment() -> void:
 	moon.shadow_enabled = true
 	moon.directional_shadow_max_distance = 90.0
 	add_child(moon)
-	moon.look_at_from_position(Vector3(-14, 18, -8) + Vector3(30, 0, 30), Vector3(30, 0, 30), Vector3.UP)
+	moon.look_at_from_position(Vector3(-14, 18, -8), Vector3.ZERO, Vector3.UP)
+	# bounce/fill from the opposite side, no shadow: without it the whole TOPS
+	# frontage and anyone crossing the lot at you is a silhouette
+	fill = DirectionalLight3D.new()
+	fill.name = "SunFill"
+	fill.shadow_enabled = false
+	add_child(fill)
+	fill.look_at_from_position(Vector3(13, 11, 24), Vector3.ZERO, Vector3.UP)
+	# the store's coloured practicals: a blue wash at the back, green by the
+	# deli, and the EXIT glow over the doors
+	for l in [[Color("5a7fae"), 12.0, 20.0, Vector3(0, 3, -13)], [Color("6a8a5a"), 9.0, 13.0, Vector3(-17, 3, 8)],
+			[Color("44ff66"), 2.2, 5.5, Vector3(0, 3.9, 14)]]:
+		var o := OmniLight3D.new()
+		o.light_color = l[0]
+		o.light_energy = l[1] * 0.12
+		o.omni_range = l[2]
+		o.omni_attenuation = 1.8
+		o.position = l[3]
+		add_child(o)
 
 	emergency = OmniLight3D.new()
 	emergency.light_color = Color(1, 0.16, 0.09)
@@ -229,13 +405,13 @@ func _start_drive() -> void:
 	Game.run_time = 0.0
 	Game.set_phase("drive")
 	hud.visible = true                  # a REDEPLOY skips the lobby that shows it
-	hud.set_objectives([["drive", "DRIVE TO TOPS SUPERMARKET"], ["park", "PARK IN THE LOT"],
-		["enter", "GET INSIDE"], ["clear", "CLEAR EVERY THREAT"],
-		["rescue", "FIND THE 4 SURVIVORS"], ["extract", "WALK THEM OUT THROUGH THE DOORS"]])
+	hud.set_objectives([["drive", "DRIVE TO TOPS SUPERMARKET"], ["park", "PARK AT THE ENTRANCE"],
+		["enter", "GET INSIDE THE STORE"], ["clear", "CLEAR EVERY THREAT"],
+		["rescue", "FIND THE 4 SURVIVORS"], ["extract", "EXTRACT OUT FRONT"]])
 	Game.set_objective("drive", "active")
 	hud.show_combat_hud(false)
-	hud.set_hint("W/S DRIVE · A/D STEER · SPACE HANDBRAKE · E RADIO · 1-5 STATION · F1 SKIP")
-	Game.say_banner("DEAD AISLE", "TOPS SUPERMARKET IS JUST DOWN THE ROAD")
+	Game.say_banner("FIND TOPS", "FOLLOW THE ROAD. PARK WHEN YOU ARRIVE.")
+	_drive_t = 0.0
 	car.take_wheel(true)
 	post.set_shader_parameter("mix_amt", 0.25)   # a dashcam, not yet the GoPro
 	Game.play("car_seatbelt", -8.0)
@@ -251,7 +427,6 @@ func _on_parked() -> void:
 	car.take_wheel(false)
 	Game.play("car_handbrake", -4.0)
 	Game.play("vo_parked", -2.0)
-	hud.set_hint("ENTER TO SKIP")
 	hud.show_combat_hud(false)
 	arrival.begin(car, player, post)
 
@@ -275,7 +450,6 @@ func _begin_outside() -> void:
 	player.activate(true)
 	player.input_locked = false
 	hud.show_combat_hud(true)
-	hud.set_hint("WASD MOVE · SHIFT SPRINT · LMB FIRE · RMB AIM · R RELOAD · 1/2/3 WEAPON")
 	Game.set_phase("outside")
 	Game.play("gear_gopro_beep", -6.0)
 	for p in _outside_pts():
@@ -289,10 +463,10 @@ func _enter_store() -> void:
 	Game.set_objective("enter", "done")
 	Game.set_objective("clear", "active")
 	Game.set_objective("rescue", "active")
-	Game.say_banner("INSIDE", "CLEAR THE PRAYER HALL" if Game.act == 2 else "CLEAR THE STORE")
+	Game.say_banner("CLEAR THE PRAYER HALL" if Game.act == 2 else "CLEAR THE STORE", "4 SURVIVORS HIDING INSIDE")
 	# the web streams them in rather than dropping two blocks of ten: sixteen
 	# (twenty in act 2), never more than ten on their feet at once
-	inside_left = 16 + (Game.act - 1) * 4
+	inside_left = mini(26, 16 + (Game.round - 1) * 3)     # roundScale().inside, both acts
 	_trickle_t = 0.0
 	for i in 6:
 		_trickle_one()
@@ -319,12 +493,17 @@ func _spawn(pos: Vector3) -> void:
 	for h in hostiles:
 		if h.state == "idle":
 			h.spawn(pos, w, player)
+			# roundScale(): every round cleared makes them tougher and quicker
+			var r := Game.round - 1
+			h.max_hp *= 1.0 + r * 0.22
+			h.hp = h.max_hp
+			h.speed *= 1.0 + r * 0.09
 			return
 
 func _on_survivor_found(_s: Node) -> void:
 	rescued += 1
 	Game.add_points(150, "SURVIVOR +150")
-	Game.say_banner("SURVIVOR FOUND", "%d OF %d - THEY ARE FOLLOWING YOU" % [rescued, survivors.size()])
+	Game.say_banner("SURVIVOR FOUND", "THEY ARE FOLLOWING YOU")
 	if rescued >= survivors.size():
 		Game.set_objective("rescue", "done")
 		Game.vo("all_survivors", 0.0)
@@ -335,7 +514,7 @@ func _on_survivor_found(_s: Node) -> void:
 func _maybe_extract_objective() -> void:
 	if cleared and rescued >= survivors.size():
 		Game.set_objective("extract", "active")
-		Game.say_banner("EVERYONE IS WITH YOU", "WALK THEM OUT THROUGH THE GATE" if Game.act == 2 else "WALK THEM OUT THROUGH THE DOORS")
+		Game.say_banner("ALL CLEAR", "WALK THE SURVIVORS OUT THE FRONT DOORS")
 		Game.vo("out_front", 5.0)
 
 ## out through the doors with everyone who is following you
@@ -397,7 +576,7 @@ func _start_act2() -> void:
 		["enter", "GET INSIDE THE MOSQUE"], ["clear", "CLEAR EVERY THREAT"],
 		["rescue", "FIND THE 4 SURVIVORS"], ["extract", "WALK THEM OUT THROUGH THE GATE"]])
 	Game.set_objective("drive", "active")
-	hud.set_hint("W/S DRIVE · A/D STEER · E RADIO · 1-5 STATION")
+	_drive_t = 0.0
 	Game.set_phase("drive")
 	Game.say_banner("NEW OBJECTIVE", "AL-SALAAM MOSQUE — DRIVE WEST")
 	Game.play("car_seatbelt", -8.0)
@@ -405,22 +584,25 @@ func _start_act2() -> void:
 	get_tree().create_timer(3.0, false).timeout.connect(func(): Game.vo("driving", 0.0))
 
 func _on_died() -> void:
+	# the web's die(): where you fell, the stream and the camera go dark
+	var where := "THE ROAD" if Game.phase in ["drive", "parking"] else ("THE LOT" if Game.phase == "outside" else ("THE STORE" if Game.phase == "inside" else "TOPS"))
 	Game.set_phase("dead")
 	throwables.drop_held()
-	var where := "AL-SALAAM MOSQUE" if Game.act == 2 else "TOPS SUPERMARKET"
-	# a moment on the floor before the card comes up
-	get_tree().create_timer(1.6, false).timeout.connect(func(): menu.show_dead(where))
+	hud.stream_stop()
+	hud.gopro_set(false)
+	car.radio.stop()
+	get_tree().create_timer(0.9, false).timeout.connect(func(): menu.show_dead(where))
 
 func _win() -> void:
 	if Game.act == 1:
 		Game.add_points(400, "TOPS CLEAR +400")
-		Game.say_banner("TOPS CLEAR", "+400 · THE MOSQUE IS NEXT")
-		Game.vo("clear", 0.0)
-		Game.set_phase("between")
-		get_tree().create_timer(4.0, false).timeout.connect(_start_act2)
+		_start_act2()                   # the web goes straight back to the car
 		return
 	Game.set_phase("win")
 	player.activate(false)              # no walking about under the card; breathing stops
+	hud.stream_stop()
+	hud.gopro_set(false)
+	car.radio.stop()
 	Game.add_points(500, "EXTRACTED +500")
 	Game.saved = rescued
 	Game.vo("clear", 0.0)
@@ -431,12 +613,17 @@ func _win() -> void:
 
 func _process(dt: float) -> void:
 	if Game.phase == "menu" and menu_cam:
-		_orbit += dt * 0.07
-		var c := car.global_position
-		menu_cam.global_position = c + Vector3(sin(_orbit) * 7.5, 1.9 + sin(_orbit * 0.6) * 0.25, cos(_orbit) * 7.5)
-		menu_cam.look_at(c + Vector3(0, 0.7, 0), Vector3.UP)
+		# lobbyTick: rings breathe, the camera drifts
+		_lobby_t += dt
+		for i in lobby_rings.size():
+			var rm := lobby_rings[i].material_override as StandardMaterial3D
+			rm.albedo_color.a = (0.36 + sin(_lobby_t * 2.0 + i) * 0.12) if i == 0 else 0.12
+		var k := sin(_lobby_t * 0.22)
+		menu_cam.global_position = Vector3(LOBBY_CAM.x + k * 0.34, LOBBY_CAM.y + sin(_lobby_t * 0.31) * 0.05, LOBBY_CAM.z + k * 0.1)
+		menu_cam.look_at(LOBBY_LOOK, Vector3.UP)
 	if Game.phase not in ["dead", "win", "menu"]:
 		Game.run_time += dt
+	_light_apply(dt)
 	emergency.light_energy = 1.2 + sin(Time.get_ticks_msec() * 0.0024) * 0.5
 	emergency.position.x = sin(Time.get_ticks_msec() * 0.0007) * 8.0
 	match Game.phase:
@@ -451,31 +638,44 @@ func _process(dt: float) -> void:
 		"inside":
 			if inside_left > 0:
 				_trickle_t -= dt
-				if _trickle_t <= 0.0 and _threats() < 10:
-					_trickle_t = 1.1
+				if _trickle_t <= 0.0 and _threats() < mini(17, 10 + (Game.round - 1) * 2):
+					_trickle_t = randf_range(0.45, 1.1)
 					_trickle_one()
 			elif _threats() == 0 and not cleared:
 				cleared = true
 				Game.vo("clear", 0.0)
 				Game.set_objective("clear", "done")
-				if rescued < survivors.size():
-					Game.say_banner("MOSQUE CLEAR" if Game.act == 2 else "STORE CLEAR", "FIND THE SURVIVORS - %d LEFT" % (survivors.size() - rescued))
 				_maybe_extract_objective()
 			_check_extract()
 	var n := _threats()
-	hud.set_center("THREATS: %d" % n if Game.phase == "inside" and n > 0 else "")
-	# a marker over every survivor still hiding, through the walls
+	hud.set_threats(n if Game.phase in ["outside", "inside"] else 0)
+	# the web's survivorsHUD: a badge over each survivor still hiding, inside
+	# only, while they are in front of you; distance along the ground
 	var marks := []
-	if Game.phase in ["outside", "inside"] and player.alive:
+	if Game.phase == "inside" and player.alive:
 		var cam: Camera3D = player.camera
+		var fwd := -cam.global_basis.z
 		for s in survivors:
 			if s.state != "hiding":
 				continue
-			var wp: Vector3 = (s as Node3D).global_position + Vector3(0, 2.3, 0)
-			if cam.is_position_behind(wp):
+			var sp: Vector3 = (s as Node3D).global_position
+			var wp := sp + Vector3(0, 2.1, 0)
+			if (wp - cam.global_position).dot(fwd) <= 0.2:
 				continue
-			marks.append([cam.unproject_position(wp), wp.distance_to(cam.global_position)])
+			var scr := cam.unproject_position(wp)
+			var vs := get_viewport().get_visible_rect().size
+			if scr.x < -0.025 * vs.x or scr.x > 1.025 * vs.x or scr.y < -0.025 * vs.y or scr.y > 1.025 * vs.y:
+				continue
+			marks.append([scr, Vector2(sp.x - player.global_position.x, sp.z - player.global_position.z).length()])
 	hud.set_markers(marks)
+	# the drive's prompts (missionUpdate): three seconds in, then twelve
+	if Game.phase == "drive":
+		var before := _drive_t
+		_drive_t += dt
+		if before < 3.0 and _drive_t >= 3.0:
+			Game.say_banner("KEEP DRIVING", "STRAIGHT DOWN THE MAIN ROAD")
+		if before < 12.0 and _drive_t >= 12.0:
+			Game.say_banner("SHOULD BE JUST AHEAD", "LOOK FOR THE PARKING LOT")
 	if Game.phase in ["outside", "inside"] and player.alive:
 		_watch_your_back()
 
@@ -498,6 +698,11 @@ func _unhandled_input(e: InputEvent) -> void:
 		car.global_position = car.park_box.get_center() * Vector3(1, 0, 1)
 		car.rotation.y = PI / 2
 		car.speed = 0.0
+		return
+	# N MUSIC: mute or unmute the radio wherever you are
+	if e.is_action_pressed("music"):
+		var mb := AudioServer.get_bus_index("Music")
+		AudioServer.set_bus_mute(mb, not AudioServer.is_bus_mute(mb))
 		return
 	if Game.phase == "parking" and e.is_action_pressed("skip"):
 		arrival.skip()

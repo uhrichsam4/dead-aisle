@@ -23,8 +23,8 @@ const CAR_CAM := Vector3(-0.37, 1.15, -0.62)
 const PARK_ACT1 := AABB(Vector3(6, 0, 17.5), Vector3(4, 3, 3))       # the TOPS bay
 const PARK_ACT2 := AABB(Vector3(-890, 0, 33.5), Vector3(5, 3, 3))     # the kerb by the mosque gate
 var park_box := PARK_ACT1
-const MAX_FWD := 24.0
-const MAX_REV := -7.0
+const MAX_FWD := 11.0     # the web's clamp(carSpeed, -6, 11)
+const MAX_REV := -6.0
 
 var speed := 0.0
 var steer := 0.0
@@ -34,6 +34,9 @@ var model: Node3D
 var camera: Camera3D
 var wheels := {}
 var cam_yaw := 0.0
+var _cam_roll := 0.0
+var _prev_spd := 0.0
+var _accel_s := 0.0
 var look_yaw := 0.0
 var look_pitch := 0.0
 var engine: AudioStreamPlayer3D
@@ -75,7 +78,7 @@ func _ready() -> void:
 			wheels[w] = n
 	camera = Camera3D.new()
 	camera.position = CAR_CAM
-	camera.fov = 88.0
+	camera.fov = 94.0
 	camera.near = 0.05
 	camera.far = 900.0
 	camera.cull_mask = 0xFFFFF & ~2
@@ -111,9 +114,10 @@ func radio_toggle() -> void:
 	radio_on = not radio_on
 	if radio_on:
 		_tune(station)
+		Game.say_banner("RADIO ON", STATIONS[station].name)
 	else:
 		radio.stop()
-		radio_changed.emit("RADIO OFF")
+		Game.say_banner("RADIO OFF", "")
 	Game.play("gear_gopro_beep", -14.0, 0.7)       # the click of the knob
 
 func radio_select(i: int) -> void:
@@ -121,6 +125,7 @@ func radio_select(i: int) -> void:
 		return
 	radio_on = true
 	_tune(i)
+	Game.say_banner("RADIO", STATIONS[i].name)
 
 func radio_next() -> void:
 	radio_select((station + 1) % STATIONS.size())
@@ -134,7 +139,7 @@ func _tune(i: int) -> void:
 	# drop in partway through, like tuning into something already playing
 	var len := st.get_length() if st else 0.0
 	radio.play(randf_range(0.0, len * 0.6) if len > 10.0 else 0.0)
-	radio_changed.emit("♪  " + STATIONS[i].name)
+
 
 func take_wheel(on: bool) -> void:
 	driving = on
@@ -156,9 +161,7 @@ func _unhandled_input(e: InputEvent) -> void:
 		if e.is_action_pressed("next_weapon"):
 			radio_next()
 			return
-	if driving and e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		look_yaw = clampf(look_yaw - (e as InputEventMouseMotion).relative.x * 0.002, -1.3, 1.3)
-		look_pitch = clampf(look_pitch - (e as InputEventMouseMotion).relative.y * 0.002, -0.5, 0.4)
+
 
 func _physics_process(dt: float) -> void:
 	var thr := 0.0
@@ -168,12 +171,14 @@ func _physics_process(dt: float) -> void:
 		thr = Input.get_action_strength("move_forward")
 		brk = Input.get_action_strength("move_back")
 		st = Input.get_action_strength("move_left") - Input.get_action_strength("move_right")
+	# the web's carDrive, number for number
 	if thr > 0.0:
-		speed += (18.0 if speed < 0.0 else 9.5) * thr * dt
+		speed += (18.0 if speed < 0.0 else 10.0) * dt
 	if brk > 0.0:
-		speed -= (20.0 if speed > 0.4 else 8.0) * brk * dt
+		speed -= (20.0 if speed > 0.4 else 8.0) * dt
+	speed -= speed * 0.32 * dt
 	if thr == 0.0 and brk == 0.0:
-		speed = move_toward(speed, 0.0, 4.0 * dt)
+		speed -= signf(speed) * minf(absf(speed), 2.4 * dt)
 	var hb := Input.is_action_pressed("handbrake") and driving and not is_parked
 	if hb:
 		speed = move_toward(speed, 0.0, 16.0 * dt)
@@ -181,10 +186,10 @@ func _physics_process(dt: float) -> void:
 			Game.play("car_handbrake", -6.0)
 	_hb_down = hb
 	speed = clampf(speed, MAX_REV, MAX_FWD)
-	steer = lerpf(steer, st, clampf(dt * 5.0, 0.0, 1.0))
-	# steering scales with speed and flips in reverse, like a real car
-	var turn := steer * clampf(absf(speed) / 6.0, 0.0, 1.0) * 1.35 * signf(speed if absf(speed) > 0.01 else 1.0)
-	rotation.y += turn * dt * clampf(1.0 - absf(speed) / 60.0, 0.4, 1.0)
+	# steering: the lock narrows with speed, a bicycle model on a 2.7 m base
+	var eff_max := 0.5 / (1.0 + absf(speed) * 0.055)
+	steer = lerpf(steer, st * eff_max, clampf(dt * (5.5 if st != 0.0 else 9.0), 0.0, 1.0))
+	rotation.y += (speed / 2.7) * tan(steer) * dt
 
 	_park_assist(dt)
 	var fwd := -global_basis.z
@@ -192,7 +197,7 @@ func _physics_process(dt: float) -> void:
 	move_and_slide()
 	# the web's clamp: the road ends, the car does not drive off the world
 	global_position.x = clampf(global_position.x, -1022.0, 162.0)
-	global_position.z = clampf(global_position.z, 15.0, 39.0)
+	global_position.z = clampf(global_position.z, 17.0, 39.0)
 	# a wall stops you, it does not slide you along it at full speed
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)
@@ -236,7 +241,13 @@ func _park_assist(dt: float) -> void:
 func _process(dt: float) -> void:
 	if not driving:
 		return
+	# the web's carCamera: bolted to the cabin, the view leads into the turn,
+	# rolls a little with speed, pitches with acceleration, and widens
 	var spn := clampf(absf(speed) / 16.0, 0.0, 1.0)
-	cam_yaw = lerpf(cam_yaw, steer * 0.12, clampf(dt * 6.0, 0.0, 1.0))
-	camera.rotation = Vector3(-0.015 + look_pitch, cam_yaw + look_yaw, -steer * 0.05 * spn)
-	camera.fov = lerpf(camera.fov, 88.0 + spn * 8.0, clampf(dt * 6.0, 0.0, 1.0))
+	cam_yaw = lerpf(cam_yaw, steer * 0.28, clampf(dt * 8.0, 0.0, 1.0))
+	_cam_roll = lerpf(_cam_roll, -steer * 0.07 * spn, clampf(dt * 6.0, 0.0, 1.0))
+	var acc := (speed - _prev_spd) / dt if dt > 0.0 else 0.0
+	_prev_spd = speed
+	_accel_s = lerpf(_accel_s, clampf(acc, -8.0, 8.0), clampf(dt * 4.0, 0.0, 1.0))
+	camera.rotation = Vector3(clampf(-_accel_s * 0.0045, -0.04, 0.05) - 0.015, cam_yaw, _cam_roll)
+	camera.fov = lerpf(camera.fov, 94.0 + spn * 8.0, clampf(dt * 9.0, 0.0, 1.0))

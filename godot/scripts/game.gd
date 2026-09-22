@@ -16,6 +16,7 @@ var wave := 1
 var run_time := 0.0
 var god := false          # testing: nothing can hurt you
 var quick_deploy := false # REDEPLOY skips the lobby on the reload
+var round := 1            # mission.round: clearing a run escalates the next
 # the end card's numbers
 var shots := 0
 var hits := 0
@@ -37,25 +38,31 @@ func reset_run() -> void:
 
 ## the web build's settings screen, saved to user:// instead of the browser
 const SETTINGS_PATH := "user://settings.cfg"
-const DEFAULTS := {"master": 100, "music": 70, "sfx": 100, "sens": 100, "invert": false,
-	"fov": 80, "res": 100, "shadows": true, "fx": true}
+## SET_DEFAULTS from the web build
+const DEFAULTS := {"master": 80, "music": 45, "sfx": 85, "sens": 100, "invert": false,
+	"fov": 88, "res": 100, "shadows": true, "fx": true, "name": "", "skin": "operator"}
+const SETTINGS_VERSION := 2
 var settings := DEFAULTS.duplicate()
 
 func load_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS_PATH)
+	var fresh: bool = int(cfg.get_value("meta", "version", 0)) < SETTINGS_VERSION
 	for k in DEFAULTS:
-		settings[k] = cfg.get_value("settings", k, DEFAULTS[k])
+		settings[k] = DEFAULTS[k] if fresh and k not in ["name", "skin"] else cfg.get_value("settings", k, DEFAULTS[k])
 	apply_settings()
 
 func save_settings() -> void:
 	var cfg := ConfigFile.new()
 	for k in settings:
 		cfg.set_value("settings", k, settings[k])
+	cfg.set_value("meta", "version", SETTINGS_VERSION)
 	cfg.save(SETTINGS_PATH)
 
 func reset_settings() -> void:
+	var keep := {"name": settings.get("name", ""), "skin": settings.get("skin", "operator")}
 	settings = DEFAULTS.duplicate()
+	settings.merge(keep, true)
 	apply_settings()
 	save_settings()
 
@@ -101,6 +108,9 @@ func _ready() -> void:
 		add_child(p)
 		_pool.append(p)
 	load_settings.call_deferred()      # the viewport has to exist first
+	# CSS pixels are logical pixels: on a Retina screen the browser draws the
+	# web HUD at 2x. Scale the 2D layers the same way (3D is unaffected).
+	_ui_scale.call_deferred()
 
 ## The web's heartbeat was synthesised (there is no file for it): a lub-dub
 ## of two low decaying thumps, built once as PCM.
@@ -132,6 +142,10 @@ func add_points(n: int, label := "", head := false) -> void:
 	points += n
 	points_changed.emit(points, label, head)
 
+func _ui_scale() -> void:
+	var sc := DisplayServer.screen_get_scale(DisplayServer.window_get_current_screen())
+	get_window().content_scale_factor = maxf(1.0, sc)
+
 func set_phase(p: String) -> void:
 	phase = p
 	phase_changed.emit(p)
@@ -152,7 +166,7 @@ func _setup_input() -> void:
 		"reload": [KEY_R], "interact": [KEY_E], "radio": [KEY_E],
 		"weapon_1": [KEY_1], "weapon_2": [KEY_2], "weapon_3": [KEY_3], "next_weapon": [KEY_Q],
 		"skip": [KEY_ENTER, KEY_SPACE], "pause": [KEY_ESCAPE], "handbrake": [KEY_SPACE],
-		"throw": [KEY_F],
+		"throw": [KEY_F], "music": [KEY_N],
 	}
 	for a in keys:
 		if not InputMap.has_action(a):
