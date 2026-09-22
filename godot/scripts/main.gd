@@ -12,6 +12,7 @@ const HudScript := preload("res://scripts/hud.gd")
 const ArrivalScript := preload("res://scripts/arrival.gd")
 const SurvivorScript := preload("res://scripts/survivor.gd")
 const MosqueScript := preload("res://scripts/mosque.gd")
+const MenuScript := preload("res://scripts/menu.gd")
 # act 2 tables, in mosque-LOCAL coordinates (the web build's own numbers)
 const OUTSIDE_PTS2 := [[-20, 18], [20, 19], [-8, 28], [14, 29], [-16, 24], [6, 22]]
 const INSIDE_PTS2 := [[-21.7, -12.7], [-12.6, -12.7], [-3.5, -12.7], [5.7, -12.7], [14.8, -12.7],
@@ -38,7 +39,11 @@ var survivors: Array = []
 var cleared := false
 var rescued := 0
 var inside_waves := 0
-var paused := false
+var menu: CanvasLayer
+var menu_cam: Camera3D
+var post_layer: CanvasLayer
+var moon: DirectionalLight3D
+var _orbit := 0.0
 
 func _ready() -> void:
 	randomize()
@@ -99,7 +104,56 @@ func _ready() -> void:
 	# bake the navmesh once the world has settled
 	get_tree().create_timer(0.5).timeout.connect(world.bake_nav)
 	get_tree().create_timer(1.2).timeout.connect(mosque.bake_nav)
+
+	menu = MenuScript.new()
+	menu.name = "Menu"
+	add_child(menu)
+	menu.play_pressed.connect(_on_play)
+	menu.quit_to_menu.connect(_quit_to_menu)
+	Game.settings_changed.connect(_apply_video)
+	_apply_video()
+	if Game.quick_deploy:
+		Game.quick_deploy = false
+		_start_drive()
+	else:
+		_show_lobby()
+
+## the lobby sits over the live world: a slow orbit round the car at the
+## start line, its radio already playing
+func _show_lobby() -> void:
+	Game.set_phase("menu")
+	hud.visible = false
+	menu_cam = Camera3D.new()
+	menu_cam.fov = 60.0
+	menu_cam.far = 900.0
+	menu_cam.cull_mask = 0xFFFFF & ~2
+	add_child(menu_cam)
+	menu_cam.current = true
+	car.radio_select(0)
+	menu.show_screen("lobby")
+
+func _on_play() -> void:
+	menu.show_screen("")
+	hud.visible = true
+	if menu_cam:
+		menu_cam.queue_free()
+		menu_cam = null
 	_start_drive()
+
+func _quit_to_menu() -> void:
+	get_tree().paused = false
+	Game.reset_run()
+	Game.quick_deploy = false
+	get_tree().reload_current_scene()
+
+## settings that live on scene objects rather than the engine
+func _apply_video() -> void:
+	if post_layer:
+		post_layer.visible = bool(Game.settings.fx)
+	for l in find_children("*", "Light3D", true, false):
+		if not l.has_meta("had_shadow"):
+			l.set_meta("had_shadow", (l as Light3D).shadow_enabled)
+		(l as Light3D).shadow_enabled = bool(l.get_meta("had_shadow")) and bool(Game.settings.shadows)
 
 # ------------------------------------------------------------------ setup
 
@@ -132,7 +186,7 @@ func _environment() -> void:
 	we.environment = env
 	add_child(we)
 
-	var moon := DirectionalLight3D.new()
+	moon = DirectionalLight3D.new()
 	moon.name = "Moon"
 	moon.light_color = Color(0.72, 0.78, 0.9)
 	moon.light_energy = 0.9
@@ -152,6 +206,7 @@ func _post() -> void:
 	var layer := CanvasLayer.new()
 	layer.layer = 2
 	add_child(layer)
+	post_layer = layer
 	var cr := ColorRect.new()
 	cr.set_anchors_preset(Control.PRESET_FULL_RECT)
 	cr.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -329,8 +384,9 @@ func _start_act2() -> void:
 
 func _on_died() -> void:
 	Game.set_phase("dead")
-	Game.say_banner("K.I.A.", "CLICK TO REDEPLOY")
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var where := "AL-SALAAM MOSQUE" if Game.act == 2 else "TOPS SUPERMARKET"
+	# a moment on the floor before the card comes up
+	get_tree().create_timer(1.6).timeout.connect(func(): menu.show_dead(where))
 
 func _win() -> void:
 	if Game.act == 1:
@@ -342,15 +398,20 @@ func _win() -> void:
 		return
 	Game.set_phase("win")
 	Game.points += 500
-	Game.say_banner("MISSION COMPLETE", "%d KILLS · %d POINTS · CLICK TO PLAY AGAIN" % [Game.kills, Game.points])
+	Game.saved = rescued
 	Game.vo("clear", 0.0)
 	get_tree().create_timer(1.6).timeout.connect(func(): Game.play_file("vo-win.mp3", -2.0))
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	get_tree().create_timer(2.4).timeout.connect(menu.show_win)
 
 # ------------------------------------------------------------------ loop
 
 func _process(dt: float) -> void:
-	if Game.phase not in ["dead", "win"]:
+	if Game.phase == "menu" and menu_cam:
+		_orbit += dt * 0.07
+		var c := car.global_position
+		menu_cam.global_position = c + Vector3(sin(_orbit) * 7.5, 1.9 + sin(_orbit * 0.6) * 0.25, cos(_orbit) * 7.5)
+		menu_cam.look_at(c + Vector3(0, 0.7, 0), Vector3.UP)
+	if Game.phase not in ["dead", "win", "menu"]:
 		Game.run_time += dt
 	emergency.light_energy = 1.2 + sin(Time.get_ticks_msec() * 0.0024) * 0.5
 	emergency.position.x = sin(Time.get_ticks_msec() * 0.0007) * 8.0
@@ -402,14 +463,7 @@ func _unhandled_input(e: InputEvent) -> void:
 	if Game.phase == "parking" and e.is_action_pressed("skip"):
 		arrival.skip()
 		return
-	if e.is_action_pressed("pause"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		paused = true
-	elif e is InputEventMouseButton and (e as InputEventMouseButton).pressed:
-		if Game.phase in ["dead", "win"]:
-			Game.points = 0
-			Game.kills = 0
-			get_tree().reload_current_scene()
-		elif Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			paused = false
+	# clicking back into the window takes the mouse again (Esc is the menu's)
+	if e is InputEventMouseButton and (e as InputEventMouseButton).pressed and menu.current == "" \
+			and Game.phase not in ["menu", "dead", "win"] and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

@@ -4,6 +4,7 @@ extends Node
 signal phase_changed(phase: String)
 signal banner(title: String, sub: String)
 signal objective(id: String, state: String)
+signal settings_changed
 
 ## drive -> parking -> outside -> inside -> win | dead
 var phase := "menu"
@@ -13,6 +14,75 @@ var kills := 0
 var wave := 1
 var run_time := 0.0
 var god := false          # testing: nothing can hurt you
+var quick_deploy := false # REDEPLOY skips the lobby on the reload
+# the end card's numbers
+var shots := 0
+var hits := 0
+var headshots := 0
+var saved := 0
+
+## everything a run accumulates, back to a fresh deploy
+func reset_run() -> void:
+	phase = "menu"
+	act = 1
+	points = 0
+	kills = 0
+	wave = 1
+	run_time = 0.0
+	shots = 0
+	hits = 0
+	headshots = 0
+	saved = 0
+
+## the web build's settings screen, saved to user:// instead of the browser
+const SETTINGS_PATH := "user://settings.cfg"
+const DEFAULTS := {"master": 100, "music": 70, "sfx": 100, "sens": 100, "invert": false,
+	"fov": 80, "res": 100, "shadows": true, "fx": true}
+var settings := DEFAULTS.duplicate()
+
+func load_settings() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_PATH)
+	for k in DEFAULTS:
+		settings[k] = cfg.get_value("settings", k, DEFAULTS[k])
+	apply_settings()
+
+func save_settings() -> void:
+	var cfg := ConfigFile.new()
+	for k in settings:
+		cfg.set_value("settings", k, settings[k])
+	cfg.save(SETTINGS_PATH)
+
+func reset_settings() -> void:
+	settings = DEFAULTS.duplicate()
+	apply_settings()
+	save_settings()
+
+func apply_settings() -> void:
+	for pair in [["Master", "master"], ["Music", "music"], ["SFX", "sfx"]]:
+		var i := AudioServer.get_bus_index(pair[0])
+		var v: float = float(settings[pair[1]]) / 100.0
+		AudioServer.set_bus_volume_db(i, linear_to_db(maxf(v, 0.0001)))
+		AudioServer.set_bus_mute(i, v <= 0.0)
+	get_viewport().scaling_3d_scale = clampf(float(settings.res) / 100.0, 0.5, 2.0)
+	settings_changed.emit()
+
+## Music (the radio) and SFX (everything else) get their own sliders. Every
+## player lands on SFX unless it asked for another bus, so nothing added
+## later can slip past the slider.
+func _setup_buses() -> void:
+	for b in ["Music", "SFX"]:
+		if AudioServer.get_bus_index(b) == -1:
+			AudioServer.add_bus()
+			var i := AudioServer.bus_count - 1
+			AudioServer.set_bus_name(i, b)
+			AudioServer.set_bus_send(i, "Master")
+
+func _on_node_added(n: Node) -> void:
+	if n is AudioStreamPlayer and (n as AudioStreamPlayer).bus == &"Master":
+		(n as AudioStreamPlayer).bus = &"SFX"
+	elif n is AudioStreamPlayer3D and (n as AudioStreamPlayer3D).bus == &"Master":
+		(n as AudioStreamPlayer3D).bus = &"SFX"
 
 const SFX_DIR := "res://assets/sfx/"
 var _variants := {}
@@ -22,10 +92,14 @@ var _pool: Array[AudioStreamPlayer] = []
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_setup_input()
+	_setup_buses()
+	get_tree().node_added.connect(_on_node_added)
 	for i in 14:
 		var p := AudioStreamPlayer.new()
+		p.bus = &"SFX"
 		add_child(p)
 		_pool.append(p)
+	load_settings.call_deferred()      # the viewport has to exist first
 
 func set_phase(p: String) -> void:
 	phase = p

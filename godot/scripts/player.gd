@@ -4,6 +4,7 @@
 extends CharacterBody3D
 
 const U := preload("res://scripts/util.gd")
+const MosqueScript := preload("res://scripts/mosque.gd")
 
 signal died
 signal hp_changed(hp: float, max_hp: float)
@@ -75,7 +76,12 @@ var _was_floor := true
 var _rustle_t := 4.0
 var _low_hp_said := false
 
+func _on_settings() -> void:
+	fov_base = float(Game.settings.fov)
+
 func _ready() -> void:
+	_on_settings()
+	Game.settings_changed.connect(_on_settings)
 	collision_layer = 2
 	collision_mask = 1
 	var cs := CollisionShape3D.new()
@@ -338,6 +344,7 @@ func _fire() -> void:
 	var w: Dictionary = WEAPONS[weapon_index]
 	fire_cd = w.interval
 	mag -= 1
+	Game.shots += 1
 	ammo_changed.emit(mag, MAG_SIZE, w.name)
 	Game.play("gun_shot", -2.0, randf_range(0.96, 1.04))
 	recoil += 0.018
@@ -365,6 +372,9 @@ func _fire() -> void:
 		var headshot: bool = target.call("is_head", hit.position)
 		var dmg: float = w.damage * (HEAD_MULT if headshot else 1.0)
 		var killed: bool = target.call("take_hit", dmg, hit.position, dir)
+		Game.hits += 1
+		if headshot:
+			Game.headshots += 1
 		hit_marker.emit(headshot, killed)
 		if killed and headshot:
 			Game.vo("nice_shot", 15.0, 0.5)
@@ -446,8 +456,10 @@ func _unhandled_input(e: InputEvent) -> void:
 		return
 	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var m := e as InputEventMouseMotion
-		yaw -= m.relative.x * MOUSE_SENS
-		pitch = clampf(pitch - m.relative.y * MOUSE_SENS, -1.45, 1.45)
+		var sens: float = MOUSE_SENS * float(Game.settings.sens) / 100.0
+		var inv := -1.0 if Game.settings.invert else 1.0
+		yaw -= m.relative.x * sens
+		pitch = clampf(pitch - m.relative.y * sens * inv, -1.45, 1.45)
 	elif e.is_action_pressed("reload"):
 		try_reload()
 	elif e.is_action_pressed("weapon_1"):
@@ -525,6 +537,12 @@ func _move(dt: float) -> void:
 ## and road, grass on the verge, gravel on the unmade ground beyond it
 func _surface() -> String:
 	var p := global_position
+	# Al-Salaam: tiled halls and courtyard, and the flags round the ablution
+	# fountain are always wet (mosque-local coordinates, see mosque.gd)
+	var lx := (p.x - MosqueScript.X) / MosqueScript.S
+	var lz := (p.z - MosqueScript.MQ_Z) / MosqueScript.S
+	if absf(lx) < 27.5 and lz > -16.5 and lz < 32.4:
+		return "wet" if Vector2(lx, lz - 23.0).length() < 5.2 else "tile"
 	if absf(p.x) < 22.0 and absf(p.z) < 15.0:
 		return "tile"
 	if absf(p.z - 36.0) < 4.2 or (absf(p.x) < 24.0 and p.z < 30.2) or absf(p.z - 31.15) < 0.8 or absf(p.z - 41.35) < 1.3:

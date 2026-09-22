@@ -102,6 +102,7 @@ func _ready() -> void:
 	radio.unit_size = 4.0
 	radio.max_distance = 140.0
 	radio.volume_db = -6.0
+	radio.bus = &"Music"          # the MUSIC slider, not SFX
 	add_child(radio)
 
 # ------------------------------------------------------------------ radio
