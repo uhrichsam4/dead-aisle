@@ -358,7 +358,7 @@ func _fire() -> void:
 	var from := camera.global_position
 	var dir := -camera.global_basis.z
 	dir = (dir + camera.global_basis.x * randf_range(-spread, spread) + camera.global_basis.y * randf_range(-spread, spread)).normalized()
-	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 250.0, 1 | 4)
+	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 250.0, 1 | 4 | 32)   # 32: small props
 	q.exclude = [get_rid()]
 	q.collide_with_areas = false
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
@@ -390,6 +390,9 @@ func _fire() -> void:
 		if col is CharacterBody3D:
 			surf = "metal"
 		_impact(hit.position, hit.normal, surf)
+		# glass, crates, pottery: breakable.gd
+		if col is Node and (col as Node).has_method("shoot"):
+			col.call("shoot", w.damage, hit.position, dir)
 
 func _impact(pos: Vector3, normal: Vector3, kind := "concrete") -> void:
 	Game.play_at("hit_" + kind, pos, -6.0)

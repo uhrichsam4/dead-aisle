@@ -365,33 +365,27 @@ func _props() -> void:
 	var vases: Array = pick.call("vase|pot|goblet|ceramic")
 	var shelf: Array = pick.call("shelf|cabinet|commode")
 	var books: Array = pick.call("book|binder")
+	# placed through props.gd so the clay and the books can be shot to bits.
+	# load, not preload: props.gd preloads this script for mqx/mqz
+	var Props = load("res://scripts/props.gd")
 	for i in chand.size():
 		for cz in [-12, -6]:
-			_place(lib, chand[i], Vector3(mqx((i - 1) * 13), 3.6, mqz(cz)), 1.6)
+			Props.put(self, lib, chand[i], mqx((i - 1) * 13), mqz(cz), {h = 1.6, y = 3.6})
 	for n in lant:
 		for p in [[-3.1, 3.0], [3.1, 3.0], [-3.1, 6.8], [3.1, 6.8]]:
-			_place(lib, n, Vector3(mqx(p[0]), 1.15, mqz(p[1])), 0.5)
+			Props.put(self, lib, n, mqx(p[0]), mqz(p[1]), {h = 0.5, y = 1.15, solid = true, brk = "pottery"})
 	for i in mini(6, vases.size()):
-		_place(lib, vases[i], Vector3(mqx(-17 + i * 1.9), 0, mqz(3.1)), 0.42)
+		Props.put(self, lib, vases[i], mqx(-17 + i * 1.9), mqz(3.1), {h = 0.42, solid = true, brk = "pottery"})
 	for i in mini(3, shelf.size()):
-		_place(lib, shelf[i], Vector3(mqx(8.0 + i * 3.4), 0, mqz(7.6)), 2.1, PI)
+		Props.put(self, lib, shelf[i], mqx(8.0 + i * 3.4), mqz(7.6), {h = 2.1, ry = PI, solid = true})
 	for i in mini(4, books.size()):
-		_place(lib, books[i], Vector3(mqx(9.0 + i * 2.6), 0.84, mqz(7.0)), 0.28)
-
-## place a prop scaled to a height, seated by its own bounds
-func _place(lib: String, n: String, pos: Vector3, h: float, ry := -1.0) -> void:
-	var p := U.part(lib, n)
-	if p == null:
-		return
-	p.position = Vector3.ZERO
-	p.rotation = Vector3.ZERO
-	p.scale = Vector3.ONE
-	var a := U.local_aabb(p)
-	var s := h / maxf(0.001, a.size.y)
-	p.scale = Vector3.ONE * s
-	p.position = Vector3(pos.x, pos.y - a.position.y * s, pos.z)
-	p.rotation.y = ry if ry >= 0.0 else randf() * TAU
-	add_child(p)
+		Props.put(self, lib, books[i], mqx(9.0 + i * 2.6), mqz(7.0), {h = 0.28, y = 0.84, solid = true, brk = "crate", brk_scale = 0.5})
+	# the corner stores: pots either side
+	for i in mini(4, vases.size()):
+		for sx in [-22.2, 22.2]:
+			Props.put(self, lib, vases[i], mqx(sx + randf_range(-0.8, 0.8)), mqz(2.2 + randf_range(-0.8, 0.8)),
+				{h = 0.4, solid = true, brk = "pottery"})
+	Props.build_mosque(self)
 
 func _floor_collider() -> void:
 	# a floor for the navmesh bake - the town's ground collider lives in
@@ -402,6 +396,7 @@ func _setup_navmesh() -> void:
 	var nm := NavigationMesh.new()
 	nm.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_STATIC_COLLIDERS
 	nm.geometry_source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN
+	nm.geometry_collision_mask = 1      # not the small props on layer 32
 	nm.agent_radius = 0.4
 	nm.agent_height = 1.8
 	nm.agent_max_climb = 0.3

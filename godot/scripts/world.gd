@@ -25,6 +25,9 @@ func build() -> void:
 	_store_interior()
 	_street()
 	_highway()
+	var Props := preload("res://scripts/props.gd")
+	Props.build_store(self)
+	Props.build_street(self)
 	_setup_navmesh()
 
 # ------------------------------------------------------------------ helpers
@@ -601,6 +604,7 @@ func _setup_navmesh() -> void:
 	var nm := NavigationMesh.new()
 	nm.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_STATIC_COLLIDERS
 	nm.geometry_source_geometry_mode = NavigationMesh.SOURCE_GEOMETRY_ROOT_NODE_CHILDREN
+	nm.geometry_collision_mask = 1      # not the small props on layer 32
 	nm.agent_radius = 0.45
 	nm.agent_height = 1.8
 	nm.agent_max_climb = 0.3
