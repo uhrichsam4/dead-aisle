@@ -41,10 +41,6 @@ func _ready() -> void:
 		model = ps.instantiate() as Node3D
 		add_child(model)
 		U.fix_materials(model, true)
-		var a := U.local_aabb(model)
-		var s := 1.72 / maxf(0.2, a.size.y)
-		model.scale *= s
-		model.position.y = -a.position.y * s
 		anim = model.find_child("AnimationPlayer", true, false) as AnimationPlayer
 		if anim:
 			for n in anim.get_animation_list():
@@ -57,6 +53,9 @@ func _ready() -> void:
 					_clips.run = n
 			for k in _clips:
 				anim.get_animation(_clips[k]).loop_mode = Animation.LOOP_LINEAR
+		# measured in an animated pose: this rig's rest pose is not its bind
+		# pose (it measures 11 cm), and its mesh bounds carry a 0.01 scale
+		_fit_posed(1.72)
 	else:
 		var lib := U.glb("res://assets/hostile.glb")
 		if lib:
@@ -94,6 +93,28 @@ func _ready() -> void:
 	voice.unit_size = 3.0
 	voice.max_distance = 16.0
 	add_child(voice)
+
+func _fit_posed(target_h: float) -> void:
+	var skels := model.find_children("*", "Skeleton3D", true, false)
+	if skels.is_empty() or anim == null:
+		return
+	var sk := skels[0] as Skeleton3D
+	anim.play(_clips.get("idle", anim.get_animation_list()[0]))
+	anim.advance(0.0)
+	model.scale = Vector3.ONE
+	model.position = Vector3.ZERO
+	var to_model := model.global_transform.affine_inverse() * sk.global_transform
+	var lo := INF
+	var hi := -INF
+	for b in sk.get_bone_count():
+		var y := (to_model * sk.get_bone_global_pose(b)).origin.y
+		lo = minf(lo, y)
+		hi = maxf(hi, y)
+	if hi - lo <= 0.01:
+		return
+	var s := target_h * 0.9 / (hi - lo)
+	model.scale = Vector3.ONE * s
+	model.position.y = -lo * s + 0.03
 
 func _fit(target_h: float) -> void:
 	var skels := model.find_children("*", "Skeleton3D", true, false)

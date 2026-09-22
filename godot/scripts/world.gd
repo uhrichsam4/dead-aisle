@@ -293,9 +293,11 @@ func _tube(pos: Vector3, on: bool) -> void:
 	if on:
 		var l := OmniLight3D.new()
 		l.light_color = Color(0.81, 0.91, 0.85)
-		l.light_energy = 1.3
-		l.omni_range = 15.0
-		l.omni_attenuation = 1.2
+		# the web's PointLight(0xcfe8d8, 44, 22, 1.7): a strong tube reaching
+		# the whole bay, which is what lifts the orange aisles
+		l.light_energy = 2.6
+		l.omni_range = 22.0
+		l.omni_attenuation = 1.0
 		l.position.y = -0.4
 		l.add_to_group("tubes")
 		g.add_child(l)
@@ -363,7 +365,10 @@ func _store_interior() -> void:
 			if mat is StandardMaterial3D and not dimmed.has(mat):
 				dimmed[mat] = true
 				var sm := mat as StandardMaterial3D
-				sm.albedo_color = sm.albedo_color * Color(0.55, 0.55, 0.55, 1)
+				# .55 in LINEAR, as three.js did it; on the sRGB value it came out
+				# at a quarter and the orange aisles read as dark brown
+				var lin := sm.albedo_color.srgb_to_linear()
+				sm.albedo_color = Color(lin.r * 0.55, lin.g * 0.55, lin.b * 0.55, lin.a).linear_to_srgb()
 				sm.roughness = maxf(sm.roughness, 0.8)
 
 	var stock := StockBuilder.new(self, rng)
@@ -373,12 +378,18 @@ func _store_interior() -> void:
 		for i in 5:
 			for side in [[0.30, 0.0], [-0.30, PI]]:
 				place(props, "shelf_step", Vector3(-7.5 + 1.46 + i * 2.95, 0, rz + side[0]), side[1])
+		# the web's block slots (.28-.6 wide), each filled with a cluster of
+		# two to four goods rather than one lonely cupcake
 		for face in [-1, 1]:
 			for tier in SHELF_TIERS:
-				var x := -7.25
-				while x < 7.3:
-					stock.add(Vector3(x, tier, rz + face * 0.46), rng.randf_range(0, TAU), 0.2)
-					x += rng.randf_range(0.2, 0.34)
+				var x := -7.0
+				while x < 7.1:
+					var w := rng.randf_range(0.28, 0.6)
+					var n := 2 + rng.randi() % 3
+					for k in n:
+						var px := x + (k - (n - 1) / 2.0) * rng.randf_range(0.13, 0.2)
+						stock.add(Vector3(px, tier, rz + face * (0.46 + rng.randf_range(-0.05, 0.05))), rng.randf_range(0, TAU), 0.0)
+					x += w + rng.randf_range(0.06, 0.2)
 
 	# industrial wall shelving: back wall and both side walls
 	var units := []
@@ -400,7 +411,7 @@ func _store_interior() -> void:
 			var lx := -1.05
 			while lx < 1.0:
 				var p: Vector3 = u[0] + basis * Vector3(lx, tier, 0.10 + rng.randf_range(-0.03, 0.03))
-				stock.add(p, rng.randf_range(0, TAU), 0.22)
+				stock.add(p, rng.randf_range(0, TAU), 0.0, true)
 				lx += rng.randf_range(0.24, 0.42)
 	solid(Vector3(41.5, 2.2, 0.6), Vector3(0, 1.1, -14.0))
 	solid(Vector3(0.6, 2.2, 20.2), Vector3(-21.2, 1.1, -2.5))
@@ -626,12 +637,14 @@ func bake_nav() -> void:
 class StockBuilder:
 	var host: Node3D
 	var rng: RandomNumberGenerator
-	var items := []          # [{mesh, xf, h}]
+	var items := []          # [{mesh, aabb, scale}]
 	var buckets := {}        # index -> Array[Transform3D]
 
 	func _init(h: Node3D, r: RandomNumberGenerator) -> void:
 		host = h
 		rng = r
+		var bi := 0
+		var ci := 0
 		for lib in ["res://assets/food.glb", "res://assets/cstore.glb"]:
 			var root := U.glb(lib)
 			if root == null:
@@ -651,20 +664,38 @@ class StockBuilder:
 				var a := mi.mesh.get_aabb()
 				if a.size.y <= 0.0001:
 					continue
-				items.append({"mesh": mi.mesh, "aabb": a})
+				var mesh: Mesh = mi.mesh
+				var sc := 1.0
+				# the web's cartons and cans: its own packaging on each (PACK_ART)
+				# and its shelfScale (.26 / .30 of the pack's size)
+				var is_box := cname.begins_with("box_")
+				var is_can := cname.begins_with("can_")
+				if is_box or is_can:
+					sc = 0.30 if is_can else 0.26
+					var tex_path := "res://assets/tex/pack/%s_%d.png" % ["can" if is_can else "box", ci % 7 if is_can else bi % 10]
+					if is_can:
+						ci += 1
+					else:
+						bi += 1
+					var m := StandardMaterial3D.new()
+					m.albedo_texture = U.tex(tex_path)
+					m.roughness = 0.4 if is_can else 0.85
+					m.metallic = 0.35 if is_can else 0.0
+					mesh = mesh.duplicate() as Mesh
+					for si in mesh.get_surface_count():
+						mesh.surface_set_material(si, m)
+				items.append({"mesh": mesh, "aabb": a, "scale": sc})
 
-	func add(pos: Vector3, ry: float, target_h: float) -> void:
+	## the web's stockMatrix: shelfScale x 1.5-2.3 on the gondolas, 1.4-2.1 on
+	## the wall units, seated by the item's own bounds on the deck
+	func add(pos: Vector3, ry: float, _unused := 0.0, wall := false) -> void:
 		if items.is_empty():
 			return
 		var idx := rng.randi() % items.size()
 		var it: Dictionary = items[idx]
 		var a: AABB = it.aabb
-		# size by the LARGEST dimension: sizing by height alone made every flat
-		# product - cakes, cheese wheels, trays - half a metre wide
-		var biggest := maxf(a.size.x, maxf(a.size.y, a.size.z))
-		var s := target_h * rng.randf_range(0.8, 1.2) / biggest
+		var s: float = float(it.scale) * (rng.randf_range(1.4, 2.1) if wall else rng.randf_range(1.5, 2.3))
 		var basis := Basis(Vector3.UP, ry).scaled(Vector3(s, s, s))
-		# seat the item by its own bounds on the shelf deck
 		var origin := pos - basis * Vector3(a.get_center().x, a.position.y, a.get_center().z)
 		if not buckets.has(idx):
 			buckets[idx] = []

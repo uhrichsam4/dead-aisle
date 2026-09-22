@@ -78,6 +78,7 @@ var _rustle_t := 4.0
 var _low_hp_said := false
 var _dead_t := 0.0
 var _sprinting := false
+var _vm_view: SubViewport
 var _fov_now := 88.0
 var heart: AudioStreamPlayer
 var _heart_t := 0.0
@@ -86,6 +87,8 @@ static var _hole_tex: Texture2D
 
 func _on_settings() -> void:
 	fov_base = float(Game.settings.fov)
+	if _vm_view:
+		_vm_view.scaling_3d_scale = Game.render_scale()
 
 func _ready() -> void:
 	_on_settings()
@@ -150,6 +153,8 @@ func _build_viewmodel() -> void:
 	svc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vm_layer.add_child(svc)
 	var sv := SubViewport.new()
+	_vm_view = sv
+	sv.scaling_3d_scale = Game.render_scale()
 	sv.transparent_bg = true
 	sv.msaa_3d = Viewport.MSAA_4X
 	sv.handle_input_locally = false

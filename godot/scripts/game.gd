@@ -72,7 +72,10 @@ func apply_settings() -> void:
 		var v: float = float(settings[pair[1]]) / 100.0
 		AudioServer.set_bus_volume_db(i, linear_to_db(maxf(v, 0.0001)))
 		AudioServer.set_bus_mute(i, v <= 0.0)
-	get_viewport().scaling_3d_scale = clampf(float(settings.res) / 100.0, 0.5, 2.0)
+	# the web renders at one pixel per CSS pixel (DPR_CAP 1) times RENDER
+	# QUALITY - half resolution per axis on a Retina screen
+	get_viewport().scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	get_viewport().scaling_3d_scale = render_scale()
 	settings_changed.emit()
 
 ## Music (the radio) and SFX (everything else) get their own sliders. Every
@@ -141,6 +144,10 @@ func heartbeat() -> AudioStreamWAV:
 func add_points(n: int, label := "", head := false) -> void:
 	points += n
 	points_changed.emit(points, label, head)
+
+func render_scale() -> float:
+	var dpr := DisplayServer.screen_get_scale(DisplayServer.window_get_current_screen())
+	return clampf(float(settings.res) / 100.0 / maxf(1.0, dpr), 0.25, 2.0)
 
 func _ui_scale() -> void:
 	# size the 2D layers to the window, so the HUD reads the same fullscreen
