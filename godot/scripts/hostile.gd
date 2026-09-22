@@ -24,6 +24,38 @@ var _base_scale := Vector3.ONE
 var _base_y := 0.0
 var _base_head := 1.5
 var _scream_t := 2.0
+# the web's LOT CROWD and FLEEING ZOMBIE BEHAVIOR
+var flee := false            # a runner: bolts about screaming, never attacks
+var lot := false             # claimed by the dormant crowd in the lot
+var lot_box := AABB(Vector3(-23, 0, 16), Vector3(46, 4, 13.5))
+var car_ref: Node3D
+var _flee_to := Vector3.INF
+var _flee_scr := 0.0
+var _sc_t := 0.0
+var _sc_dir := Vector3.ZERO
+var _sc_spd := 0.0
+var _sc_scr := 0.0
+var _wander := 0.0
+var _wr := 0.0
+# ragdoll: real physics bones on the skeleton, built the first time it dies
+var skel: Skeleton3D
+var rag_boost := 1.0         # a car hit throws them harder
+const RAG_BONES := [
+	# bone, the descendant the segment runs to, radius as a share of half-length, mass
+	["root", "spine04", 0.9, 9.0],
+	["spine04", "spine02", 0.8, 8.0],
+	["spine02", "neck01", 0.65, 8.0],
+	["neck01", "head", 0.5, 2.0],
+	["head", "", 0.0, 4.0],
+	["upperarm01_L", "lowerarm01_L", 0.3, 2.5],
+	["lowerarm01_L", "wrist_L", 0.25, 1.8],
+	["upperarm01_R", "lowerarm01_R", 0.3, 2.5],
+	["lowerarm01_R", "wrist_R", 0.25, 1.8],
+	["upperleg01_L", "lowerleg01_L", 0.3, 6.0],
+	["lowerleg01_L", "foot_L", 0.25, 4.0],
+	["upperleg01_R", "lowerleg01_R", 0.3, 6.0],
+	["lowerleg01_R", "foot_R", 0.25, 4.0],
+]
 var _anim_now := ""
 var _groan_cd := 0.0
 # audio: one voice per person for their whole life, as the web build did
@@ -48,6 +80,9 @@ func _ready() -> void:
 		model = lib.duplicate() as Node3D
 		add_child(model)
 		_fit_height(1.78)
+		var sks := model.find_children("*", "Skeleton3D", true, false)
+		if not sks.is_empty():
+			skel = sks[0] as Skeleton3D
 		_base_scale = model.scale
 		_base_y = model.position.y
 		_base_head = head_y
@@ -169,7 +204,244 @@ func _say(file: String, vol_db := 0.0, pitch := 1.0) -> void:
 	voice.pitch_scale = pitch
 	voice.play()
 
+## lotCrowdInit: one of the onlookers standing about the lot before you
+## arrive - an 80 HP walker at the round's strength, idling, watching the car
+func lot_idle(pos: Vector3, tgt: Node3D, car_node: Node3D, box: AABB, rnd: int) -> void:
+	spawn(pos, 3, tgt)
+	state = "lotidle"
+	lot = true
+	flee = false
+	variant = "walker"
+	if model:
+		model.scale = _base_scale * randf_range(0.93, 1.07)
+		model.position.y = _base_y
+	head_y = _base_head
+	var r := rnd - 1
+	max_hp = 80.0 * (1.0 + r * 0.22)
+	hp = max_hp
+	speed = randf_range(0.9, 1.5) * (1.0 + r * 0.09)
+	car_ref = car_node
+	lot_box = box
+	_wander = randf() * TAU
+	_wr = randf_range(-0.45, 0.45)
+	_sc_t = 0.0
+	_anim_now = ""
+	_play("idle", 0.3)
+
+## lotCrowdScatter: the car pulls in and they panic away from it for 2.2 s
+func scatter_from(p: Vector3) -> void:
+	if state != "lotidle":
+		return
+	var d := global_position - p
+	d.y = 0.0
+	d = d.normalized() + Vector3(randf_range(-0.3, 0.3), 0, randf_range(-0.3, 0.3))
+	_sc_dir = d.normalized()
+	_sc_spd = randf_range(3.4, 4.8)
+	_sc_t = 2.2
+	_sc_scr = randf_range(0.0, 0.3)
+
+## the crowd wakes: two in five run, the rest come for you
+func wake() -> void:
+	if state != "lotidle":
+		return
+	state = "chase"
+	flee = randf() < 0.4
+	attack_cd = randf_range(0.2, 0.9)
+	seen_player = true
+	_flee_to = Vector3.INF
+	if not flee and Game.may_react(0.3):
+		_say("hostile-v%d.mp3" % randi_range(1, 6), -1.0, randf_range(0.95, 1.05))   # "I see him"
+
+func _lot_step(dt: float) -> void:
+	velocity = Vector3.ZERO
+	if _sc_t > 0.0:
+		_sc_t -= dt
+		_play("run", 0.15, 1.6)
+		var p := global_position + _sc_dir * _sc_spd * dt
+		p.x = clampf(p.x, lot_box.position.x, lot_box.end.x)
+		p.z = clampf(p.z, lot_box.position.z, lot_box.end.z)
+		global_position = Vector3(p.x, global_position.y, p.z)
+		rotation.y = lerp_angle(rotation.y, atan2(_sc_dir.x, _sc_dir.z), clampf(dt * 9.0, 0.0, 1.0))
+		_sc_scr -= dt
+		if _sc_scr <= 0.0:
+			_sc_scr = randf_range(0.7, 1.6)
+			if Game.may_shout(0.25):
+				_say("sfx-enemy-scream.mp3", -6.0, randf_range(0.95, 1.12))
+		return
+	# standing about: the player if close, otherwise the car, with a slow sway
+	_play("idle", 0.3)
+	var look: Vector3 = target.global_position if target else global_position
+	if target and global_position.distance_to(target.global_position) >= 13.0 and car_ref:
+		look = car_ref.global_position
+	_wander += _wr * dt
+	var want := atan2(look.x - global_position.x, look.z - global_position.z) + sin(_wander) * 0.55
+	rotation.y = lerp_angle(rotation.y, want, clampf(dt * 1.6, 0.0, 1.0))
+
+## a runner: away from you to a spot eight metres off, a new one when it
+## gets there, screaming now and then; never attacks
+func _flee_step(dt: float) -> void:
+	var pp: Vector3 = target.global_position
+	if _flee_to == Vector3.INF or Vector2(_flee_to.x - global_position.x, _flee_to.z - global_position.z).length() < 0.8:
+		var away := global_position - pp
+		away.y = 0.0
+		away = away.normalized() if away.length() > 0.01 else Vector3.FORWARD
+		_flee_to = pp + away * 8.0 + Vector3(randf_range(-2.5, 2.5), 0, randf_range(-2.5, 2.5))
+		_flee_to.x = clampf(_flee_to.x, lot_box.position.x + 0.5, lot_box.end.x - 0.5)
+		_flee_to.z = clampf(_flee_to.z, lot_box.position.z + 0.5, lot_box.end.z - 0.5)
+		_flee_scr = randf_range(0.5, 2.0)
+	_flee_scr -= dt
+	if _flee_scr <= 0.0:
+		_flee_scr = randf_range(2.5, 6.0)
+		if Game.may_shout(0.3):
+			_say("sfx-enemy-scream.mp3", -3.0, randf_range(0.95, 1.1))
+	var d := _flee_to - global_position
+	d.y = 0.0
+	var dir := d.normalized() if d.length() > 0.01 else Vector3.ZERO
+	for o in get_tree().get_nodes_in_group("hostiles"):
+		if o == self or not o.is_active():
+			continue
+		var off: Vector3 = global_position - (o as Node3D).global_position
+		off.y = 0.0
+		var od := off.length()
+		if od < 0.7 and od > 0.001:
+			dir += off / od * 0.9 * dt
+	velocity.x = dir.x * speed * 1.4
+	velocity.z = dir.z * speed * 1.4
+	velocity.y = velocity.y - 18.0 * dt if not is_on_floor() else 0.0
+	move_and_slide()
+	if dir.length() > 0.01:
+		rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), clampf(dt * 7.0, 0.0, 1.0))
+	_play("run", 0.2, clampf(speed * 1.4 / 1.6, 0.6, 2.2))
+
+## A ragdoll that does not care about the rig's scale. Godot's physical
+## bones inherit the skeleton transform, and this armature carries a 0.1
+## scale, so the body came out ten times its size. Instead: world-space
+## capsules on the segments, cone-twist joints between them, and every
+## physics frame the bones are posed from the bodies with the scale stripped.
+var _rag: Array = []          # [bone index, RigidBody3D, body->bone transform]
+var _rag_joints: Array = []
+
+func _ragdoll(dir: Vector3, at: Vector3) -> bool:
+	if skel == null:
+		return false
+	_rag_clear()
+	var sg := skel.global_transform
+	var by_bone := {}
+	for e in RAG_BONES:
+		var bi := skel.find_bone(e[0])
+		if bi < 0:
+			continue
+		var bone_w: Transform3D = sg * skel.get_bone_global_pose(bi)
+		bone_w.basis = bone_w.basis.orthonormalized()
+		var a: Vector3 = bone_w.origin
+		var b: Vector3
+		if e[1] != "":
+			var ci := skel.find_bone(e[1])
+			if ci < 0:
+				continue
+			b = (sg * skel.get_bone_global_pose(ci)).origin
+		else:
+			var ni := skel.find_bone("neck01")
+			var nd: Vector3 = (a - (sg * skel.get_bone_global_pose(ni)).origin).normalized() if ni >= 0 else Vector3.UP
+			b = a + nd * 0.22
+		var seg := b - a
+		var ln := seg.length()
+		if ln < 0.02:
+			continue
+		var rb := RigidBody3D.new()
+		rb.name = "rag_" + str(e[0])
+		rb.mass = e[3]
+		rb.linear_damp = 0.25
+		rb.angular_damp = 1.4
+		rb.continuous_cd = true
+		rb.collision_layer = 64          # bodies meet the world, not each other
+		rb.collision_mask = 1
+		var pm := PhysicsMaterial.new()
+		pm.friction = 0.9
+		pm.bounce = 0.05
+		rb.physics_material_override = pm
+		var cs := CollisionShape3D.new()
+		var cap := CapsuleShape3D.new()
+		var rf: float = e[2] if e[2] > 0.0 else 0.55
+		cap.radius = clampf(ln * 0.5 * rf, 0.035, 0.2)
+		cap.height = maxf(ln, cap.radius * 2.0 + 0.001)
+		cs.shape = cap
+		rb.add_child(cs)
+		get_tree().current_scene.add_child(rb)
+		# the capsule's axis (Y) along the segment, centred on it
+		var yax := seg / ln
+		var ref := Vector3.FORWARD if absf(yax.dot(Vector3.FORWARD)) < 0.9 else Vector3.RIGHT
+		var xax := ref.cross(yax).normalized()
+		var zax := xax.cross(yax).normalized()
+		rb.global_transform = Transform3D(Basis(xax, yax, zax), (a + b) * 0.5)
+		_rag.append([bi, rb, rb.global_transform.affine_inverse() * bone_w])
+		by_bone[bi] = rb
+	# joints: each body to the nearest ancestor that has one, at the joint
+	for r in _rag:
+		var bi: int = r[0]
+		var p := skel.get_bone_parent(bi)
+		while p >= 0 and not by_bone.has(p):
+			p = skel.get_bone_parent(p)
+		if p < 0:
+			continue
+		var j := ConeTwistJoint3D.new()
+		get_tree().current_scene.add_child(j)
+		j.global_position = (sg * skel.get_bone_global_pose(bi)).origin
+		j.node_a = (by_bone[p] as Node).get_path()
+		j.node_b = (r[1] as Node).get_path()
+		j.set_param(ConeTwistJoint3D.PARAM_SWING_SPAN, deg_to_rad(50.0))
+		j.set_param(ConeTwistJoint3D.PARAM_TWIST_SPAN, deg_to_rad(25.0))
+		_rag_joints.append(j)
+	if _rag.is_empty():
+		return false
+	if anim:
+		anim.active = false
+	# the round (or the car) shoves it along the way it was going, the part
+	# that was hit hardest
+	var flat := Vector3(dir.x, 0, dir.z)
+	flat = flat.normalized() if flat.length() > 0.001 else -global_basis.z
+	var push := flat * 2.2 * rag_boost + Vector3.UP * (0.6 + 0.9 * (rag_boost - 1.0))
+	var nearest: RigidBody3D = null
+	var best := INF
+	for r in _rag:
+		var rb: RigidBody3D = r[1]
+		rb.apply_central_impulse(push * rb.mass)
+		var d := rb.global_position.distance_to(at)
+		if d < best:
+			best = d
+			nearest = rb
+	if nearest:
+		nearest.apply_central_impulse(push * nearest.mass * 2.5)
+	return true
+
+## pose the bones from the bodies, parents first, scale stripped
+func _rag_pose() -> void:
+	var inv := skel.global_transform.affine_inverse()
+	for r in _rag:
+		var rb: RigidBody3D = r[1]
+		var pose: Transform3D = inv * (rb.global_transform * (r[2] as Transform3D))
+		pose.basis = pose.basis.orthonormalized()
+		skel.set_bone_global_pose(r[0], pose)
+
+func _rag_clear() -> void:
+	for j in _rag_joints:
+		if is_instance_valid(j):
+			j.queue_free()
+	for r in _rag:
+		if is_instance_valid(r[1]):
+			(r[1] as Node).queue_free()
+	_rag.clear()
+	_rag_joints.clear()
+
 func despawn() -> void:
+	_rag_clear()
+	if skel:
+		skel.reset_bone_poses()
+	if anim:
+		anim.active = true
+	rag_boost = 1.0
+	lot = false
+	flee = false
 	state = "idle"
 	visible = false
 	collision_layer = 0
@@ -199,7 +471,8 @@ func take_hit(dmg: float, at: Vector3, dir: Vector3) -> bool:
 		dead_t = 0.0
 		collision_layer = 0
 		velocity = Vector3.ZERO
-		_play("death", 0.1)
+		if not _ragdoll(dir, at):
+			_play("death", 0.1)
 		if randf() < 0.6:
 			_say("kill-voice.mp3", -4.0, randf_range(0.85, 1.1))
 		# the body hits the floor as the death clip lands
@@ -245,10 +518,18 @@ func _blood(at: Vector3, dir: Vector3) -> void:
 func _physics_process(dt: float) -> void:
 	if state == "dead":
 		dead_t += dt
+		if not _rag.is_empty():
+			_rag_pose()
 		if dead_t > 8.0:
 			despawn()
 		return
 	if state == "idle" or target == null:
+		return
+	if state == "lotidle":
+		_lot_step(dt)
+		return
+	if flee:
+		_flee_step(dt)
 		return
 	attack_cd = maxf(0.0, attack_cd - dt)
 	_groan_cd -= dt

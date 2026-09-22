@@ -25,7 +25,7 @@ const CAR_START := Vector3(124, 0, 36.5)
 const OUTSIDE_PTS := [[-20, 28], [20, 27], [-8, 26], [24, 23.5], [-24, 22], [14, 29]]
 const INSIDE_PTS := [[-19, -12], [19, -12], [-19, -6], [19, -6], [-8, -11], [8, -11], [-16, 0], [16, 0],
 	[-19, 5], [19, 5], [-10, 9], [10, 9], [-17, 13], [17, 13], [0, -9.4], [3, -12]]
-const POOL := 18
+const POOL := 26          # the web's actor pool
 
 var world: NavigationRegion3D
 var mosque: NavigationRegion3D
@@ -47,6 +47,7 @@ var menu_cam: Camera3D
 var post_layer: CanvasLayer
 var moon: DirectionalLight3D
 var _drive_t := 0.0
+var _crowd_groan_t := 4.0
 
 func _ready() -> void:
 	randomize()
@@ -83,6 +84,10 @@ func _ready() -> void:
 	for i in SURV_SPOTS.size():
 		var sv: CharacterBody3D = SurvivorScript.new()
 		sv.name = "Survivor%d" % i
+		# the supplied survivors: survivor_1..4.glb, reusing the first until
+		# the others arrive
+		var mp := "res://assets/survivor_%d.glb" % (i + 1)
+		sv.model_path = mp if ResourceLoader.exists(mp) else "res://assets/survivor_1.glb"
 		sv.add_to_group("survivors")
 		add_child(sv)
 		sv.place(Vector3(SURV_SPOTS[i][0], 0.05, SURV_SPOTS[i][1]), player)
@@ -411,9 +416,10 @@ func _start_drive() -> void:
 	Game.set_objective("drive", "active")
 	hud.show_combat_hud(false)
 	Game.say_banner("FIND TOPS", "FOLLOW THE ROAD. PARK WHEN YOU ARRIVE.")
+	_lot_crowd_init()
 	_drive_t = 0.0
 	car.take_wheel(true)
-	post.set_shader_parameter("mix_amt", 0.25)   # a dashcam, not yet the GoPro
+	post.set_shader_parameter("mix_amt", 1.0)    # the web drives through the full GoPro look
 	Game.play("car_seatbelt", -8.0)
 	get_tree().create_timer(0.7, false).timeout.connect(func(): Game.play("car_start", -5.0))
 	get_tree().create_timer(1.6, false).timeout.connect(func(): if Game.phase == "drive": Game.play_file("vo-deploy.mp3", -2.0))
@@ -421,6 +427,9 @@ func _start_drive() -> void:
 
 func _on_parked() -> void:
 	Game.set_phase("parking")
+	for h in hostiles:
+		h.scatter_from(car.global_position)
+	_scream_burst(5, 0.7)
 	Game.set_objective("drive", "done")
 	Game.set_objective("park", "done")
 	Game.set_objective("enter", "active")
@@ -445,6 +454,46 @@ func _inside_pts() -> Array:
 		out.append(_mq(p) if Game.act == 2 else Vector3(p[0], 0.1, p[1]))
 	return out
 
+## the lot's clamp box and the crowd's spawn box for this act (LC_LOT / LC_SPAWN)
+func _lot_boxes() -> Array:
+	if Game.act == 2:
+		var a := AABB(Vector3(MosqueScript.mqx(-25), 0, MosqueScript.mqz(14.5)), Vector3(50 * MosqueScript.S, 4, 16.5 * MosqueScript.S))
+		var b := AABB(Vector3(MosqueScript.mqx(-22), 0, MosqueScript.mqz(16)), Vector3(44 * MosqueScript.S, 4, 14 * MosqueScript.S))
+		return [a, b]
+	return [AABB(Vector3(-23, 0, 16), Vector3(46, 4, 13.5)), AABB(Vector3(-20, 0, 17), Vector3(40, 4, 12))]
+
+## lotCrowdInit: onlookers standing about the lot before you get there,
+## clear of the parking bay
+func _lot_crowd_init() -> void:
+	var boxes := _lot_boxes()
+	var spawn_box: AABB = boxes[1]
+	var n := mini(14, 9 + (Game.round - 1) * 2)
+	var pb: AABB = car.park_box.grow(0.9)
+	var placed := 0
+	for h in hostiles:
+		if placed >= n:
+			break
+		if h.state != "idle":
+			continue
+		var pos := Vector3.ZERO
+		var ok := false
+		for k in 50:
+			pos = Vector3(randf_range(spawn_box.position.x, spawn_box.end.x), 0.1, randf_range(spawn_box.position.z, spawn_box.end.z))
+			if not pb.has_point(Vector3(pos.x, 1, pos.z)):
+				ok = true
+				break
+		if not ok:
+			break
+		h.lot_idle(pos, player, car, boxes[0], Game.round)
+		placed += 1
+
+func _scream_burst(count: int, spread: float) -> void:
+	var idlers := hostiles.filter(func(h): return h.state == "lotidle" or h.is_active())
+	for i in mini(count, idlers.size()):
+		var p: Vector3 = (idlers[randi() % idlers.size()] as Node3D).global_position
+		get_tree().create_timer(randf_range(0.0, spread), false).timeout.connect(func():
+			Game.play_file_at("sfx-enemy-scream.mp3", p, -4.0, randf_range(0.95, 1.12), 30.0))
+
 func _begin_outside() -> void:
 	# the arrival has already put you on your feet behind the boot
 	player.activate(true)
@@ -452,13 +501,31 @@ func _begin_outside() -> void:
 	hud.show_combat_hud(true)
 	Game.set_phase("outside")
 	Game.play("gear_gopro_beep", -6.0)
+	# the crowd wakes, all at once, with a burst of screams
+	var woke := false
+	for h in hostiles:
+		if h.state == "lotidle":
+			h.wake()
+			woke = true
+	if woke:
+		_scream_burst(6, 0.8)
+	var box: AABB = _lot_boxes()[0]
 	for p in _outside_pts():
-		_spawn(p)
+		var h = _spawn(p)
+		if h:
+			h.flee = randf() < 0.35
+			h.lot_box = box
 	Game.say_banner("THEY KNOW YOU ARE HERE", "GET THROUGH THE GATE" if Game.act == 2 else "GET TO THE DOORS")
 	Game.play("vo_contact", -2.0)
 
 func _enter_store() -> void:
 	Game.set_phase("inside")
+	# anyone still out in the lot is recycled - they cannot follow you through
+	# the wall, and the clear waits on every chaser
+	var gz := MosqueScript.mqz(13.2) if Game.act == 2 else 15.5
+	for h in hostiles:
+		if h.state not in ["idle", "dead"] and (h as Node3D).global_position.z > gz:
+			h.despawn()
 	Game.vo("moving", 20.0)
 	Game.set_objective("enter", "done")
 	Game.set_objective("clear", "active")
@@ -467,9 +534,7 @@ func _enter_store() -> void:
 	# the web streams them in rather than dropping two blocks of ten: sixteen
 	# (twenty in act 2), never more than ten on their feet at once
 	inside_left = mini(26, 16 + (Game.round - 1) * 3)     # roundScale().inside, both acts
-	_trickle_t = 0.0
-	for i in 6:
-		_trickle_one()
+	_trickle_t = 0.4                    # mission.spawnT: the first one in .4 s, then a steady trickle
 	get_tree().create_timer(2.2, false).timeout.connect(func(): if Game.phase == "inside": Game.vo("contact", 10.0))
 
 ## one more from somewhere you are not standing
@@ -488,7 +553,7 @@ func _trickle_one() -> void:
 
 ## the web's fixed wave numbers: 3 for the fight outside, 4 inside (where
 ## the runners appear), one tougher in act 2
-func _spawn(pos: Vector3) -> void:
+func _spawn(pos: Vector3):
 	var w := (4 if Game.phase == "inside" else 3) + Game.act - 1
 	for h in hostiles:
 		if h.state == "idle":
@@ -498,7 +563,8 @@ func _spawn(pos: Vector3) -> void:
 			h.max_hp *= 1.0 + r * 0.22
 			h.hp = h.max_hp
 			h.speed *= 1.0 + r * 0.09
-			return
+			return h
+	return null
 
 func _on_survivor_found(_s: Node) -> void:
 	rescued += 1
@@ -569,8 +635,9 @@ func _start_act2() -> void:
 	car.speed = 0.0
 	car.park_box = car.PARK_ACT2
 	car.is_parked = false
+	_lot_crowd_init()                   # the forecourt crowd, clear of the new bay
 	car.take_wheel(true)
-	post.set_shader_parameter("mix_amt", 0.25)
+	post.set_shader_parameter("mix_amt", 1.0)
 	hud.show_combat_hud(false)
 	hud.set_objectives([["drive", "DRIVE WEST TO THE AL-SALAAM MOSQUE"], ["park", "PARK AT THE GATE"],
 		["enter", "GET INSIDE THE MOSQUE"], ["clear", "CLEAR EVERY THREAT"],
@@ -624,6 +691,13 @@ func _process(dt: float) -> void:
 	if Game.phase not in ["dead", "win", "menu"]:
 		Game.run_time += dt
 	_light_apply(dt)
+	_crowd_groan_t -= dt
+	if _crowd_groan_t <= 0.0:
+		_crowd_groan_t = randf_range(3.0, 7.0)
+		var idlers := hostiles.filter(func(h): return h.state == "lotidle")
+		if not idlers.is_empty():
+			var g: Node3D = idlers[randi() % idlers.size()]
+			Game.play_file_at("hostile-%d.mp3" % randi_range(1, 7), g.global_position, -12.0, randf_range(0.7, 0.85), 22.0)
 	emergency.light_energy = 1.2 + sin(Time.get_ticks_msec() * 0.0024) * 0.5
 	emergency.position.x = sin(Time.get_ticks_msec() * 0.0007) * 8.0
 	match Game.phase:

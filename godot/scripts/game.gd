@@ -143,8 +143,12 @@ func add_points(n: int, label := "", head := false) -> void:
 	points_changed.emit(points, label, head)
 
 func _ui_scale() -> void:
-	var sc := DisplayServer.screen_get_scale(DisplayServer.window_get_current_screen())
-	get_window().content_scale_factor = maxf(1.0, sc)
+	# size the 2D layers to the window, so the HUD reads the same fullscreen
+	# as windowed: 780 logical px of height, whatever the screen
+	var h := float(get_window().size.y)
+	get_window().content_scale_factor = maxf(1.0, h / 780.0)
+	if not get_window().size_changed.is_connected(_ui_scale):
+		get_window().size_changed.connect(_ui_scale)
 
 func set_phase(p: String) -> void:
 	phase = p

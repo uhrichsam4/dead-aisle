@@ -77,6 +77,8 @@ var _was_floor := true
 var _rustle_t := 4.0
 var _low_hp_said := false
 var _dead_t := 0.0
+var _sprinting := false
+var _fov_now := 88.0
 var heart: AudioStreamPlayer
 var _heart_t := 0.0
 var _holes: Array[Decal] = []
@@ -597,6 +599,7 @@ func _physics_process(dt: float) -> void:
 func _move(dt: float) -> void:
 	var input := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 	var sprinting := Input.is_action_pressed("sprint") and input.y < -0.1 and ads_t < 0.3
+	_sprinting = sprinting
 	var spd := SPRINT if sprinting else WALK
 	var basis := Basis(Vector3.UP, yaw)
 	var wish := basis * Vector3(input.x, 0, input.y) * spd
@@ -690,7 +693,10 @@ func _process(dt: float) -> void:
 		var k := 1.0 - exp(-_dead_t * 2.0)
 		camera.rotation.z = 0.35 * k
 		camera.position.y = lerpf(EYE, 0.6, k)
-	camera.fov = lerpf(fov_base, fov_base * 0.66, ads_t)
+	# GoPro-wide on foot: the web's .66x aiming, 1.09x sprinting
+	var want_fov := fov_base * (1.09 if _sprinting and ads_t < 0.1 else 1.0)
+	_fov_now = lerpf(_fov_now, want_fov, clampf(dt * 9.0, 0.0, 1.0))
+	camera.fov = lerpf(_fov_now, fov_base * 0.66, ads_t)
 	# the viewmodel camera rides the main one
 	vm_cam.global_transform = camera.global_transform
 	vm_cam.fov = lerpf(52.0, 38.0, ads_t)

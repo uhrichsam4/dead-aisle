@@ -9,6 +9,8 @@ const U := preload("res://scripts/util.gd")
 signal found(s: Node)
 
 var state := "hiding"        # hiding | following | out
+var model_path := ""         # a rigged survivor model (set by main before adding)
+var _clips := {}             # our names (idle/walk/run) -> the model's clip names
 var target: Node3D
 var home := Vector3.ZERO
 var model: Node3D
@@ -33,13 +35,37 @@ func _ready() -> void:
 	cs.shape = cap
 	cs.position.y = 0.85
 	add_child(cs)
-	var lib := U.glb("res://assets/hostile.glb")
-	if lib:
-		model = lib.duplicate() as Node3D
+	if model_path != "" and ResourceLoader.exists(model_path):
+		# one of the supplied rigged people, on its own Idle / Walk / Sprint
+		var ps: PackedScene = load(model_path)
+		model = ps.instantiate() as Node3D
 		add_child(model)
-		_fit(1.72)
-		_civilian_look()
+		U.fix_materials(model, true)
+		var a := U.local_aabb(model)
+		var s := 1.72 / maxf(0.2, a.size.y)
+		model.scale *= s
+		model.position.y = -a.position.y * s
 		anim = model.find_child("AnimationPlayer", true, false) as AnimationPlayer
+		if anim:
+			for n in anim.get_animation_list():
+				var l := str(n).to_lower()
+				if l == "idle" and not _clips.has("idle"):
+					_clips.idle = n
+				elif l == "walk" and not _clips.has("walk"):
+					_clips.walk = n
+				elif (l == "sprint" or l == "run") and not _clips.has("run"):
+					_clips.run = n
+			for k in _clips:
+				anim.get_animation(_clips[k]).loop_mode = Animation.LOOP_LINEAR
+	else:
+		var lib := U.glb("res://assets/hostile.glb")
+		if lib:
+			model = lib.duplicate() as Node3D
+			add_child(model)
+			_fit(1.72)
+			_civilian_look()
+			anim = model.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	if model:
 		for mi in model.find_children("*", "MeshInstance3D", true, false):
 			(mi as MeshInstance3D).extra_cull_margin = 1.5
 	marker = MeshInstance3D.new()
@@ -118,6 +144,12 @@ func place(pos: Vector3, tgt: Node3D) -> void:
 	_play("idle")
 
 func _play(n: String, blend := 0.25, rate := 1.0) -> void:
+	if not _clips.is_empty():
+		# a supplied model: map onto its clips; it walks when close, sprints when far
+		if n == "run" and rate < 1.0 and _clips.has("walk"):
+			n = "walk"
+			rate = rate * 1.6
+		n = _clips.get(n, n)
 	if anim == null or not anim.has_animation(n):
 		return
 	if _anim_now != n:

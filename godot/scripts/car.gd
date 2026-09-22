@@ -35,6 +35,7 @@ var camera: Camera3D
 var wheels := {}
 var cam_yaw := 0.0
 var _cam_roll := 0.0
+var _shake := 0.0
 var _prev_spd := 0.0
 var _accel_s := 0.0
 var look_yaw := 0.0
@@ -195,6 +196,23 @@ func _physics_process(dt: float) -> void:
 	var fwd := -global_basis.z
 	velocity = fwd * speed + Vector3(0, -9.0, 0)
 	move_and_slide()
+	# roadkill: anyone in the car's 2.7 x 5.9 m footprint above walking pace
+	# goes over the bonnet, thrown along the heading harder the faster you were
+	# going, and the car loses a little speed for it
+	if absf(speed) > 2.6:
+		for h in get_tree().get_nodes_in_group("hostiles"):
+			if not (h.is_active() or h.state == "lotidle"):
+				continue
+			var lp := to_local((h as Node3D).global_position)
+			if absf(lp.x) > 1.35 or absf(lp.z) > 2.95:
+				continue
+			var dir := -global_basis.z * signf(speed)
+			h.rag_boost = clampf(absf(speed) / 3.4, 1.0, 3.6)
+			if h.take_hit(9999.0, (h as Node3D).global_position + Vector3(0, 1.05, 0), dir):
+				Game.add_points(55, "+55")
+			speed *= 0.93
+			_shake = 0.5
+			Game.play_file("sfx-body-drop.mp3", -1.0, randf_range(0.9, 1.05))
 	# the web's clamp: the road ends, the car does not drive off the world
 	global_position.x = clampf(global_position.x, -1022.0, 162.0)
 	global_position.z = clampf(global_position.z, 17.0, 39.0)
@@ -251,3 +269,6 @@ func _process(dt: float) -> void:
 	_accel_s = lerpf(_accel_s, clampf(acc, -8.0, 8.0), clampf(dt * 4.0, 0.0, 1.0))
 	camera.rotation = Vector3(clampf(-_accel_s * 0.0045, -0.04, 0.05) - 0.015, cam_yaw, _cam_roll)
 	camera.fov = lerpf(camera.fov, 94.0 + spn * 8.0, clampf(dt * 9.0, 0.0, 1.0))
+	if _shake > 0.0:
+		_shake = maxf(0.0, _shake - dt * 2.4)
+		camera.rotation += Vector3(randf_range(-1, 1), randf_range(-1, 1), 0) * _shake * 0.03
