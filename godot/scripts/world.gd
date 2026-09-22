@@ -28,6 +28,7 @@ func build() -> void:
 	var Props := preload("res://scripts/props.gd")
 	Props.build_store(self)
 	Props.build_street(self)
+	preload("res://scripts/town.gd").build(self)
 	_setup_navmesh()
 
 # ------------------------------------------------------------------ helpers

@@ -113,6 +113,10 @@ func _ready() -> void:
 	throwables.name = "Throwables"
 	add_child(throwables)
 	throwables.setup(player, hud)
+	var folk := preload("res://scripts/pedestrians.gd").new()
+	folk.name = "Pedestrians"
+	add_child(folk)
+	folk.setup(car, player)
 
 	# bake the navmesh once the world has settled
 	get_tree().create_timer(0.5, false).timeout.connect(world.bake_nav)
