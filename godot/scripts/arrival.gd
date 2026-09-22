@@ -59,6 +59,15 @@ func begin(c: Node3D, p: CharacterBody3D, pm: ShaderMaterial) -> void:
 	t = 0.0
 	fp = false
 	fired.clear()
+	# per-run state: the act-1 actor was freed, so its feet, clip and camera
+	# target must not carry into act 2
+	feet.clear()
+	clip = ""
+	look_at_s = Vector3.ZERO
+	ankle = 0.0
+	kit_rifle = null
+	kit_cam = null
+	actor_cam_prop = null
 	door = car.model.find_child("door_FL", true, false) as Node3D
 	lid = car.model.find_child("trunk_lid", true, false) as Node3D
 	if door:
@@ -226,7 +235,7 @@ func _process(dt: float) -> void:
 
 	# if time ever lands past the mount without passing through it (a frame
 	# spike, a skip), catch the hand-off up rather than leave him in the world
-	if not fp and not st.tp:
+	if not fp and id == "rifle":
 		_to_first_person()
 
 	match id:
@@ -290,7 +299,7 @@ func _process(dt: float) -> void:
 			_face(boot + Vector3(0, 0.1 + ease * 0.4, 0), dt)
 			post.set_shader_parameter("mix_amt", 1.0)
 
-	if st.tp and not fp:
+	if not fp:
 		var a := P(cam_a.x, cam_a.y, cam_a.z)
 		var b := P(cam_b.x, cam_b.y, cam_b.z)
 		cam.global_position = a.lerp(b, ease)
@@ -317,7 +326,7 @@ func _process(dt: float) -> void:
 		match id:
 			"door":
 				Game.play("car_seatbelt", -10.0)
-				get_tree().create_timer(0.35).timeout.connect(func(): Game.play("car_dooropen", -3.0))
+				get_tree().create_timer(0.35, false).timeout.connect(func(): Game.play("car_dooropen", -3.0))
 			"shut": Game.play("car_doorclose", -3.0)
 			"open":
 				Game.play("car_trunkopen", -3.0)
@@ -328,7 +337,7 @@ func _process(dt: float) -> void:
 				Game.play("vo_camera_live", -2.0)
 			"rifle":
 				Game.play("gun_draw", -2.0)
-				get_tree().create_timer(st.dur * 0.62).timeout.connect(func(): Game.play("car_trunkclose", -3.0))
+				get_tree().create_timer(st.dur * 0.62, false).timeout.connect(func(): Game.play("car_trunkclose", -3.0))
 
 ## the walk cycle raises the hips; plant the lower sole on the ground each frame
 func _plant_feet() -> void:

@@ -18,6 +18,12 @@ var model: Node3D
 var anim: AnimationPlayer
 var agent: NavigationAgent3D
 var head_y := 1.5
+# the web's variants (applyVariant): walker, brute, crawler, screamer
+var variant := "walker"
+var _base_scale := Vector3.ONE
+var _base_y := 0.0
+var _base_head := 1.5
+var _scream_t := 2.0
 var _anim_now := ""
 var _groan_cd := 0.0
 # audio: one voice per person for their whole life, as the web build did
@@ -42,6 +48,9 @@ func _ready() -> void:
 		model = lib.duplicate() as Node3D
 		add_child(model)
 		_fit_height(1.78)
+		_base_scale = model.scale
+		_base_y = model.position.y
+		_base_head = head_y
 		anim = model.find_child("AnimationPlayer", true, false) as AnimationPlayer
 		if anim:
 			for n in ["idle", "run"]:
@@ -55,7 +64,7 @@ func _ready() -> void:
 	voice.position.y = 1.55
 	add_child(voice)
 	agent = NavigationAgent3D.new()
-	agent.path_desired_distance = 0.6
+	agent.path_desired_distance = 0.9     # the navmesh sits ~0.5 m up; 3D distance
 	agent.target_desired_distance = 1.0
 	agent.radius = 0.4
 	agent.height = 1.8
@@ -104,6 +113,7 @@ func spawn(pos: Vector3, wave: int, tgt: Node3D) -> void:
 	hp = max_hp
 	var runner := wave >= 4 and randf() < minf(0.08 * wave, 0.45)
 	speed = randf_range(2.3, 3.0) if runner else randf_range(1.05, 1.7) + wave * 0.03
+	_roll_variant(wave)
 	state = "chase"
 	visible = true
 	process_mode = Node.PROCESS_MODE_INHERIT
@@ -114,6 +124,40 @@ func spawn(pos: Vector3, wave: int, tgt: Node3D) -> void:
 	rotation.y = randf() * TAU
 	_anim_now = ""
 	_play("run", 0.0, speed / 1.6)
+
+## weighted by wave, as the web rolled them: brutes from wave 2, screamers
+## from wave 3, crawlers any time
+func _roll_variant(wave: int) -> void:
+	var w := maxi(1, wave)
+	var pb := minf(0.16, 0.08 + (w - 2) * 0.015) if w >= 2 else 0.0
+	var pc := 0.12
+	var ps := 0.10 if w >= 3 else 0.0
+	var r := randf()
+	variant = "brute" if r < pb else ("crawler" if r < pb + pc else ("screamer" if r < pb + pc + ps else "walker"))
+	if model:
+		model.scale = _base_scale
+		model.position.y = _base_y
+	head_y = _base_head
+	match variant:
+		"brute":          # big, slow, soaks a magazine
+			max_hp *= 2.4
+			speed *= 0.75
+			if model:
+				model.scale = _base_scale * 1.25
+				model.position.y = _base_y * 1.25
+			head_y = _base_head * 1.25
+		"crawler":        # low and quick, dies easily
+			max_hp *= 0.5
+			speed *= 1.15
+			if model:
+				model.scale.y = _base_scale.y * 0.76
+				model.position.y = _base_y * 0.76
+			head_y = _base_head * 0.76
+		"screamer":       # fast, and shrieks as it comes
+			max_hp *= 0.75
+			speed *= 1.9
+			_scream_t = randf_range(1.0, 3.0)
+	hp = max_hp
 
 ## their own shout (the voice they were given), a reaction line, or a scream
 func _say(file: String, vol_db := 0.0, pitch := 1.0) -> void:
@@ -208,6 +252,12 @@ func _physics_process(dt: float) -> void:
 		return
 	attack_cd = maxf(0.0, attack_cd - dt)
 	_groan_cd -= dt
+	if variant == "screamer":
+		_scream_t -= dt
+		if _scream_t <= 0.0:
+			_scream_t = randf_range(2.5, 5.5)
+			if target.global_position.distance_to(global_position) < 15.0 and Game.may_shout(0.4):
+				_say("sfx-enemy-scream.mp3", -1.0, randf_range(0.95, 1.08))
 	var to := target.global_position - global_position
 	to.y = 0.0
 	var dist := to.length()

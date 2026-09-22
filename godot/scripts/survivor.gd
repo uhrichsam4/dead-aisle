@@ -15,9 +15,12 @@ var model: Node3D
 var anim: AnimationPlayer
 var marker: MeshInstance3D
 var voice: AudioStreamPlayer3D
+var agent: NavigationAgent3D
 var fear := 0.25
 var _whimper_cd := 3.0
 var _anim_now := ""
+var _stuck_t := 0.0
+var _best_d := INF
 var _t := 0.0
 
 func _ready() -> void:
@@ -49,6 +52,17 @@ func _ready() -> void:
 	marker.material_override = U.emissive_mat(Color(0.27, 1.0, 0.4), 2.5)
 	marker.position.y = 2.15
 	add_child(marker)
+	# they follow you round the gondolas and through doorways on the navmesh,
+	# the same as the hostiles; straight-line following left people stuck
+	# behind shelving, and the doors will not let you out without them
+	agent = NavigationAgent3D.new()
+	# the baked surface sits up to half a metre over the floor, and these are
+	# 3D distances: at 0.5 a waypoint could never count as reached
+	agent.path_desired_distance = 1.0
+	agent.target_desired_distance = 1.2
+	agent.radius = 0.35
+	agent.height = 1.7
+	add_child(agent)
 	voice = AudioStreamPlayer3D.new()
 	voice.position.y = 1.5
 	voice.unit_size = 3.0
@@ -147,6 +161,12 @@ func _physics_process(dt: float) -> void:
 	elif state == "following":
 		if d > 2.2:
 			var dir := to / maxf(d, 0.001)
+			agent.target_position = target.global_position
+			if not agent.is_navigation_finished():
+				var np := agent.get_next_path_position()
+				var step := Vector3(np.x - global_position.x, 0, np.z - global_position.z)
+				if step.length() > 0.05:
+					dir = step.normalized()
 			# do not bunch up on each other
 			for o in get_tree().get_nodes_in_group("survivors"):
 				if o == self:
@@ -170,6 +190,27 @@ func _physics_process(dt: float) -> void:
 		else:
 			velocity.y = 0.0
 		move_and_slide()
+		# the safety net: someone who has made no progress for three seconds
+		# while you walk away catches up out of sight, behind you - the doors
+		# will not let you out without everyone, so nobody can be left stuck
+		# progress is getting closer to you; shuffling on the spot is not
+		if d <= 4.0 or d < _best_d - 0.5:
+			_best_d = d
+			_stuck_t = 0.0
+		else:
+			_stuck_t += dt
+		if _stuck_t > 3.0:
+			_stuck_t = 0.0
+			_best_d = INF
+			# the body never turns (the camera does), so behind is the camera's +Z
+			var cam = target.get("camera")
+			var bz: Vector3 = (cam as Node3D).global_basis.z if cam else Vector3.BACK
+			bz.y = 0.0
+			bz = bz.normalized() if bz.length() > 0.01 else Vector3.BACK
+			var back: Vector3 = target.global_position + bz * 1.8
+			var map := get_world_3d().navigation_map
+			var p := NavigationServer3D.map_get_closest_point(map, back)
+			global_position = p if p.distance_to(back) < 3.0 else back
 		if model:
 			model.rotation.z = 0.0
 		rotation.y = lerp_angle(rotation.y, atan2(to.x, to.z), clampf(dt * 6.0, 0.0, 1.0))

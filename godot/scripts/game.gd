@@ -5,11 +5,12 @@ signal phase_changed(phase: String)
 signal banner(title: String, sub: String)
 signal objective(id: String, state: String)
 signal settings_changed
+signal points_changed(total: int, label: String, head: bool)
 
 ## drive -> parking -> outside -> inside -> win | dead
 var phase := "menu"
 var act := 1
-var points := 0
+var points := 500            # the web starts every run on 500
 var kills := 0
 var wave := 1
 var run_time := 0.0
@@ -25,7 +26,7 @@ var saved := 0
 func reset_run() -> void:
 	phase = "menu"
 	act = 1
-	points = 0
+	points = 500
 	kills = 0
 	wave = 1
 	run_time = 0.0
@@ -100,6 +101,36 @@ func _ready() -> void:
 		add_child(p)
 		_pool.append(p)
 	load_settings.call_deferred()      # the viewport has to exist first
+
+## The web's heartbeat was synthesised (there is no file for it): a lub-dub
+## of two low decaying thumps, built once as PCM.
+var _heart: AudioStreamWAV
+func heartbeat() -> AudioStreamWAV:
+	if _heart:
+		return _heart
+	var rate := 22050
+	var n := int(rate * 0.62)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	for i in n:
+		var tt := float(i) / rate
+		var v := 0.0
+		for beat in [[0.0, 1.0], [0.24, 0.7]]:
+			var b: float = tt - float(beat[0])
+			if b >= 0.0:
+				v += sin(TAU * 52.0 * b) * exp(-b * 22.0) * float(beat[1])
+		data.encode_s16(i * 2, int(clampf(v * 0.9, -1.0, 1.0) * 32767.0))
+	_heart = AudioStreamWAV.new()
+	_heart.format = AudioStreamWAV.FORMAT_16_BITS
+	_heart.mix_rate = rate
+	_heart.stereo = false
+	_heart.data = data
+	return _heart
+
+## the web's addPoints: the counter, and a pop-up when there is a label
+func add_points(n: int, label := "", head := false) -> void:
+	points += n
+	points_changed.emit(points, label, head)
 
 func set_phase(p: String) -> void:
 	phase = p

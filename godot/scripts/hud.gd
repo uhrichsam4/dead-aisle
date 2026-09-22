@@ -18,6 +18,12 @@ var cross: Control
 var hitmark: Label
 var center_msg: Label
 var radio_lbl: Label
+var points_lbl: Label
+var feed: VBoxContainer
+var markers: Control
+var _marker_lbls: Array[Label] = []
+var vignette: TextureRect
+var _low := 0.0
 var _radio_t := 0.0
 var _banner_timer := 0.0
 var _hit_t := 0.0
@@ -159,6 +165,51 @@ func _ready() -> void:
 	radio_lbl.offset_top = -80
 	radio_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(radio_lbl)
+	# POINTS, top right under the GoPro clock, and the web's score feed
+	points_lbl = _lbl(str(Game.points), 30, Color(1, 0.84, 0.42))
+	points_lbl.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	points_lbl.offset_left = -330
+	points_lbl.offset_right = -24
+	points_lbl.offset_top = 74
+	points_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	root.add_child(points_lbl)
+	var pl := _lbl("POINTS", 11, Color(1, 1, 1, 0.5))
+	pl.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	pl.offset_left = -330
+	pl.offset_right = -24
+	pl.offset_top = 112
+	pl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	root.add_child(pl)
+	feed = VBoxContainer.new()
+	feed.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	feed.offset_left = -330
+	feed.offset_right = -24
+	feed.offset_top = 134
+	feed.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(feed)
+	Game.points_changed.connect(_on_points)
+	# survivor markers are drawn here, projected each frame by main
+	markers = Control.new()
+	markers.set_anchors_preset(Control.PRESET_FULL_RECT)
+	markers.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(markers)
+	# a red edge that closes in as you get badly hurt
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.55, 1.0])
+	g.colors = PackedColorArray([Color(0.6, 0, 0, 0), Color(0.6, 0, 0, 0.05), Color(0.55, 0, 0, 0.85)])
+	var gt := GradientTexture2D.new()
+	gt.gradient = g
+	gt.fill = GradientTexture2D.FILL_RADIAL
+	gt.fill_from = Vector2(0.5, 0.5)
+	gt.fill_to = Vector2(1.05, 1.05)
+	vignette = TextureRect.new()
+	vignette.texture = gt
+	vignette.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vignette.stretch_mode = TextureRect.STRETCH_SCALE
+	vignette.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vignette.modulate.a = 0.0
+	root.add_child(vignette)
+	root.move_child(vignette, 1)      # under the text, over the flash
 	Game.banner.connect(show_banner)
 	Game.objective.connect(set_objective)
 
@@ -204,8 +255,39 @@ func show_banner(title: String, sub := "") -> void:
 	banner_s.modulate.a = 1.0
 	_banner_timer = 3.6
 
+func _on_points(total: int, label: String, head: bool) -> void:
+	points_lbl.text = str(total)
+	if label == "":
+		return
+	var l := _lbl(label, 16, Color("ff9d3b") if head else Color("ffd76a"))
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	feed.add_child(l)
+	feed.move_child(l, 0)
+	while feed.get_child_count() > 5:
+		var last := feed.get_child(feed.get_child_count() - 1)
+		feed.remove_child(last)
+		last.queue_free()
+	var tw := l.create_tween()
+	tw.tween_property(l, "modulate:a", 0.0, 1.0).set_delay(0.3)
+	tw.tween_callback(l.queue_free)
+
+## [screen position, metres] for each hiding survivor in view
+func set_markers(list: Array) -> void:
+	while _marker_lbls.size() < list.size():
+		var l := _lbl("", 14, Color(0.35, 1.0, 0.5))
+		l.size = Vector2(120, 40)
+		markers.add_child(l)
+		_marker_lbls.append(l)
+	for i in _marker_lbls.size():
+		var l := _marker_lbls[i]
+		l.visible = i < list.size()
+		if l.visible:
+			l.text = "▼\n%dm" % int(list[i][1])
+			l.position = (list[i][0] as Vector2) - Vector2(60, 34)
+
 func set_hp(hp: float, max_hp: float) -> void:
 	var k := clampf(hp / max_hp, 0.0, 1.0)
+	_low = clampf((0.5 - k) / 0.35, 0.0, 1.0)     # nothing above half, full by 15%
 	hp_bar.size.x = 256.0 * k
 	hp_bar.color = Color(0.85, 0.92, 0.88) if k > 0.35 else Color(0.95, 0.3, 0.25)
 
@@ -242,6 +324,7 @@ func show_combat_hud(on: bool) -> void:
 func _process(dt: float) -> void:
 	_t += dt
 	flash.color.a = maxf(0.0, flash.color.a - dt * 0.9)
+	vignette.modulate.a = _low * (0.8 + 0.2 * sin(_t * 5.0))
 	# the end cards carry the "click to redeploy" prompt, so they stay up
 	if _banner_timer > 0.0 and Game.phase not in ["dead", "win"]:
 		_banner_timer -= dt

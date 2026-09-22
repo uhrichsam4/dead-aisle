@@ -76,6 +76,11 @@ var _was_aiming := false
 var _was_floor := true
 var _rustle_t := 4.0
 var _low_hp_said := false
+var _dead_t := 0.0
+var heart: AudioStreamPlayer
+var _heart_t := 0.0
+var _holes: Array[Decal] = []
+static var _hole_tex: Texture2D
 
 func _on_settings() -> void:
 	fov_base = float(Game.settings.fov)
@@ -105,6 +110,10 @@ func _ready() -> void:
 	breath.volume_db = -16.0
 	add_child(breath)
 	breath.finished.connect(_next_breath)
+	heart = AudioStreamPlayer.new()
+	heart.stream = Game.heartbeat()
+	heart.volume_db = -3.0
+	add_child(heart)
 
 func activate(on: bool) -> void:
 	active = on
@@ -362,7 +371,7 @@ func _fire() -> void:
 	var from := camera.global_position
 	var dir := -camera.global_basis.z
 	dir = (dir + camera.global_basis.x * randf_range(-spread, spread) + camera.global_basis.y * randf_range(-spread, spread)).normalized()
-	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 250.0, 1 | 4 | 32)   # 32: small props
+	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 250.0, 1 | 4 | 8 | 32)   # 8: the car, 32: small props
 	q.exclude = [get_rid()]
 	q.collide_with_areas = false
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
@@ -379,6 +388,11 @@ func _fire() -> void:
 		Game.hits += 1
 		if headshot:
 			Game.headshots += 1
+		# the web's table: +10 / +15 a hit, +55 / +90 a kill
+		Game.add_points(15 if headshot else 10)
+		if killed:
+			var base := 90 if headshot else 55
+			Game.add_points(base, ("HEADSHOT +%d" if headshot else "+%d") % base, headshot)
 		hit_marker.emit(headshot, killed)
 		if killed and headshot:
 			Game.vo("nice_shot", 15.0, 0.5)
@@ -397,6 +411,40 @@ func _fire() -> void:
 		# glass, crates, pottery: breakable.gd
 		if col is Node and (col as Node).has_method("shoot"):
 			col.call("shoot", w.damage, hit.position, dir)
+		elif not (col is CharacterBody3D):
+			_bullet_hole(hit.position, hit.normal)
+
+## a hole that stays where the round went in; the oldest of 64 is reused
+func _bullet_hole(pos: Vector3, n: Vector3) -> void:
+	if _hole_tex == null:
+		var g := Gradient.new()
+		g.offsets = PackedFloat32Array([0.0, 0.35, 0.6, 1.0])
+		g.colors = PackedColorArray([Color(0.02, 0.018, 0.015, 1), Color(0.05, 0.045, 0.04, 0.95),
+			Color(0.12, 0.11, 0.1, 0.45), Color(0.2, 0.19, 0.18, 0)])
+		var gt := GradientTexture2D.new()
+		gt.gradient = g
+		gt.fill = GradientTexture2D.FILL_RADIAL
+		gt.fill_from = Vector2(0.5, 0.5)
+		gt.fill_to = Vector2(1.0, 0.5)
+		gt.width = 32
+		gt.height = 32
+		_hole_tex = gt
+	var d: Decal
+	if _holes.size() >= 64:
+		d = _holes.pop_front()
+	else:
+		d = Decal.new()
+		d.texture_albedo = _hole_tex
+		d.size = Vector3(0.08, 0.1, 0.08)
+		d.cull_mask = 1 | 32            # walls and props, never people or the car
+		get_tree().current_scene.add_child(d)
+	_holes.append(d)
+	var up := n.normalized()
+	var ref := Vector3.UP if absf(up.y) < 0.95 else Vector3.RIGHT
+	var x := ref.cross(up).normalized()
+	var z := x.cross(up).normalized()
+	d.global_transform = Transform3D(Basis(up, randf() * TAU) * Basis(x, up, z), pos)
+	d.scale = Vector3.ONE * randf_range(0.8, 1.25)
 
 func _impact(pos: Vector3, normal: Vector3, kind := "concrete") -> void:
 	Game.play_at("hit_" + kind, pos, -6.0)
@@ -454,6 +502,7 @@ func take_damage(dmg: float, from: Vector3) -> void:
 func heal_full() -> void:
 	hp = max_hp
 	alive = true
+	_dead_t = 0.0
 	hp_changed.emit(hp, max_hp)
 
 # ------------------------------------------------------------------ loop
@@ -491,7 +540,16 @@ func _physics_process(dt: float) -> void:
 		_move(dt)
 		if Input.is_action_pressed("fire") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not holding:
 			_fire()
-	_reload_tick(dt)
+	if alive and not holding:
+		_reload_tick(dt)
+	# under a third of your health the heart comes up, faster the worse it is
+	if alive and hp < max_hp * 0.35:
+		_heart_t -= dt
+		if _heart_t <= 0.0:
+			_heart_t = lerpf(0.5, 0.95, hp / (max_hp * 0.35))
+			heart.play()
+	else:
+		_heart_t = 0.0
 	if alive and hp < max_hp:
 		regen_cd -= dt
 		if regen_cd <= 0.0:
@@ -537,9 +595,11 @@ func _move(dt: float) -> void:
 		if _rustle_t <= 0.0:
 			_rustle_t = randf_range(4.0, 8.0)
 			Game.play("gear_rustle", -16.0)
-	if speed > 0.5:
+	if reloading:
+		pass                     # the reload clip plays out, walking or not
+	elif speed > 0.5:
 		_play("run" if sprinting else "walk", 0.25)
-	elif not reloading:
+	else:
 		_play("aim", 0.25)
 
 ## what you are standing on: tile in the store, asphalt and paving on the lot
@@ -586,8 +646,12 @@ func _process(dt: float) -> void:
 	if shake > 0.0:
 		camera.position += Vector3(randf_range(-1, 1), randf_range(-1, 1), 0) * shake * 0.05
 	if not alive:
-		camera.rotation.z = lerpf(camera.rotation.z, 0.35, dt * 2.0)
-		camera.position.y = lerpf(camera.position.y, 0.6, dt * 2.0)
+		# the rotation is rebuilt every frame above, so the fall is a function
+		# of time since death rather than a lerp that never accumulates
+		_dead_t += dt
+		var k := 1.0 - exp(-_dead_t * 2.0)
+		camera.rotation.z = 0.35 * k
+		camera.position.y = lerpf(EYE, 0.6, k)
 	camera.fov = lerpf(fov_base, fov_base * 0.66, ads_t)
 	# the viewmodel camera rides the main one
 	vm_cam.global_transform = camera.global_transform

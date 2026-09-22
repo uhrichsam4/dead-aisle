@@ -67,7 +67,9 @@ func _spawn(type: String, at: Vector3) -> void:
 	var holder := Node3D.new()          # the item spins about its middle
 	holder.name = type
 	var m := src.duplicate() as Node3D
-	m.transform = Transform3D.IDENTITY if type == "axe" else Transform3D(Basis.from_scale(src.scale), Vector3.ZERO)
+	# keep the import basis (the trolley is rotated upright in the file), drop
+	# only the offset
+	m.transform = Transform3D.IDENTITY if type == "axe" else Transform3D(src.basis, Vector3.ZERO)
 	holder.add_child(m)
 	var a := U.local_aabb(holder)
 	var ext := a.size.y if d.by == "y" else maxf(a.size.x, maxf(a.size.y, a.size.z))
@@ -132,6 +134,12 @@ func throw_held() -> void:
 	var n: Node3D = t.node
 	var cam: Camera3D = player.camera
 	var at: Vector3 = cam.global_transform * t.def.hold
+	# pressed against a wall, the hold point is already through it: start
+	# the flight on this side
+	var sq := PhysicsRayQueryParameters3D.create(cam.global_position, at, 1 | 8 | 32)
+	var sh := get_world_3d().direct_space_state.intersect_ray(sq)
+	if not sh.is_empty():
+		at = sh.position + sh.normal * float(t.def.radius)
 	n.get_parent().remove_child(n)
 	add_child(n)
 	U.set_layers(n, 1)
@@ -162,6 +170,7 @@ func drop_held() -> void:
 	t.state = "gone"
 	player.holding = false
 	player.show_rifle(true)
+	player.refresh_ammo()
 
 func _unhandled_input(e: InputEvent) -> void:
 	if not e.is_action_pressed("throw") or player == null or not player.active or not player.alive or player.input_locked:
@@ -220,6 +229,8 @@ func _physics_process(dt: float) -> void:
 				var dir := Vector3(t.vel.x, 0, t.vel.z).normalized()
 				var killed: bool = h.take_hit(float(t.def.damage), chest + Vector3(0, 0.05, 0), dir)
 				player.hit_marker.emit(false, killed)
+				if killed:
+					Game.add_points(55, "+55")
 				player.shake = maxf(player.shake, 0.35)
 				t.vel *= -0.22
 				t.vel.y = 2.4
@@ -232,9 +243,12 @@ func _physics_process(dt: float) -> void:
 				n.global_position = p0
 			continue
 		# walls, shelving, props: bounce off, smash anything breakable
+		var floor_y := 0.0
 		if seg.length() > 0.0001:
-			var q := PhysicsRayQueryParameters3D.create(p0, p1 + seg.normalized() * r, 1 | 32)
+			var q := PhysicsRayQueryParameters3D.create(p0, p1 + seg.normalized() * r, 1 | 8 | 32)
 			var hit := space.intersect_ray(q)
+			if not hit.is_empty() and hit.normal.y >= 0.7 and seg.y < 0.0:
+				floor_y = hit.position.y              # a shelf, a counter, a crate top
 			if not hit.is_empty() and hit.normal.y < 0.7:
 				var nrm: Vector3 = hit.normal
 				var col = hit.collider
@@ -250,7 +264,7 @@ func _physics_process(dt: float) -> void:
 				t.spin *= 0.6
 				p1 = hit.position + nrm * r
 		# the floor
-		var rest: float = t.rest + 0.02
+		var rest: float = floor_y + t.rest + 0.02
 		if p1.y <= rest:
 			p1.y = rest
 			if t.def.get("burst", false) and t.life > 0.12:

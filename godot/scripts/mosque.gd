@@ -402,6 +402,9 @@ func _setup_navmesh() -> void:
 	nm.agent_max_climb = 0.3
 	nm.cell_size = 0.25
 	nm.cell_height = 0.25
+	# prop tops (a 0.5 m container, a barrel) bake as tiny walkable islands,
+	# and anyone standing next to one gets pathed onto it: drop the islands
+	nm.region_min_size = 16.0
 	nm.filter_baking_aabb = AABB(Vector3(X - 15, -1, mqz(-18)), Vector3(30, 5, mqz(40) - mqz(-18)))
 	navigation_mesh = nm
 

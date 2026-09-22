@@ -190,6 +190,9 @@ func _physics_process(dt: float) -> void:
 	var fwd := -global_basis.z
 	velocity = fwd * speed + Vector3(0, -9.0, 0)
 	move_and_slide()
+	# the web's clamp: the road ends, the car does not drive off the world
+	global_position.x = clampf(global_position.x, -1022.0, 162.0)
+	global_position.z = clampf(global_position.z, 15.0, 39.0)
 	# a wall stops you, it does not slide you along it at full speed
 	for i in get_slide_collision_count():
 		var c := get_slide_collision(i)

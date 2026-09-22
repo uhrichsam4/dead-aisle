@@ -39,7 +39,8 @@ var arrival: Node
 var survivors: Array = []
 var cleared := false
 var rescued := 0
-var inside_waves := 0
+var inside_left := 0        # hostiles still to come inside (the web's trickle)
+var _trickle_t := 0.0
 var menu: CanvasLayer
 var throwables: Node3D
 var menu_cam: Camera3D
@@ -108,8 +109,8 @@ func _ready() -> void:
 	throwables.setup(player, hud)
 
 	# bake the navmesh once the world has settled
-	get_tree().create_timer(0.5).timeout.connect(world.bake_nav)
-	get_tree().create_timer(1.2).timeout.connect(mosque.bake_nav)
+	get_tree().create_timer(0.5, false).timeout.connect(world.bake_nav)
+	get_tree().create_timer(1.2, false).timeout.connect(mosque.bake_nav)
 
 	menu = MenuScript.new()
 	menu.name = "Menu"
@@ -227,6 +228,7 @@ func _start_drive() -> void:
 	Game.act = 1
 	Game.run_time = 0.0
 	Game.set_phase("drive")
+	hud.visible = true                  # a REDEPLOY skips the lobby that shows it
 	hud.set_objectives([["drive", "DRIVE TO TOPS SUPERMARKET"], ["park", "PARK IN THE LOT"],
 		["enter", "GET INSIDE"], ["clear", "CLEAR EVERY THREAT"],
 		["rescue", "FIND THE 4 SURVIVORS"], ["extract", "WALK THEM OUT THROUGH THE DOORS"]])
@@ -237,9 +239,9 @@ func _start_drive() -> void:
 	car.take_wheel(true)
 	post.set_shader_parameter("mix_amt", 0.25)   # a dashcam, not yet the GoPro
 	Game.play("car_seatbelt", -8.0)
-	get_tree().create_timer(0.7).timeout.connect(func(): Game.play("car_start", -5.0))
-	get_tree().create_timer(1.6).timeout.connect(func(): Game.play_file("vo-deploy.mp3", -2.0))
-	get_tree().create_timer(5.0).timeout.connect(func(): Game.vo("driving", 60.0))
+	get_tree().create_timer(0.7, false).timeout.connect(func(): Game.play("car_start", -5.0))
+	get_tree().create_timer(1.6, false).timeout.connect(func(): if Game.phase == "drive": Game.play_file("vo-deploy.mp3", -2.0))
+	get_tree().create_timer(5.0, false).timeout.connect(func(): if Game.phase == "drive": Game.vo("driving", 60.0))
 
 func _on_parked() -> void:
 	Game.set_phase("parking")
@@ -288,28 +290,40 @@ func _enter_store() -> void:
 	Game.set_objective("clear", "active")
 	Game.set_objective("rescue", "active")
 	Game.say_banner("INSIDE", "CLEAR THE PRAYER HALL" if Game.act == 2 else "CLEAR THE STORE")
-	inside_waves = 2
-	_inside_wave()
+	# the web streams them in rather than dropping two blocks of ten: sixteen
+	# (twenty in act 2), never more than ten on their feet at once
+	inside_left = 16 + (Game.act - 1) * 4
+	_trickle_t = 0.0
+	for i in 6:
+		_trickle_one()
+	get_tree().create_timer(2.2, false).timeout.connect(func(): if Game.phase == "inside": Game.vo("contact", 10.0))
 
-func _inside_wave() -> void:
-	if inside_waves < 2:
-		Game.vo("clear", 6.0)            # a breath between waves
-		get_tree().create_timer(2.2).timeout.connect(func(): Game.vo("contact", 10.0))
-	inside_waves -= 1
+## one more from somewhere you are not standing
+func _trickle_one() -> void:
+	if inside_left <= 0:
+		return
 	var pts := _inside_pts()
 	pts.shuffle()
-	for i in mini(8 + Game.wave * 2, pts.size()):
-		_spawn(pts[i])
+	var pick: Vector3 = pts[0]
+	for p in pts:
+		if (p as Vector3).distance_to(player.global_position) > 7.0:
+			pick = p
+			break
+	_spawn(pick)
+	inside_left -= 1
 
+## the web's fixed wave numbers: 3 for the fight outside, 4 inside (where
+## the runners appear), one tougher in act 2
 func _spawn(pos: Vector3) -> void:
+	var w := (4 if Game.phase == "inside" else 3) + Game.act - 1
 	for h in hostiles:
 		if h.state == "idle":
-			h.spawn(pos, Game.wave, player)
+			h.spawn(pos, w, player)
 			return
 
 func _on_survivor_found(_s: Node) -> void:
 	rescued += 1
-	Game.points += 150
+	Game.add_points(150, "SURVIVOR +150")
 	Game.say_banner("SURVIVOR FOUND", "%d OF %d - THEY ARE FOLLOWING YOU" % [rescued, survivors.size()])
 	if rescued >= survivors.size():
 		Game.set_objective("rescue", "done")
@@ -346,7 +360,6 @@ func _check_extract() -> void:
 
 func _on_kill(_h: Node) -> void:
 	Game.kills += 1
-	Game.points += 100
 
 func _threats() -> int:
 	var n := 0
@@ -361,7 +374,7 @@ func _start_act2() -> void:
 	Game.wave += 1
 	cleared = false
 	rescued = 0
-	inside_waves = 0
+	inside_left = 0
 	for h in hostiles:
 		h.despawn()
 	for i in survivors.size():
@@ -370,6 +383,8 @@ func _start_act2() -> void:
 	player.activate(false)
 	player.heal_full()
 	player.mag = player.MAG_SIZE
+	player.reloading = false
+	player.refresh_ammo()
 	car.global_position = Vector3(7.5, 0, 36.5)
 	car.rotation.y = PI / 2
 	car.speed = 0.0
@@ -386,30 +401,31 @@ func _start_act2() -> void:
 	Game.set_phase("drive")
 	Game.say_banner("NEW OBJECTIVE", "AL-SALAAM MOSQUE — DRIVE WEST")
 	Game.play("car_seatbelt", -8.0)
-	get_tree().create_timer(0.7).timeout.connect(func(): Game.play("car_start", -5.0))
-	get_tree().create_timer(3.0).timeout.connect(func(): Game.vo("driving", 0.0))
+	get_tree().create_timer(0.7, false).timeout.connect(func(): Game.play("car_start", -5.0))
+	get_tree().create_timer(3.0, false).timeout.connect(func(): Game.vo("driving", 0.0))
 
 func _on_died() -> void:
 	Game.set_phase("dead")
 	throwables.drop_held()
 	var where := "AL-SALAAM MOSQUE" if Game.act == 2 else "TOPS SUPERMARKET"
 	# a moment on the floor before the card comes up
-	get_tree().create_timer(1.6).timeout.connect(func(): menu.show_dead(where))
+	get_tree().create_timer(1.6, false).timeout.connect(func(): menu.show_dead(where))
 
 func _win() -> void:
 	if Game.act == 1:
-		Game.points += 400
+		Game.add_points(400, "TOPS CLEAR +400")
 		Game.say_banner("TOPS CLEAR", "+400 · THE MOSQUE IS NEXT")
 		Game.vo("clear", 0.0)
 		Game.set_phase("between")
-		get_tree().create_timer(4.0).timeout.connect(_start_act2)
+		get_tree().create_timer(4.0, false).timeout.connect(_start_act2)
 		return
 	Game.set_phase("win")
-	Game.points += 500
+	player.activate(false)              # no walking about under the card; breathing stops
+	Game.add_points(500, "EXTRACTED +500")
 	Game.saved = rescued
 	Game.vo("clear", 0.0)
-	get_tree().create_timer(1.6).timeout.connect(func(): Game.play_file("vo-win.mp3", -2.0))
-	get_tree().create_timer(2.4).timeout.connect(menu.show_win)
+	get_tree().create_timer(1.6, false).timeout.connect(func(): Game.play_file("vo-win.mp3", -2.0))
+	get_tree().create_timer(2.4, false).timeout.connect(menu.show_win)
 
 # ------------------------------------------------------------------ loop
 
@@ -433,18 +449,33 @@ func _process(dt: float) -> void:
 			elif p.z < 14.6 and absf(p.x) < 2.2:
 				_enter_store()
 		"inside":
-			if _threats() == 0 and not cleared:
-				if inside_waves > 0:
-					_inside_wave()
-				else:
-					cleared = true
-					Game.set_objective("clear", "done")
-					if rescued < survivors.size():
-						Game.say_banner("MOSQUE CLEAR" if Game.act == 2 else "STORE CLEAR", "FIND THE SURVIVORS - %d LEFT" % (survivors.size() - rescued))
-					_maybe_extract_objective()
+			if inside_left > 0:
+				_trickle_t -= dt
+				if _trickle_t <= 0.0 and _threats() < 10:
+					_trickle_t = 1.1
+					_trickle_one()
+			elif _threats() == 0 and not cleared:
+				cleared = true
+				Game.vo("clear", 0.0)
+				Game.set_objective("clear", "done")
+				if rescued < survivors.size():
+					Game.say_banner("MOSQUE CLEAR" if Game.act == 2 else "STORE CLEAR", "FIND THE SURVIVORS - %d LEFT" % (survivors.size() - rescued))
+				_maybe_extract_objective()
 			_check_extract()
 	var n := _threats()
 	hud.set_center("THREATS: %d" % n if Game.phase == "inside" and n > 0 else "")
+	# a marker over every survivor still hiding, through the walls
+	var marks := []
+	if Game.phase in ["outside", "inside"] and player.alive:
+		var cam: Camera3D = player.camera
+		for s in survivors:
+			if s.state != "hiding":
+				continue
+			var wp: Vector3 = (s as Node3D).global_position + Vector3(0, 2.3, 0)
+			if cam.is_position_behind(wp):
+				continue
+			marks.append([cam.unproject_position(wp), wp.distance_to(cam.global_position)])
+	hud.set_markers(marks)
 	if Game.phase in ["outside", "inside"] and player.alive:
 		_watch_your_back()
 
