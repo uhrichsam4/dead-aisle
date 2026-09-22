@@ -121,6 +121,7 @@ func _setup_input() -> void:
 		"reload": [KEY_R], "interact": [KEY_E], "radio": [KEY_E],
 		"weapon_1": [KEY_1], "weapon_2": [KEY_2], "weapon_3": [KEY_3], "next_weapon": [KEY_Q],
 		"skip": [KEY_ENTER, KEY_SPACE], "pause": [KEY_ESCAPE], "handbrake": [KEY_SPACE],
+		"throw": [KEY_F],
 	}
 	for a in keys:
 		if not InputMap.has_action(a):

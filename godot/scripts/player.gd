@@ -38,6 +38,7 @@ var max_hp := 100.0
 var alive := true
 var active := false          # false while driving / in cutscenes
 var input_locked := false    # on camera, but the arrival is steering the view
+var holding := false         # a cart / melon / axe in hand: no rifle (throwables.gd)
 var yaw := PI
 var pitch := 0.0
 var fov_base := 80.0
@@ -290,6 +291,9 @@ func _next_breath() -> void:
 # ------------------------------------------------------------------ weapons
 
 ## the arrival hands you the rifle only when you take it out of the boot
+func refresh_ammo() -> void:
+	ammo_changed.emit(mag, MAG_SIZE, WEAPONS[weapon_index].name)
+
 func show_rifle(on: bool) -> void:
 	if gun_root:
 		gun_root.visible = on
@@ -463,6 +467,8 @@ func _unhandled_input(e: InputEvent) -> void:
 		var inv := -1.0 if Game.settings.invert else 1.0
 		yaw -= m.relative.x * sens
 		pitch = clampf(pitch - m.relative.y * sens * inv, -1.45, 1.45)
+	elif holding:
+		return               # hands are full: no reload, no weapon swap
 	elif e.is_action_pressed("reload"):
 		try_reload()
 	elif e.is_action_pressed("weapon_1"):
@@ -483,7 +489,7 @@ func _physics_process(dt: float) -> void:
 		return
 	if alive:
 		_move(dt)
-		if Input.is_action_pressed("fire") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		if Input.is_action_pressed("fire") and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not holding:
 			_fire()
 	_reload_tick(dt)
 	if alive and hp < max_hp:
@@ -557,7 +563,7 @@ func _surface() -> String:
 func _process(dt: float) -> void:
 	if not active:
 		return
-	var aiming := Input.is_action_pressed("aim") and alive and not reloading and not input_locked
+	var aiming := Input.is_action_pressed("aim") and alive and not reloading and not input_locked and not holding
 	if aiming != _was_aiming:
 		Game.play("gun_adsin" if aiming else "gun_adsout", -10.0)
 		_was_aiming = aiming

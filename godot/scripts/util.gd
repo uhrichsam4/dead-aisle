@@ -173,6 +173,37 @@ static func set_layers(root: Node, layer_bits: int) -> void:
 	for c in root.get_children():
 		set_layers(c, layer_bits)
 
+## Fold every mesh under root into one MeshInstance3D, a surface per
+## material: a forty-part prop becomes a couple of draws. Transforms are
+## baked relative to root.
+static func merge_by_material(root: Node3D) -> MeshInstance3D:
+	var tools := {}
+	var stack: Array = [[root, Transform3D.IDENTITY]]
+	while not stack.is_empty():
+		var e: Array = stack.pop_back()
+		var n: Node = e[0]
+		var xf: Transform3D = e[1]
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh:
+			var mi := n as MeshInstance3D
+			for si in mi.mesh.get_surface_count():
+				var mat := mi.get_active_material(si)
+				if not tools.has(mat):
+					var st := SurfaceTool.new()
+					st.begin(Mesh.PRIMITIVE_TRIANGLES)
+					tools[mat] = st
+				(tools[mat] as SurfaceTool).append_from(mi.mesh, si, xf)
+		for c in n.get_children():
+			if c is Node3D:
+				stack.append([c, xf * (c as Node3D).transform])
+	var am := ArrayMesh.new()
+	for mat in tools:
+		var st: SurfaceTool = tools[mat]
+		st.set_material(mat)
+		st.commit(am)
+	var out := MeshInstance3D.new()
+	out.mesh = am
+	return out
+
 static func set_shadows(root: Node, on: bool) -> void:
 	if root is GeometryInstance3D:
 		(root as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if on else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

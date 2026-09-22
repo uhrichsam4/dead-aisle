@@ -13,6 +13,7 @@ const ArrivalScript := preload("res://scripts/arrival.gd")
 const SurvivorScript := preload("res://scripts/survivor.gd")
 const MosqueScript := preload("res://scripts/mosque.gd")
 const MenuScript := preload("res://scripts/menu.gd")
+const ThrowScript := preload("res://scripts/throwables.gd")
 # act 2 tables, in mosque-LOCAL coordinates (the web build's own numbers)
 const OUTSIDE_PTS2 := [[-20, 18], [20, 19], [-8, 28], [14, 29], [-16, 24], [6, 22]]
 const INSIDE_PTS2 := [[-21.7, -12.7], [-12.6, -12.7], [-3.5, -12.7], [5.7, -12.7], [14.8, -12.7],
@@ -40,6 +41,7 @@ var cleared := false
 var rescued := 0
 var inside_waves := 0
 var menu: CanvasLayer
+var throwables: Node3D
 var menu_cam: Camera3D
 var post_layer: CanvasLayer
 var moon: DirectionalLight3D
@@ -100,6 +102,10 @@ func _ready() -> void:
 	player.damaged.connect(hud.on_damage)
 	player.died.connect(_on_died)
 	player.select_weapon(0, true)
+	throwables = ThrowScript.new()
+	throwables.name = "Throwables"
+	add_child(throwables)
+	throwables.setup(player, hud)
 
 	# bake the navmesh once the world has settled
 	get_tree().create_timer(0.5).timeout.connect(world.bake_nav)
@@ -360,6 +366,7 @@ func _start_act2() -> void:
 		h.despawn()
 	for i in survivors.size():
 		survivors[i].place(_mq(SURV_SPOTS2[i]) + Vector3(0, -0.05, 0), player)
+	throwables.act2()
 	player.activate(false)
 	player.heal_full()
 	player.mag = player.MAG_SIZE
@@ -384,6 +391,7 @@ func _start_act2() -> void:
 
 func _on_died() -> void:
 	Game.set_phase("dead")
+	throwables.drop_held()
 	var where := "AL-SALAAM MOSQUE" if Game.act == 2 else "TOPS SUPERMARKET"
 	# a moment on the floor before the card comes up
 	get_tree().create_timer(1.6).timeout.connect(func(): menu.show_dead(where))
