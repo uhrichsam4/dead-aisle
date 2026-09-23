@@ -29,6 +29,7 @@ func build() -> void:
 	Props.build_store(self)
 	Props.build_street(self)
 	preload("res://scripts/town.gd").build(self)
+	preload("res://scripts/street_detail.gd").build(self)
 	_setup_navmesh()
 
 # ------------------------------------------------------------------ helpers
@@ -145,37 +146,42 @@ func _materials() -> void:
 	wall.uv1_scale = Vector3(1.0 / 3.14, 1.0 / 2.5, 1.0 / 3.14)
 	M.wall = wall
 
-	var ceil := StandardMaterial3D.new()
+	# the procedural tile layout over the scanned tile's relief
+	var ceil := U.cc0("OfficeCeiling001", 3.6, Color(0.74, 0.74, 0.72), 1.0)
 	ceil.albedo_texture = U.ceiling_tile()
-	ceil.albedo_color = Color(0.72, 0.72, 0.7)
-	ceil.roughness = 1.0
-	ceil.uv1_triplanar = true
-	ceil.uv1_world_triplanar = true
-	ceil.uv1_scale = Vector3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)
 	M.ceil = ceil
 
 	M.floor = U.surface_mat("res://assets/tex/tiles2_c.jpg", "res://assets/tex/tiles2_n.jpg", "res://assets/tex/tiles2_r.jpg",
 		Vector3(2.2, 2.2, 2.2), Color(0.62, 0.61, 0.58), 0.46, 0.05)
-	M.road = U.surface_mat("res://assets/tex/road2_c.jpg", "res://assets/tex/road2_n.jpg", "res://assets/tex/road2_r.jpg",
-		Vector3(5, 5, 5), Color(0.8, 0.8, 0.8), 0.85)
-	M.lot = U.surface_mat("res://assets/tex/road2_c.jpg", "res://assets/tex/road2_n.jpg", "res://assets/tex/road2_r.jpg",
-		Vector3(3.4, 3.4, 3.4), Color(0.72, 0.72, 0.72), 0.8)
-	M.grass = U.surface_mat("res://assets/tex/grass2_c.jpg", "res://assets/tex/grass2_n.jpg", "",
-		Vector3(2.8, 2.8, 2.8), Color(0.62, 0.66, 0.58), 1.0)
+	# ambientCG scans: the road is the older, crazed surface; the lot a newer
+	# seal. Both a touch lifted - raw asphalt under ACES reads as a hole
+	M.road = U.cc0("Asphalt026C", 4.0, Color(1.12, 1.1, 1.06), 1.0)
+	M.lot = U.cc0("Asphalt025C", 3.2, Color(1.15, 1.15, 1.12), 1.0)
+	# the scans' roughness maps are a wet road's: dry, worn asphalt is matte
+	U.even_rough(M.road, 0.93)
+	U.even_rough(M.lot, 0.93)
+	M.grass = U.even_rough(U.cc0("Grass004", 2.4, Color(0.82, 0.84, 0.72)), 1.0)
 	M.dirt = U.surface_mat("res://assets/tex/ground2_c.jpg", "res://assets/tex/ground2_n.jpg", "",
 		Vector3(4, 4, 4), Color(0.45, 0.44, 0.42), 1.0)
-	M.brick = U.surface_mat("res://assets/tex/brick.jpg", "res://assets/tex/brick_n.jpg", "",
-		Vector3(2.6, 1.6, 2.6), Color(0.85, 0.8, 0.76), 0.95)
-	M.clad = U.surface_mat("res://assets/tex/wall_lit.jpg", "res://assets/tex/wall_n.jpg", "",
-		Vector3(3.2, 2.5, 3.2), Color("c6b69c"), 0.95)       # the web's MAT_WALL
-	M.walk = U.flat_mat(Color(0.52, 0.52, 0.5), 0.92)
-	M.metal = U.flat_mat(Color(0.61, 0.63, 0.64), 0.4, 0.75)
-	M.metal_dark = U.flat_mat(Color(0.34, 0.36, 0.37), 0.55, 0.6)
-	M.board = U.flat_mat(Color(0.48, 0.37, 0.26), 0.95)
-	M.paint = U.flat_mat(Color(0.86, 0.86, 0.84), 0.7)
-	M.paint_y = U.flat_mat(Color(0.86, 0.66, 0.14), 0.7)
-	M.red = U.flat_mat(Color(0.75, 0.08, 0.07), 0.6)
-	M.dark = U.flat_mat(Color(0.09, 0.1, 0.11), 0.8)
+	# the facade back blocks: weathered red brick, about a 1.2 m repeat
+	M.brick = U.cc0("Bricks097", 1.3, Color(0.86, 0.84, 0.82), 1.0)
+	# the storefront parapet, pilasters and window surrounds
+	M.clad = U.cc0("Bricks085", 1.2, Color(0.9, 0.86, 0.82), 1.0)       # the web's MAT_WALL
+	# pavements and the apron: broom-finished concrete; kerb stones precast
+	M.walk = U.cc0("Concrete042A", 2.4, Color(1.18, 1.16, 1.12), 1.0)
+	M.kerb = U.cc0("Concrete012", 1.6, Color(0.95, 0.94, 0.9), 1.0)
+	M.metal = U.cc0("Metal024", 1.2, Color(0.9, 0.92, 0.94), 1.0, 0.45)
+	M.metal_dark = U.cc0("Metal024", 1.2, Color(0.5, 0.52, 0.54), 1.0, 0.4)
+	# weathered plywood on the windows, greyed by the sun
+	M.board = U.cc0("Wood087", 1.2, Color(0.56, 0.48, 0.39), 1.0)
+	# road paint takes the asphalt's relief and roughness so it reads worn
+	M.paint = U.surface_mat("", "res://assets/cc0/Asphalt025C/Asphalt025C_1K-JPG_NormalGL.jpg",
+		"", Vector3(3.2, 3.2, 3.2), Color(0.74, 0.74, 0.71), 0.9)
+	M.paint_y = U.surface_mat("", "res://assets/cc0/Asphalt025C/Asphalt025C_1K-JPG_NormalGL.jpg",
+		"", Vector3(3.2, 3.2, 3.2), Color(0.8, 0.6, 0.14), 0.9)
+	# chipped enamel over steel: the canopy, its posts, the bollards
+	M.red = U.cc0("PaintedMetal010", 1.4, Color(0.78, 0.09, 0.08), 1.0, 0.15)
+	M.dark = U.cc0("PaintedMetal010", 1.4, Color(0.13, 0.14, 0.15), 1.0, 0.15)
 	M.sign = U.flat_mat(Color(0.93, 0.93, 0.91), 0.5)
 	M.tube = U.emissive_mat(Color(0.85, 0.95, 0.89), 3.0)
 	M.tube_dead = U.flat_mat(Color(0.17, 0.19, 0.17), 0.9)
@@ -233,8 +239,17 @@ func _ground() -> void:
 	# the north pavement runs the whole road; the south kerb breaks for the
 	# TOPS driveway (x 6..18) and the mosque gate (x -903..-897)
 	box(Vector3(1200, 0.14, 2.5), Vector3(-430, 0.07, 41.35), M.walk, false)
+	_kerb(-430, 1200, 40.19)
 	for seg in [[-27, 66, 31.15, 1.5], [39, 42, 31.15, 1.5], [-477.5, 835, 31.15, 1.5], [-966.5, 127, 31.15, 1.5]]:
 		box(Vector3(seg[1], 0.14, seg[3]), Vector3(seg[0], 0.07, seg[2]), M.walk, false)
+		_kerb(seg[0], seg[1], 31.81)
+		_kerb(seg[0], seg[1], 30.49)
+
+## a precast kerb line proud of the pavement edge by a centimetre, so the
+## pavement reads as a slab on a kerb rather than one white block. Visual only
+func _kerb(cx: float, length: float, z: float) -> void:
+	var k := box(Vector3(length + 0.02, 0.16, 0.2), Vector3(cx, 0.08, z), M.kerb, false)
+	k.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 # ------------------------------------------------------------------ store shell
 
@@ -248,10 +263,19 @@ func _store_shell() -> void:
 	# front wall with the door gap at x -2..2
 	box(Vector3(20, 5, 0.4), Vector3(-12, 2.5, 15), M.wall)
 	box(Vector3(20, 5, 0.4), Vector3(12, 2.5, 15), M.wall)
+	# its street face in the storefront brick, not the painted block inside
+	for sx in [-12.0, 12.0]:
+		# 15.235: clear of the door header's face at 15.225, which it overlaps by 0.3 m
+		box(Vector3(20, 5, 0.02), Vector3(sx, 2.5, 15.235), M.clad, false)
 	box(Vector3(4.6, 1.6, 0.45), Vector3(0, 4.2, 15), M.wall)
 	for dxp in [-2.1, 2.1]:
 		box(Vector3(0.25, 3.4, 0.5), Vector3(dxp, 1.7, 15), M.metal_dark)
 	# the boarded-up shop windows, both faces
+	var nails: Array[Transform3D] = []
+	# the nails get their own generator: drawing from `rng` here shifted every
+	# random placement after it (stock, props) and moved the whole layout
+	var nrng := RandomNumberGenerator.new()
+	nrng.seed = 77
 	for wx in [-16.0, -8.0, 8.0, 16.0]:
 		for side in [-1, 1]:
 			var z: float = 15.0 + side * 0.26
@@ -261,6 +285,12 @@ func _store_shell() -> void:
 			for k in 3:
 				var b := box(Vector3(4.2, 0.9, 0.05), Vector3(wx, 1.0 + k * 1.05, z + side * 0.04), M.board, false)
 				b.rotation.z = rng.randf_range(-0.05, 0.05)
+				# nail heads along the studs, on the face you see
+				for nx in [-1.95, -0.65, 0.65, 1.95]:
+					for ny in [-0.33, 0.33]:
+						var off := Vector3(nx + nrng.randf_range(-0.03, 0.03), ny + nrng.randf_range(-0.02, 0.02), side * 0.027)
+						nails.append(Transform3D(Basis(Vector3.RIGHT, PI / 2), b.transform * off))
+	_nails(nails)
 
 	# fluorescent rig: on/off pattern straight from the web build
 	var tubes := [[-14, -10, true], [-14, 0, true], [-14, 10, true], [0, -10, true], [0, 0, false],
@@ -269,6 +299,27 @@ func _store_shell() -> void:
 		tubes.append([rng.randf_range(-20, 20), rng.randf_range(-13, 13), false])
 	for t in tubes:
 		_tube(Vector3(t[0], 4.15, t[1]), t[2])
+
+## every nail in the boarding as one MultiMesh: a couple of hundred heads, one draw
+func _nails(xfs: Array[Transform3D]) -> void:
+	var head := CylinderMesh.new()
+	head.top_radius = 0.011
+	head.bottom_radius = 0.011
+	head.height = 0.008
+	head.radial_segments = 8
+	head.rings = 1
+	head.material = U.flat_mat(Color(0.2, 0.17, 0.15), 0.55, 0.6)
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = head
+	mm.instance_count = xfs.size()
+	for i in xfs.size():
+		mm.set_instance_transform(i, xfs[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.visibility_range_end = 40.0
+	add_child(mmi)
 
 func _tube(pos: Vector3, on: bool) -> void:
 	var g := Node3D.new()
@@ -449,6 +500,7 @@ const FACADES := ["wP_Facade_A", "wP_Facade_B", "wP_Facade_C", "wP_Facade_D", "w
 func _street() -> void:
 	var lib := "res://assets/street.glb"
 	U.fix_materials(U.glb(lib))
+	_facade_look(U.glb(lib))
 	var dims := {}
 	for n in FACADES:
 		var src := U.glb(lib).find_child(n, true, false) as Node3D
@@ -478,6 +530,75 @@ func _street() -> void:
 			place(lib, trees[rng.randi() % 4], Vector3(tx + rng.randf_range(-3, 3), 0, 42.0 + rng.randf_range(-1.5, 1.5)),
 				rng.randf_range(0, TAU), rng.randf_range(0.55, 0.85))
 		tx += 17.0
+
+## The facade prefabs' own materials, made to hold up at 0.5 render scale:
+##  - mirror-smooth opaque walls (roughness 0, no map) sparkled into grey
+##    noise under FSR - they get a real roughness
+##  - their UVs run 20-110 repeats a metre, so the big flat-coloured walls get
+##    a world-triplanar render and relief instead, tinted by their own colour
+##  - the glass was alpha 0 (invisible), so the windows read as black holes;
+##    it gets a dark, faintly reflective tint
+##  - Facade_A is an open fire-escape frame with no wall: its pale rails
+##    over the brick block behind were the "glitchy grey" facades. They are
+##    painted iron now, and _facade_row puts a wall right behind the frame
+const FACADE_WALLS := ["stone 1", "stone dark", "walls a", "walls darker", "wall grey", "stone wht",
+	"wall stone panels", "white ceiling panels", "seal", "seal ss"]
+
+func _facade_look(lib: Node) -> void:
+	if lib == null:
+		return
+	var seen := {}
+	for fname in FACADES:
+		var f := lib.find_child(fname, true, false)
+		if f == null:
+			continue
+		for mi in f.find_children("*", "MeshInstance3D", true, false) + ([f] if f is MeshInstance3D else []):
+			var mesh: Mesh = (mi as MeshInstance3D).mesh
+			if mesh == null:
+				continue
+			for i in mesh.get_surface_count():
+				var m := mesh.surface_get_material(i) as StandardMaterial3D
+				if m == null or seen.has(m):
+					continue
+				seen[m] = true
+				var n := m.resource_name.to_lower().strip_edges()
+				var glassy := m.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED and (n.contains("gl") or n.contains("glass"))
+				if glassy:
+					# the importer made these scissor cutouts at alpha 0: blend them
+					m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+					m.albedo_color = Color(0.045, 0.055, 0.065, maxf(m.albedo_color.a, 0.62))
+					m.roughness = 0.06
+					m.metallic = 0.0
+					m.metallic_specular = 0.7
+					continue
+				if n.begins_with("interior") or n == "inteiror":
+					# the room behind the glass: dim and matte, not a black mirror
+					m.albedo_color = Color(0.07, 0.065, 0.06)
+					m.roughness = 1.0
+					continue
+				if fname == "wP_Facade_A" and (n == "metal rail" or n == "ss" or n == "metal dark"):
+					m.albedo_color = Color(0.09, 0.09, 0.095)
+					m.metallic = 0.3
+					m.roughness = 0.62
+					continue
+				if m.roughness_texture == null and m.roughness < 0.35:
+					m.roughness = 0.35 if m.metallic > 0.5 else 0.55
+				if m.albedo_texture == null and n in FACADE_WALLS:
+					var c := m.albedo_color
+					var plaster := U.cc0("Plaster007", 2.6)
+					m.albedo_texture = plaster.albedo_texture
+					m.normal_enabled = true
+					m.normal_texture = plaster.normal_texture
+					m.normal_scale = 0.7
+					m.roughness_texture = plaster.roughness_texture
+					m.roughness = 1.0
+					# Plaster007 is near white (mean ~.8): lift the tint to keep the
+					# prefab's own shade
+					m.albedo_color = Color(minf(c.r * 1.2, 1.0), minf(c.g * 1.2, 1.0), minf(c.b * 1.2, 1.0), c.a)
+					m.uv1_triplanar = true
+					m.uv1_world_triplanar = true
+					m.uv1_scale = Vector3.ONE / 2.6
+					m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 
 ## The 900 m west to the mosque. Frontages both sides from the town's own
 ## facade models, pulled in close to the road so they stay in the in-car view
@@ -608,6 +729,12 @@ func _facade_row(lib: String, dims: Dictionary, x0: float, x1: float, z_front: f
 		if f:
 			var back := box(Vector3(w * 0.99, h * 0.97, 13), Vector3(x + w / 2, h * 0.485, z_front - facing * 10), M.brick)
 			back.name = "FacadeBack"
+			if n == "wP_Facade_A":
+				# the fire-escape frame has no wall of its own: a brick skin
+				# just behind it (visual only - the block above is the collider)
+				var depth := d.size.z * sc
+				var skin := box(Vector3(w * 0.98, h * 0.97, 0.3), Vector3(x + w / 2, h * 0.485, z_front - facing * (depth + 0.17)), M.brick, false)
+				skin.name = "FacadeSkin"
 		x += w + 0.3
 
 # ------------------------------------------------------------------ navigation

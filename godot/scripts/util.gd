@@ -20,21 +20,43 @@ static func tex(path: String) -> Texture2D:
 ## is the same on a 10 cm rib and a 44 m wall - the web build had to hand-tune
 ## a repeat per box and still smeared thin members 125:1.
 static func surface_mat(albedo: String, normal := "", rough := "", tile := Vector3(3, 3, 3),
-		color := Color.WHITE, roughness := 0.9, metallic := 0.0) -> StandardMaterial3D:
+		color := Color.WHITE, roughness := 0.9, metallic := 0.0, ao := "") -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = color
-	m.albedo_texture = tex(albedo)
+	if albedo != "":
+		m.albedo_texture = tex(albedo)
 	if normal != "":
 		m.normal_enabled = true
 		m.normal_texture = tex(normal)
 	if rough != "":
 		m.roughness_texture = tex(rough)
+	if ao != "" and tex(ao) != null:
+		m.ao_enabled = true
+		m.ao_texture = tex(ao)
+		m.ao_light_affect = 0.35
 	m.roughness = roughness
 	m.metallic = metallic
 	m.uv1_triplanar = true
 	m.uv1_world_triplanar = true
 	m.uv1_scale = Vector3(1.0 / tile.x, 1.0 / tile.y, 1.0 / tile.z)
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	return m
+
+## A CC0 scan set from ambientCG (assets/cc0/<id>): colour, GL normal,
+## roughness and AO where the set ships one, through surface_mat. roughness
+## is a multiplier on the map, as StandardMaterial3D reads it.
+static func cc0(id: String, tile: float, color := Color.WHITE, roughness := 1.0, metallic := 0.0,
+		use_albedo := true) -> StandardMaterial3D:
+	var base := "res://assets/cc0/%s/%s_1K-JPG_" % [id, id]
+	var m := surface_mat(base + "Color.jpg" if use_albedo else "", base + "NormalGL.jpg", base + "Roughness.jpg",
+		Vector3(tile, tile, tile), color, roughness, metallic, base + "AmbientOcclusion.jpg")
+	return m
+
+## drop a scan's roughness map for one value: several are shot wet or
+## polished (grass .26, travertine .04) and mirror the sky under this rig
+static func even_rough(m: StandardMaterial3D, r: float) -> StandardMaterial3D:
+	m.roughness_texture = null
+	m.roughness = r
 	return m
 
 static func flat_mat(color: Color, roughness := 0.9, metallic := 0.0) -> StandardMaterial3D:
@@ -87,29 +109,34 @@ static func painted_block() -> Array:
 	height.generate_mipmaps()
 	return [ImageTexture.create_from_image(img), ImageTexture.create_from_image(height)]
 
-## Suspended acoustic ceiling tiles: a T-bar grid, the odd water stain and the
-## odd missing tile. A flat near-black ceiling made the fixtures float in a void.
+## Suspended acoustic ceiling tiles: a T-bar grid and the odd water stain.
+## A flat near-black ceiling made the fixtures float in a void.
+## Six 600 mm tiles a side, to line up with the OfficeCeiling001 normal and
+## roughness it is paired with (3.6 m a repeat).
 static func ceiling_tile() -> ImageTexture:
 	var S := 512
+	var n := 6
 	var img := Image.create(S, S, false, Image.FORMAT_RGB8)
-	img.fill(Color8(74, 75, 72))
-	var tw := S / 2
-	var th := S / 4
-	for r in 4:
-		for c in 2:
-			var v := randi_range(-6, 6)
-			var missing := randf() < 0.03
-			var col := Color8(42, 43, 41) if missing else Color8(190 + v, 191 + v, 185 + v)
-			_fill(img, Rect2i(c * tw + 2, r * th + 2, tw - 3, th - 3), col)
-			if not missing and randf() < 0.13:
-				var cx := c * tw + randi_range(40, tw - 40)
-				var cy := r * th + randi_range(20, th - 20)
-				for k in 900:
+	img.fill(Color8(96, 97, 94))
+	for r in n:
+		for c in n:
+			var x0 := int(c * S / float(n))
+			var y0 := int(r * S / float(n))
+			var x1 := int((c + 1) * S / float(n))
+			var y1 := int((r + 1) * S / float(n))
+			var v := randi_range(-7, 7)
+			# no missing tiles: at a 3.6 m repeat one gap reads as a pattern
+			var col := Color8(204 + v, 203 + v, 196 + v)
+			_fill(img, Rect2i(x0 + 2, y0 + 2, x1 - x0 - 3, y1 - y0 - 3), col)
+			if randf() < 0.1:
+				var cx := x0 + randi_range(18, x1 - x0 - 18)
+				var cy := y0 + randi_range(18, y1 - y0 - 18)
+				for k in 700:
 					var a := randf() * TAU
-					var d := sqrt(randf()) * 38.0
-					var x := clampi(int(cx + cos(a) * d), 0, S - 1)
-					var y := clampi(int(cy + sin(a) * d * 0.6), 0, S - 1)
-					img.set_pixel(x, y, img.get_pixel(x, y).lerp(Color8(120, 96, 60), 0.05))
+					var d := sqrt(randf()) * 26.0
+					var x := clampi(int(cx + cos(a) * d), x0 + 2, x1 - 2)
+					var y := clampi(int(cy + sin(a) * d * 0.8), y0 + 2, y1 - 2)
+					img.set_pixel(x, y, img.get_pixel(x, y).lerp(Color8(122, 98, 62), 0.06))
 	img.generate_mipmaps()
 	return ImageTexture.create_from_image(img)
 

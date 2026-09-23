@@ -4,6 +4,8 @@
 ## shed half-metre slabs) and the body - collider and all - is gone.
 extends StaticBody3D
 
+const Fx := preload("res://scripts/fx.gd")
+
 const KINDS := {
 	"glass":   {"hp": 14.0,  "kind": "glass",    "col": Color("bcd6e2"), "chips": 16},
 	"wood":    {"hp": 60.0,  "kind": "wood",     "col": Color("7a5a38"), "chips": 12},
@@ -36,7 +38,12 @@ func shoot(dmg: float, _at: Vector3, dir: Vector3) -> void:
 func shatter(dir := Vector3.ZERO) -> void:
 	hp = 0.0
 	var c := to_global(centre)
-	Debris.burst(get_tree().current_scene, c, size, def.col, mini(def.chips, 18), dir)
+	Debris.burst(get_tree().current_scene, c, size, def.col, mini(def.chips, 18), dir, def.kind)
+	# a burst of the material's own fine stuff with the big chips: glass
+	# powder and shards, splinters, a cloud of plaster dust
+	var out := -dir.normalized() if dir.length() > 0.01 else Vector3.UP
+	Fx.impact(c, (out + Vector3.UP).normalized(), def.kind)
+	Fx.impact(c, Vector3.UP, def.kind)
 	match def.kind:
 		"glass":
 			Game.play_at("hit_glass", c, 2.0, 0.85)
@@ -60,7 +67,7 @@ class Debris extends Node3D:
 	static var _mats := {}
 	var chips := []      # [MeshInstance3D, velocity, spin, life]
 
-	static func burst(host: Node, at: Vector3, sz: Vector3, col: Color, n: int, dir: Vector3) -> void:
+	static func burst(host: Node, at: Vector3, sz: Vector3, col: Color, n: int, dir: Vector3, kind := "") -> void:
 		if host == null:
 			return
 		var d: Debris = host.get_node_or_null("Debris")
@@ -77,10 +84,15 @@ class Debris extends Node3D:
 		for i in n:
 			var m := MeshInstance3D.new()
 			m.mesh = _box
-			m.material_override = _mat(col * randf_range(0.7, 1.15))
+			m.material_override = _mat(col * randf_range(0.7, 1.15), kind)
 			m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			var chip := func(e: float) -> float: return clampf(e * randf_range(0.06, 0.2), 0.04, 0.34)
 			m.scale = Vector3(chip.call(sz.x), chip.call(sz.y), chip.call(sz.z))
+			# glass breaks into thin panes, wood into long splinters
+			if kind == "glass":
+				m.scale.y = 0.008
+			elif kind == "wood":
+				m.scale = Vector3(m.scale.x * 0.35, m.scale.y * 0.35, m.scale.z * 1.6)
 			d.add_child(m)
 			m.global_position = at + Vector3(randf_range(-1, 1) * sz.x * 0.4, randf_range(-1, 1) * sz.y * 0.4, randf_range(-1, 1) * sz.z * 0.4)
 			m.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
@@ -90,14 +102,23 @@ class Debris extends Node3D:
 			d.chips.append([m, v, spin, randf_range(2.6, 4.4), m.scale])
 
 	## a handful of shades per colour, shared, rather than a material per chip
-	static func _mat(c: Color) -> StandardMaterial3D:
+	static func _mat(c: Color, kind := "") -> StandardMaterial3D:
 		var k := Color(snappedf(c.r, 0.05), snappedf(c.g, 0.05), snappedf(c.b, 0.05))
-		if not _mats.has(k):
+		var key := str(k) + kind
+		if not _mats.has(key):
 			var m := StandardMaterial3D.new()
 			m.albedo_color = k
 			m.roughness = 0.9
-			_mats[k] = m
-		return _mats[k]
+			match kind:
+				"glass":           # glints as it tumbles
+					m.roughness = 0.05
+					m.metallic = 0.3
+					m.metallic_specular = 1.0
+				"metal":
+					m.roughness = 0.4
+					m.metallic = 0.85
+			_mats[key] = m
+		return _mats[key]
 
 	func _process(dt: float) -> void:
 		var i := chips.size() - 1

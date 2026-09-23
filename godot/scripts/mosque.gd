@@ -143,24 +143,26 @@ func floor_plane(w: float, d: float, x: float, y: float, z: float, mat: Material
 # ------------------------------------------------------------------ materials
 
 func _materials() -> void:
-	# wall.jpg is photographed dark (mean rgb 69,62,50). wall_sand.jpg is it
-	# relevelled to a pale limestone (x1.25 + 82): the web's x1.5 + 30 under
-	# Godot's night rig and ACES still came out as brown brick
-	M.sand = U.surface_mat("res://assets/tex/wall_sand.jpg", "res://assets/tex/wall_n.jpg", "",
-		Vector3(1.5, 1.2, 1.5), Color("eee0c4"), 0.92)
-	M.stone = U.flat_mat(Color(0.77, 0.71, 0.58), 0.95)
-	M.teal = U.flat_mat(Color(0.18, 0.49, 0.47), 0.42, 0.35)
+	# ambientCG scans, world-triplanar, so tile sizes are world metres whatever
+	# the 0.46 group scale. Dressed sandstone outside, plaster within, a pale
+	# travertine for the arches and columns, marble underfoot
+	M.sand = U.cc0("Bricks084", 2.1, Color(1.08, 1.0, 0.88), 1.0)
+	M.plaster = U.cc0("PaintedPlaster017", 2.4, Color(1.08, 1.0, 0.86), 1.0)
+	M.stone = U.even_rough(U.cc0("Travertine009", 1.8, Color(0.98, 0.92, 0.82)), 0.6)
+	# glazed tile: the dome and the niche take the floor tile's relief
+	M.teal = U.surface_mat("", "res://assets/tex/tiles2_n.jpg", "", Vector3(0.9, 0.9, 0.9), Color(0.18, 0.49, 0.47), 0.32, 0.1)
 	M.gold = U.flat_mat(Color(0.79, 0.64, 0.15), 0.3, 0.8)
-	M.carpet = U.flat_mat(Color(0.48, 0.18, 0.16), 0.98)
-	M.carpet2 = U.flat_mat(Color(0.55, 0.23, 0.2), 0.98)
-	M.wood = U.flat_mat(Color(0.36, 0.23, 0.14), 0.85)
-	M.trim = U.flat_mat(Color(0.29, 0.25, 0.21), 0.8)
-	M.niche = U.flat_mat(Color(0.12, 0.29, 0.28), 0.6)
+	M.carpet = U.cc0("Carpet016", 1.1, Color(0.62, 0.2, 0.17), 1.0)
+	M.carpet2 = U.cc0("Carpet016", 1.1, Color(0.7, 0.27, 0.21), 1.0)
+	M.wood = U.even_rough(U.cc0("Wood066", 1.2, Color(0.82, 0.74, 0.68)), 0.55)
+	M.trim = U.even_rough(U.cc0("Wood066", 1.2, Color(0.5, 0.45, 0.42)), 0.6)
+	M.niche = U.surface_mat("", "res://assets/tex/tiles2_n.jpg", "", Vector3(0.6, 0.6, 0.6), Color(0.12, 0.29, 0.28), 0.4, 0.05)
 	M.water = U.flat_mat(Color(0.24, 0.44, 0.48), 0.15, 0.1)
 	M.lamp = U.emissive_mat(Color(1, 0.89, 0.67), 3.0)
-	M.floor = U.surface_mat("res://assets/tex/tiles2_c.jpg", "res://assets/tex/tiles2_n.jpg", "res://assets/tex/tiles2_r.jpg",
-		Vector3(1.15, 1.15, 1.15), Color(0.6, 0.58, 0.52), 0.7)
-	M.yard = U.surface_mat("res://assets/tex/tiles2_c.jpg", "res://assets/tex/tiles2_n.jpg", "",
+	# honed, not mirror-polished: there is no SSR, so a polished floor
+	# would mirror the sky indoors
+	M.floor = U.even_rough(U.cc0("Marble012", 1.8, Color(0.93, 0.9, 0.84)), 0.38)
+	M.yard = U.surface_mat("res://assets/tex/tiles2_c.jpg", "res://assets/tex/tiles2_n.jpg", "res://assets/tex/tiles2_r.jpg",
 		Vector3(1.15, 1.15, 1.15), Color(0.66, 0.64, 0.56), 0.9)
 
 # ------------------------------------------------------------------ the building
@@ -173,7 +175,7 @@ func _hall() -> void:
 	box(0.7, 12, 29, -25, 6, -1.5, M.sand, true)
 	box(0.7, 12, 29, 25, 6, -1.5, M.sand, true)
 	box(50, 12, 0.7, 0, 6, -16, M.sand, true)          # qibla wall
-	box(50, 0.6, 29, 0, 12.3, -1.5, M.stone, true)      # ceiling
+	box(50, 0.6, 29, 0, 12.3, -1.5, M.plaster, true)    # ceiling
 
 ## One straight spine, the way a mosque of this type reads: vestibule ->
 ## a tight portal -> the axial corridor -> doors either side into the wudu hall
@@ -182,35 +184,35 @@ func _rooms() -> void:
 	box(21.8, 12, 0.7, -14.45, 6, 13, M.sand, true)    # facade, split round the entrance arch
 	box(21.8, 12, 0.7, 14.45, 6, 13, M.sand, true)
 	arch(0, 13, 3.4, 0.95, 5.4, M.stone, "z")
-	box(23.15, 12, 0.7, -13.78, 6, 8.7, M.sand, true)  # portal wall, a tight 4.4 threshold
-	box(23.15, 12, 0.7, 13.78, 6, 8.7, M.sand, true)
+	box(23.15, 12, 0.7, -13.78, 6, 8.7, M.plaster, true)  # portal wall, a tight 4.4 threshold
+	box(23.15, 12, 0.7, 13.78, 6, 8.7, M.plaster, true)
 	arch(0, 8.7, 2.2, 0.8, 5.4, M.stone, "z")
-	box(0.7, 12, 2.65, -3.85, 6, 7.72, M.sand, true)   # corridor walls, a 3.0 door each side
-	box(0.7, 12, 2.85, -3.85, 6, 1.98, M.sand, true)
-	box(0.7, 12, 2.65, 3.85, 6, 7.72, M.sand, true)
-	box(0.7, 12, 2.85, 3.85, 6, 1.98, M.sand, true)
+	box(0.7, 12, 2.65, -3.85, 6, 7.72, M.plaster, true)   # corridor walls, a 3.0 door each side
+	box(0.7, 12, 2.85, -3.85, 6, 1.98, M.plaster, true)
+	box(0.7, 12, 2.65, 3.85, 6, 7.72, M.plaster, true)
+	box(0.7, 12, 2.85, 3.85, 6, 1.98, M.plaster, true)
 	arch(-3.85, 4.9, 1.5, 0.8, 3.4, M.stone, "x")
 	arch(3.85, 4.9, 1.5, 0.8, 3.4, M.stone, "x")
-	box(7.35, 12, 0.7, -21.68, 6, 0.9, M.sand, true)   # hall north wall: corridor mouth + a door per chamber
-	box(11.5, 12, 0.7, -9.25, 6, 0.9, M.sand, true)
-	box(11.5, 12, 0.7, 9.25, 6, 0.9, M.sand, true)
-	box(7.35, 12, 0.7, 21.68, 6, 0.9, M.sand, true)
+	box(7.35, 12, 0.7, -21.68, 6, 0.9, M.plaster, true)   # hall north wall: corridor mouth + a door per chamber
+	box(11.5, 12, 0.7, -9.25, 6, 0.9, M.plaster, true)
+	box(11.5, 12, 0.7, 9.25, 6, 0.9, M.plaster, true)
+	box(7.35, 12, 0.7, 21.68, 6, 0.9, M.plaster, true)
 	arch(-16.5, 0.9, 1.5, 0.8, 3.4, M.stone, "z")
 	arch(16.5, 0.9, 1.5, 0.8, 3.4, M.stone, "z")
 	# walled corner stores - a survivor hides in each
-	box(0.7, 6, 3.75, -19.5, 3, 3.12, M.stone, true)
-	box(1.85, 6, 0.7, -24.43, 3, 5.0, M.stone, true)
-	box(1.75, 6, 0.7, -20.02, 3, 5.0, M.stone, true)
-	box(0.7, 6, 3.75, 19.5, 3, 3.12, M.stone, true)
-	box(1.85, 6, 0.7, 24.43, 3, 5.0, M.stone, true)
-	box(1.75, 6, 0.7, 20.02, 3, 5.0, M.stone, true)
+	box(0.7, 6, 3.75, -19.5, 3, 3.12, M.plaster, true)
+	box(1.85, 6, 0.7, -24.43, 3, 5.0, M.plaster, true)
+	box(1.75, 6, 0.7, -20.02, 3, 5.0, M.plaster, true)
+	box(0.7, 6, 3.75, 19.5, 3, 3.12, M.plaster, true)
+	box(1.85, 6, 0.7, 24.43, 3, 5.0, M.plaster, true)
+	box(1.75, 6, 0.7, 20.02, 3, 5.0, M.plaster, true)
 	box(0.6, 2.4, 3.05, -11, 1.2, 7.12, M.stone, true)  # wash-stall divider
 	box(0.6, 2.4, 3.05, 11, 1.2, 7.12, M.stone, true)   # bookcase spine
 	# dropped ceilings - lofty vestibule, squeezed corridor, low chambers
-	box(49.3, 0.6, 3.6, 0, 10.5, 10.85, M.stone)
-	box(7, 0.6, 8.5, 0, 7.9, 4.8, M.stone)
-	box(20.5, 0.6, 7.6, -14.4, 6.1, 4.8, M.stone)
-	box(20.5, 0.6, 7.6, 14.4, 6.1, 4.8, M.stone)
+	box(49.3, 0.6, 3.6, 0, 10.5, 10.85, M.plaster)
+	box(7, 0.6, 8.5, 0, 7.9, 4.8, M.plaster)
+	box(20.5, 0.6, 7.6, -14.4, 6.1, 4.8, M.plaster)
+	box(20.5, 0.6, 7.6, 14.4, 6.1, 4.8, M.plaster)
 	# corridor runner and sconces
 	floor_plane(6, 7.1, 0, 0.06, 4.8, M.carpet2)
 	for sx in [-3.4, 3.4]:

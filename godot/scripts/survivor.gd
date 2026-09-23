@@ -5,8 +5,31 @@
 extends CharacterBody3D
 
 const U := preload("res://scripts/util.gd")
+const H := preload("res://scripts/hostile.gd")
 
 signal found(s: Node)
+
+# the supplied rig's planted foot speeds at 1x, in model units/s (measured
+# off the Walk and Sprint stance frames); gait rates come from these
+const WALK_V := 1.0
+const SPRINT_V := 6.5
+const P_IDLE := &"parameters/its/scale"
+const P_WALK := &"parameters/ws/scale"
+const P_SPRINT := &"parameters/ss/scale"
+const P_GAIT := &"parameters/gait/blend_amount"
+const P_MOVE := &"parameters/move/blend_amount"
+var tree: AnimationTree
+var lean: H.Lean
+var _walk_len := 1.333
+var _sprint_len := 0.667
+var _last_pos := Vector3.ZERO
+var _spd := 0.0
+var _amp := 0.0
+var _yaw_vel := 0.0
+var _ph := 0.0               # their own rhythm for the nervous sway
+var _near_p := Vector3.INF   # the nearest live hostile while hiding
+var _look := 0.0
+var _hunch := 0.0
 
 var state := "hiding"        # hiding | following | out
 var model_path := ""         # a rigged survivor model (set by main before adding)
@@ -56,6 +79,11 @@ func _ready() -> void:
 		# measured in an animated pose: this rig's rest pose is not its bind
 		# pose (it measures 11 cm), and its mesh bounds carry a 0.01 scale
 		_fit_posed(1.72)
+		# the same model four times over: at least not the same height
+		var j := randf_range(0.95, 1.05)
+		model.scale *= j
+		model.position.y *= j
+		_build_tree()
 	else:
 		var lib := U.glb("res://assets/hostile.glb")
 		if lib:
@@ -93,6 +121,88 @@ func _ready() -> void:
 	voice.unit_size = 3.0
 	voice.max_distance = 16.0
 	add_child(voice)
+
+## Idle, and a gait blended from Walk to Sprint by speed. Both gait clips run
+## at the same share of their cycle per second, so the feet stay in step
+## through the blend (both start on the same planted foot), and the rate is
+## set so the planted foot keeps pace with the ground.
+func _build_tree() -> void:
+	if anim == null or not (_clips.has("idle") and _clips.has("walk") and _clips.has("run")):
+		return
+	_walk_len = anim.get_animation(_clips.walk).length
+	_sprint_len = anim.get_animation(_clips.run).length
+	var bt := AnimationNodeBlendTree.new()
+	for k in ["idle", "walk", "run"]:
+		var a := AnimationNodeAnimation.new()
+		a.animation = StringName(_clips[k])
+		bt.add_node(StringName("a_" + k), a)
+	bt.add_node(&"its", AnimationNodeTimeScale.new())
+	bt.add_node(&"ws", AnimationNodeTimeScale.new())
+	bt.add_node(&"ss", AnimationNodeTimeScale.new())
+	var gait := AnimationNodeBlend2.new()
+	gait.set_use_sync(true)
+	bt.add_node(&"gait", gait)
+	var mv := AnimationNodeBlend2.new()
+	mv.set_use_sync(true)
+	bt.add_node(&"move", mv)
+	bt.connect_node(&"its", 0, &"a_idle")
+	bt.connect_node(&"ws", 0, &"a_walk")
+	bt.connect_node(&"ss", 0, &"a_run")
+	bt.connect_node(&"gait", 0, &"ws")
+	bt.connect_node(&"gait", 1, &"ss")
+	bt.connect_node(&"move", 0, &"its")
+	bt.connect_node(&"move", 1, &"gait")
+	bt.connect_node(&"output", 0, &"move")
+	anim.stop()
+	tree = AnimationTree.new()
+	anim.get_parent().add_child(tree)
+	tree.anim_player = tree.get_path_to(anim)
+	tree.root_node = tree.get_path_to(anim.get_node(anim.root_node))
+	tree.tree_root = bt
+	tree.active = true
+	var sks := model.find_children("*", "Skeleton3D", true, false)
+	if not sks.is_empty():
+		lean = H.Lean.new()
+		(sks[0] as Skeleton3D).add_child(lean)
+		lean.setup(sks[0], model, ["mixamorigSpine", "mixamorigSpine2", "mixamorigNeck", "mixamorigHead"], [0.35, 0.35, 0.2, 0.1], [0.0, 0.15, 0.35, 0.5])
+	_ph = randf() * TAU
+
+## pace the tree off the distance actually covered this frame; `turning`
+## shuffles the feet when they swing round on the spot
+func _gait(dt: float) -> void:
+	var mv := global_position - _last_pos
+	_last_pos = global_position
+	mv.y = 0.0
+	var v := mv.length() / maxf(dt, 0.0001)
+	if v > 10.0:
+		v = 0.0                      # the catch-up teleport is not a step
+	_spd = lerpf(_spd, v, clampf(dt * 10.0, 0.0, 1.0))
+	if tree == null:
+		return
+	var sc := maxf(model.scale.x, 0.001)
+	var vm := _spd / sc
+	var w := clampf((vm - 1.2) / 5.8, 0.0, 1.0)
+	var d_cyc := lerpf(WALK_V * _walk_len, SPRINT_V * _sprint_len, w)
+	var a := 0.0 if _spd < 0.06 else clampf(_spd / 0.6, 0.35, 1.0)
+	var cyc := vm / maxf(d_cyc * maxf(a, 0.05), 0.01)
+	# turning on the spot: short steps round
+	if _spd < 0.3 and absf(_yaw_vel) > 0.5:
+		a = maxf(a, clampf(absf(_yaw_vel) * 0.12, 0.0, 0.3))
+		cyc = maxf(cyc, 0.75 / _walk_len)
+		w = 0.0
+	_amp = lerpf(_amp, a, clampf(dt * 7.0, 0.0, 1.0))
+	cyc = minf(cyc, 2.4 / _walk_len)
+	tree.set(P_MOVE, _amp)
+	tree.set(P_GAIT, w)
+	tree.set(P_WALK, cyc * _walk_len)
+	tree.set(P_SPRINT, cyc * _sprint_len)
+
+## rate-limited, eased turning (no snapping round)
+func _turn_to(want: float, dt: float) -> void:
+	var diff := wrapf(want - rotation.y, -PI, PI)
+	var step := clampf(diff * clampf(dt * 7.0, 0.0, 1.0), -5.0 * dt, 5.0 * dt)
+	rotation.y = wrapf(rotation.y + step, -PI, PI)
+	_yaw_vel = lerpf(_yaw_vel, step / maxf(dt, 0.0001), clampf(dt * 8.0, 0.0, 1.0))
 
 func _fit_posed(target_h: float) -> void:
 	var skels := model.find_children("*", "Skeleton3D", true, false)
@@ -162,7 +272,12 @@ func place(pos: Vector3, tgt: Node3D) -> void:
 	state = "hiding"
 	rotation.y = randf() * TAU
 	marker.visible = true
-	_play("idle")
+	_last_pos = pos
+	_spd = 0.0
+	_best_d = INF
+	_stuck_t = 0.0
+	if tree == null:
+		_play("idle")
 
 func _play(n: String, blend := 0.25, rate := 1.0) -> void:
 	if not _clips.is_empty():
@@ -194,18 +309,25 @@ func _physics_process(dt: float) -> void:
 	if state == "hiding":
 		# nearest live hostile sets how frightened they are
 		var near := 999.0
+		_near_p = Vector3.INF
 		for h in get_tree().get_nodes_in_group("hostiles"):
 			if h.is_active():
-				near = minf(near, (h as Node3D).global_position.distance_to(global_position))
+				var hd := (h as Node3D).global_position.distance_to(global_position)
+				if hd < near:
+					near = hd
+					_near_p = (h as Node3D).global_position
 		fear = lerpf(fear, 1.0 if near < 6.0 else 0.25, clampf(dt * 3.0, 0.0, 1.0))
 		_whimper_cd -= dt
 		if near < 6.0 and _whimper_cd <= 0.0:
 			_whimper_cd = randf_range(2.6, 6.5)
 			_say("sfx-breath.mp3", -6.0, randf_range(1.15, 1.35))   # short frightened breaths
 		# they shake while they hide
-		if model:
-			model.rotation.z = sin(_t * 23.0) * 0.012 * fear
-		_play("idle", 0.3, 0.6)
+		if lean:
+			_nervous(dt, to)
+		else:
+			if model:
+				model.rotation.z = sin(_t * 23.0) * 0.012 * fear
+			_play("idle", 0.3, 0.6)
 		if d < 1.6:
 			state = "following"
 			marker.visible = false
@@ -233,11 +355,13 @@ func _physics_process(dt: float) -> void:
 			var spd := 4.2 if d > 5.0 else 2.6
 			velocity.x = dir.x * spd
 			velocity.z = dir.z * spd
-			_play("run", 0.25, spd / 3.0)
+			if tree == null:
+				_play("run", 0.25, spd / 3.0)
 		else:
 			velocity.x = 0.0
 			velocity.z = 0.0
-			_play("idle", 0.3)
+			if tree == null:
+				_play("idle", 0.3)
 		if not is_on_floor():
 			velocity.y -= 18.0 * dt
 		else:
@@ -266,7 +390,39 @@ func _physics_process(dt: float) -> void:
 			global_position = p if p.distance_to(back) < 3.0 else back
 		if model:
 			model.rotation.z = 0.0
-		rotation.y = lerp_angle(rotation.y, atan2(to.x, to.z), clampf(dt * 6.0, 0.0, 1.0))
+		if tree == null:
+			rotation.y = lerp_angle(rotation.y, atan2(to.x, to.z), clampf(dt * 6.0, 0.0, 1.0))
+			return
+		# facing the way they are going, and you once they have stopped
+		var hv := Vector2(velocity.x, velocity.z)
+		_turn_to(atan2(velocity.x, velocity.z) if hv.length() > 0.1 else atan2(to.x, to.z), dt)
+		_gait(dt)
+		tree.set(P_IDLE, 1.0)
+		if lean:
+			# a glance at you over the shoulder; upright while they run
+			var lk := clampf(wrapf(atan2(to.x, to.z) - rotation.y, -PI, PI), -0.9, 0.9)
+			_look = lerpf(_look, lk, clampf(dt * 4.0, 0.0, 1.0))
+			_hunch = lerpf(_hunch, clampf(_spd * 0.025, 0.0, 0.1), clampf(dt * 4.0, 0.0, 1.0))
+			lean.pitch = _hunch
+			lean.roll = clampf(-_yaw_vel * _spd * 0.015, -0.12, 0.12)
+			lean.yaw = _look
+
+## hiding: hunched lower the more frightened they are, breathing hard, a
+## tremble through the spine, eyes on the nearest threat or scanning
+func _nervous(dt: float, to_player: Vector3) -> void:
+	_gait(dt)
+	tree.set(P_IDLE, 0.75 + fear * 0.5)
+	_hunch = lerpf(_hunch, 0.06 + fear * 0.12, clampf(dt * 2.0, 0.0, 1.0))
+	lean.pitch = _hunch + sin(_t * (1.6 + fear * 1.4) + _ph) * 0.02
+	lean.roll = sin(_t * 0.9 + _ph) * 0.03 + sin(_t * 23.0) * 0.02 * fear
+	var want := sin(_t * 0.45 + _ph) * 0.7 + sin(_t * 1.7 + _ph * 2.0) * 0.15
+	if _near_p != Vector3.INF and fear > 0.5:
+		want = atan2(_near_p.x - global_position.x, _near_p.z - global_position.z) - rotation.y
+	elif to_player.length() < 6.0:
+		want = atan2(to_player.x, to_player.z) - rotation.y
+	want = clampf(wrapf(want, -PI, PI), -1.0, 1.0)
+	_look = lerpf(_look, want, clampf(dt * (2.0 + fear * 6.0), 0.0, 1.0))
+	lean.yaw = _look
 
 func _say(file: String, vol_db: float, pitch: float) -> void:
 	var st := Game.file(file)

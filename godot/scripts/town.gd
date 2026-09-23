@@ -55,13 +55,20 @@ static func _wrecks(w: Node3D) -> void:
 	wheel.bottom_radius = 0.34
 	wheel.height = 0.26
 	wheel.radial_segments = 14
+	# faded paint: the car's own colour over the chipped-enamel scan's relief
+	# and roughness (its albedo's rust blotches read as camouflage on a body)
+	var paints := {}
+	for e in WRECKS:
+		if not paints.has(e[3]):
+			paints[e[3]] = U.cc0("PaintedMetal010", 1.8, Color(e[3]), 1.0, 0.2, false)
+	var under := U.cc0("Metal024", 0.9, Color(0.42, 0.33, 0.27), 1.0, 0.3)   # rusted sills and bumpers
 	for e in WRECKS:
 		var g := Node3D.new()
 		g.name = "Wreck"
 		g.position = Vector3(e[0], 0, e[1])
 		g.rotation.y = e[2]
 		w.add_child(g)
-		var body := U.flat_mat(Color(e[3]), 0.75, 0.25)
+		var body: StandardMaterial3D = paints[e[3]]
 		_box(g, Vector3(4.2, 0.6, 1.8), Vector3(0, 0.55, 0), body)
 		_box(g, Vector3(2.0, 0.55, 1.62), Vector3(-0.2, 1.1, 0), body)
 		var gl := _box(g, Vector3(2.04, 0.34, 1.5), Vector3(-0.2, 1.16, 0), glass)
@@ -75,12 +82,14 @@ static func _wrecks(w: Node3D) -> void:
 				wm.position = Vector3(wx, 0.34, wz)
 				g.add_child(wm)
 		for bx in [-2.14, 2.14]:
-			_box(g, Vector3(0.18, 0.22, 1.9), Vector3(bx, 0.42, 0), trim)
+			_box(g, Vector3(0.18, 0.22, 1.9), Vector3(bx, 0.42, 0), under)
 		_solid(w, Vector3(4.5, 1.4, 2.1), Vector3(e[0], 0.7, e[1]), e[2])
 
 ## cart corrals: two rail pens by the store front
 static func _corrals(w: Node3D) -> void:
-	var rail := U.flat_mat(Color(0.34, 0.36, 0.37), 0.55, 0.6)
+	# galvanised tube: a dull scan, and only half metallic - at 0.6 metallic
+	# with a flat colour the sky reflection turned the rails white
+	var rail := U.cc0("Metal024", 0.8, Color(0.62, 0.64, 0.66), 1.0, 0.35)
 	for cx in [-11.0, 15.5]:
 		var cz := 16.75
 		for px in [-1.15, 1.15]:
@@ -120,11 +129,16 @@ static func _markings(w: Node3D) -> void:
 	_decal(w, "res://assets/tex/lot/tops.png", Vector2(3.8, 1.07), Vector3(7.8, 0.033, 22.1), 0.0, 0.75)
 	_decal(w, "res://assets/tex/lot/handicap.png", Vector2(2.1, 2.1), Vector3(-11.8125, 0.036, 18.55), 0.0, 0.9)
 
-## concrete bumpers at every stall head
+## precast wheel stops at every stall head: 1.65 x 0.15 x 0.1 like the real
+## thing, weathered concrete with a worn yellow nose
 static func _bumpers(w: Node3D) -> void:
-	var mat := U.flat_mat(Color("8a8a84"), 0.95)
+	var mat := U.cc0("Concrete012", 1.2, Color(0.9, 0.89, 0.85), 1.0)
+	var nose := U.flat_mat(Color(0.62, 0.5, 0.16), 0.9)
 	var x := -19.6875
 	while x <= 19.69:
-		var b := _box(w, Vector3(1.5, 0.13, 0.24), Vector3(x, 0.065, 20.3), mat)
+		var b := _box(w, Vector3(1.65, 0.1, 0.15), Vector3(x, 0.05, 20.3), mat)
 		b.rotation.y = randf_range(-0.015, 0.015)
+		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var n := _box(b, Vector3(1.5, 0.03, 0.155), Vector3.ZERO, nose)
+		n.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		x += 2.625
