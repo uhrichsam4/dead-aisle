@@ -3,9 +3,10 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://cngenv15jrapg"
-path="res://.godot/imported/enemy_05_f022_opacity_color.png-bca5586b6f6d600da913f9262a287c73.ctex"
+path.s3tc="res://.godot/imported/enemy_05_f022_opacity_color.png-bca5586b6f6d600da913f9262a287c73.s3tc.ctex"
 metadata={
-"vram_texture": false
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
 }
 generator_parameters={
 "md5": "62b12c1f9770e3b87061c2cc495f23f3"
@@ -14,11 +15,11 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/enemies/enemy_05_f022_opacity_color.png"
-dest_files=["res://.godot/imported/enemy_05_f022_opacity_color.png-bca5586b6f6d600da913f9262a287c73.ctex"]
+dest_files=["res://.godot/imported/enemy_05_f022_opacity_color.png-bca5586b6f6d600da913f9262a287c73.s3tc.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=2
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -40,4 +41,4 @@ process/normal_map_invert_y=false
 process/hdr_as_srgb=false
 process/hdr_clamp_exposure=false
 process/size_limit=0
-detect_3d/compress_to=1
+detect_3d/compress_to=0

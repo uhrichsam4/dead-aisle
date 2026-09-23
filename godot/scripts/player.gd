@@ -30,9 +30,72 @@ const MAG_SIZE := 30
 const RELOAD_TIME := 1.9
 const HEAD_MULT := 2.6
 
-## rifle-in-hand calibration from the web build (camera-space nudge, radians)
-const GRIP := {"x": 0.02, "y": 0.10, "z": -0.28, "tilt_x": -0.06, "tilt_y": 0.05, "tilt_z": 0.0, "scale": 1.0}
+## rifle-in-hand calibration: the pistol grip is solved into the right palm
+## (VM_GRIP below); this is a camera-space nudge off that and a tilt (radians)
+const GRIP := {"x": 0.0, "y": 0.0, "z": 0.0, "tilt_x": 0.0, "tilt_y": 0.0, "tilt_z": 0.0, "scale": 1.0}
 const AK_FIT := {"scale": 0.8, "pos": Vector3(0.04, -0.03, 0.0)}
+
+## ---- viewmodel tuning. Camera space is +x right, +y up, -z ahead (metres);
+## rotations are (pitch up, yaw left, roll left) in radians. Gun-local points
+## are in the guns.glb mesh's own units (muzzle toward -z, top +y).
+const VM_FOV_HIP := 72.0                       # the arms' lens at the hip
+const VM_FOV_ADS := 44.0                       # and on the sights
+const VM_ARMS := "res://assets/skin_military.glb"   # the arms: the Rocketbox soldier
+const VM_ARMS_AT := Vector3(0.0, -1.55, 0.05)     # its origin under the lens (it faces the lens' way)
+const VM_ARMS_HIDE := Vector3(0.0, 1.5, -0.3)     # skeleton space: behind the lens, where the rest of him goes
+const VM_PALM_OFF := 0.028                        # palm to the centre of what it holds
+# hand frames (gun-local): the wrist-to-knuckle direction and the thumb side
+const VM_HAND_R_ALONG := Vector3(-0.05, -0.3, -1.0)  # round a raked pistol grip
+const VM_HAND_R_THUMB := Vector3(0.0, 1.0, -0.35)
+const VM_HAND_L_ALONG := Vector3(0.75, 0.3, -0.6)    # cupped under the handguard
+const VM_HAND_L_THUMB := Vector3(-0.2, 0.25, -1.0)
+const VM_HAND_MAG_ALONG := Vector3(0.0, -1.0, -0.2) # on the magazine's flank
+const VM_HAND_MAG_THUMB := Vector3(0.0, 0.2, -1.0)
+# finger curl, radians per joint: thumb (base, mid, tip), fingers (base, mid, tip)
+const VM_CURL_R := [0.35, 0.3, 0.2, 1.05, 1.25, 0.8]
+const VM_CURL_L := [0.3, 0.25, 0.15, 0.8, 1.0, 0.6]
+const VM_SUIT_CLOTH := Color(0.075, 0.08, 0.095)   # the SUIT outfit's sleeves
+const VM_HIP_AT := Vector3(0.16, -0.088, -0.44)  # the rear sight at the ready
+const VM_HIP_ROT := Vector3(0.0, 0.06, -0.035)   # ready carry: muzzle in toward the centre, a little cant
+const VM_ADS_AT := Vector3(0.0, 0.0, -0.215)      # the rear sight on the lens axis
+const VM_PIVOT := Vector3(0.0, -0.06, 0.13)       # grip / shoulder pivot, off the rear sight
+const VM_SHOULDER_L_HIP := Vector3(-0.24, -0.4, 0.02)  # the left arm comes up from here (IK root)
+const VM_SHOULDER_L_ADS := Vector3(-0.2, -0.26, 0.02)
+const VM_SHOULDER_R_HIP := Vector3(0.15, -0.3, 0.1)
+const VM_SHOULDER_R_ADS := Vector3(0.1, -0.22, 0.12)
+const VM_POLE_L := Vector3(-0.45, -1.0, 0.25)     # elbows bend down and out
+const VM_POLE_R := Vector3(0.6, -1.0, 0.3)
+const VM_SKY_ENERGY := 0.55                       # the rifle's reflected sky, at full daylight
+const VM_GRIP := Vector3(0.0, -0.085, 0.2)        # the pistol grip (gun-local): right palm
+const VM_HANDGUARD := Vector3(-0.012, -0.04, -0.13)  # where the left palm rides (gun-local)
+const VM_MAG_GRAB := Vector3(-0.03, -0.1, 0.03)   # the left palm on the magazine (gun-local)
+const VM_MAG_DROP := Vector3(0.0, -0.13, 0.035)   # the magazine clear of the well (gun-local offset)
+const VM_POUCH := Vector3(-0.2, -0.55, 0.12)      # the hand down at the vest, out of frame (gun-local)
+const VM_CHARGE := Vector3(0.055, 0.035, 0.0)     # the charging handle, right side (gun-local)
+const VM_CHARGE_PULL := 0.1                       # how far the handle is racked back (gun-local)
+const VM_ADS_ARC := Vector3(0.012, -0.02, 0.0)    # the rifle rises through this on the way to the eye
+const VM_SPRINT_ROT := Vector3(-0.3, 0.5, 0.45)   # sprint carry: muzzle low and across, canted
+const VM_SPRINT_POS := Vector3(-0.03, -0.02, 0.04)
+const VM_DRAW_TIME := 0.55                        # equip / draw
+const VM_DRAW_ROT := Vector3(-1.05, 0.25, 0.7)
+const VM_DRAW_POS := Vector3(0.05, -0.26, 0.08)
+const VM_WALL_REACH := 0.85                       # a wall nearer than this pushes the rifle in
+const VM_WALL_MIN := 0.3                          # fully tucked at this distance
+const VM_WALL_ROT := Vector3(-0.6, 0.35, 0.3)     # tucked: muzzle down and in
+const VM_WALL_POS := Vector3(-0.02, -0.05, 0.14)
+const VM_LOOK_LAG := 0.011                        # rad of trail per rad/s of turn
+const VM_LOOK_ROLL := 0.009
+const VM_STRAFE_ROLL := 0.07                      # roll at a full sprint sideways
+const VM_BOB := Vector3(0.007, 0.009, 0.022)      # own bob: side, lift, roll (walk)
+const VM_BOB_LAG := 0.45                          # rad of step phase the rifle trails the head by
+const VM_BREATH := 0.004                          # idle breathing / drift, rad
+# recoil: an impulse per round into two springs (translation, rotation) and
+# a heat that builds under full auto, so a burst climbs and then settles
+const VM_KICK_V := Vector3(0.12, 0.12, 1.15)      # m/s: side (random), up, straight back
+const VM_KICK_RV := Vector3(1.7, 0.65, 0.9)       # rad/s: climb, yaw (random), roll (random)
+const VM_HEAT_CLIMB := 0.009                      # held climb per round of heat
+const VM_HEAT_MAX := 0.065
+const VM_HEAT_DECAY := 3.2                        # 1/s
 
 var hp := 100.0
 var max_hp := 100.0
@@ -125,6 +188,44 @@ var _shake_t := 0.0
 var _vm_lag := 0.0                # the rifle rides the body, a beat behind the head
 var _post_mat: ShaderMaterial
 var _blur_sent := Vector2.ZERO
+# viewmodel rig (see _vm_update)
+var _vm_env: Environment
+var _vm_sky_mat: ProceduralSkyMaterial
+var _world_sky_mat: Material
+var _vm_sky_k := 1.0
+var _vm_ready := false
+var _vm_sight: Array[Vector3] = []     # each rifle's rear sight, gun-local
+var _vm_sight_rig: Array[Vector3] = [] # the same in vm_root space, at calibration
+var _vm_q_hip := Quaternion.IDENTITY   # vm_root rotation at the ready / on the sights
+var _vm_q_ads := Quaternion.IDENTITY
+var _mags: Array[MeshInstance3D] = []  # each rifle's magazine, split off its mesh
+var _mag_state := 0                    # 0 seated, 1 dropping out of the well, 2 in the left hand
+var _skel: Skeleton3D                  # the soldier's arms (_build_arms)
+var _arms_ok := false
+var _hl: Node3D                        # the left hand, for the magazine
+var _arm_bone := PackedInt32Array([-1, -1, -1, -1, -1, -1])   # L upper, fore, hand, R upper, fore, hand
+var _arm_rest: Array[Transform3D] = [Transform3D(), Transform3D(), Transform3D(), Transform3D(), Transform3D(), Transform3D()]
+var _frame_rest: Array[Basis] = [Basis(), Basis()]
+var _rel_fh: Array[Basis] = [Basis(), Basis()]
+var _palm: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
+var _sleeve_mat: BaseMaterial3D
+var _sleeve_tex: Texture2D
+var _sleeve_rough := 1.0
+var _wall_ray: RayCast3D
+var _rifle_on := true
+var _draw_t := 1.0
+var _rk_p := Vector3.ZERO              # recoil spring: translation / rotation
+var _rk_v := Vector3.ZERO
+var _rk_r := Vector3.ZERO
+var _rk_rv := Vector3.ZERO
+var _rk_heat := 0.0
+var _lk := Vector3.ZERO                # look inertia spring
+var _lk_v := Vector3.ZERO
+var _jo := Vector3.ZERO                # landing / mag-in / charge jolts
+var _jo_v := Vector3.ZERO
+var _wall := 0.0
+var _wall_v := 0.0
+var _strafe := 0.0
 
 func _on_settings() -> void:
 	fov_base = float(Game.settings.fov)
@@ -151,6 +252,13 @@ func _ready() -> void:
 	camera.far = 900.0
 	camera.cull_mask = 0xFFFFF & ~2   # everything but the viewmodel layer
 	add_child(camera)
+	# what is right in front of the lens: the rifle tucks in rather than
+	# pointing through a wall or a shelf
+	_wall_ray = RayCast3D.new()
+	_wall_ray.target_position = Vector3(0.0, 0.0, -VM_WALL_REACH)
+	_wall_ray.collision_mask = 1 | 8
+	_wall_ray.add_exception(self)
+	camera.add_child(_wall_ray)
 	_build_viewmodel()
 	breath = AudioStreamPlayer.new()
 	breath.volume_db = -16.0
@@ -168,6 +276,7 @@ func activate(on: bool) -> void:
 	_settle_head()
 	if on:
 		camera.current = true
+		_vm_sync_env()
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		if breath and not breath.playing:
 			_next_breath()
@@ -230,56 +339,75 @@ func _build_viewmodel() -> void:
 	svc.add_child(sv)
 	vm_cam = Camera3D.new()
 	vm_cam.cull_mask = 2
-	vm_cam.fov = 52.0
+	vm_cam.fov = VM_FOV_HIP
 	vm_cam.near = 0.01
 	vm_cam.far = 10.0
 	var env := Environment.new()
+	_vm_env = env
 	env.background_mode = Environment.BG_CLEAR_COLOR
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.55, 0.57, 0.6)
-	env.ambient_light_energy = 0.55
+	# The rifle is metal (metallic 1 under textured metalness maps): with the
+	# old clear-colour reflections it had nothing to reflect but transparent
+	# black and no diffuse at all, which is the near-black silhouette. It now
+	# reflects a soft grey sky of its own (the world's HDR, sun and all, blew
+	# the optic out white) whose energy follows the world sky's day / store /
+	# night fade (_vm_sync_env), and takes part of its ambient from it over a
+	# small grey floor.
+	var sky := Sky.new()
+	var psm := ProceduralSkyMaterial.new()
+	_vm_sky_mat = psm
+	psm.sky_top_color = Color(0.42, 0.5, 0.6)
+	psm.sky_horizon_color = Color(0.66, 0.68, 0.7)
+	psm.ground_horizon_color = Color(0.5, 0.48, 0.45)
+	psm.ground_bottom_color = Color(0.2, 0.19, 0.18)
+	psm.sun_angle_max = 1.0
+	psm.energy_multiplier = VM_SKY_ENERGY
+	sky.sky_material = psm
+	sky.radiance_size = Sky.RADIANCE_SIZE_32
+	env.sky = sky
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.ambient_light_sky_contribution = 0.7
+	env.ambient_light_color = Color(0.5, 0.52, 0.55)
+	env.ambient_light_energy = 0.6
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	env.tonemap_exposure = 1.0
+	env.tonemap_white = 6.0
 	vm_cam.environment = env
 	# its own fixed exposure: the world's auto exposure (main.gd) would meter
 	# this mostly-empty layer and blow the rifle out
 	vm_cam.attributes = CameraAttributesPractical.new()
 	sv.add_child(vm_cam)
 	# its own key and fill, like every FPS - at night the world lights leave
-	# the rifle a black silhouette
+	# the rifle a black silhouette. The world's sun reaches this layer too
+	# (and its shadows: the rifle goes into shade under a roof), so these are
+	# kept low enough not to double the daylight into a glow.
 	var key := DirectionalLight3D.new()
 	key.light_cull_mask = 2
-	key.light_energy = 1.3
+	key.light_energy = 0.75
 	key.light_color = Color(1, 0.94, 0.86)
-	key.rotation = Vector3(-0.9, 0.5, 0)
+	key.rotation = Vector3(-0.75, 0.55, 0)
+	key.light_specular = 0.6
+	key.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	vm_cam.add_child(key)
 	var fill := DirectionalLight3D.new()
 	fill.light_cull_mask = 2
-	fill.light_energy = 0.5
+	fill.light_energy = 0.3
 	fill.light_color = Color(0.62, 0.7, 0.82)
 	fill.rotation = Vector3(-0.2, -1.2, 0)
+	fill.light_specular = 0.3
+	fill.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	vm_cam.add_child(fill)
 
 	vm_pivot = Node3D.new()
 	vm_cam.add_child(vm_pivot)
 	vm_root = Node3D.new()
-	vm_root.position = Vector3(-0.02, -1.34, 0.02)
-	vm_root.scale = Vector3.ONE * 0.84
 	vm_pivot.add_child(vm_root)
-
-	var ps: PackedScene = load("res://assets/operator.glb")
-	op = ps.instantiate() as Node3D
-	op.rotation.y = PI
-	vm_root.add_child(op)
-	var head := op.find_child("Head", true, false) as Node3D
-	if head:
-		head.visible = false          # never fill the lens with your own skull
-	anim = op.find_child("AnimationPlayer", true, false) as AnimationPlayer
-	if anim:
-		for a in ["idle", "walk", "run", "aim", "crouch", "look_around"]:
-			if anim.has_animation(a):
-				anim.get_animation(a).loop_mode = Animation.LOOP_LINEAR
-	hand_r = op.find_child("Hand_R", true, false) as Node3D
+	# the rifle hangs off hand_r: the grip frame, which the framing places
+	# (_vm_update); the arms are then solved onto the rifle (_arms)
+	hand_r = Node3D.new()
+	hand_r.name = "hand_r"
+	vm_root.add_child(hand_r)
+	_build_arms()
 
 	gun_root = Node3D.new()
 	var lib := U.glb("res://assets/guns.glb")
@@ -294,6 +422,11 @@ func _build_viewmodel() -> void:
 			gun_root.add_child(g)
 			guns[w.id] = g
 			_gun_decal(g)
+			_vm_sight.append(_sight_of(g))
+			_mags.append(_split_mag(g))
+		else:
+			_vm_sight.append(Vector3(0.0, 0.1, 0.0))
+			_mags.append(null)
 	# the flash: a ragged star burst, hot white at the core, re-rolled every
 	# shot (rotation, size) and up for one or two frames only
 	flash_mesh = MeshInstance3D.new()
@@ -317,11 +450,7 @@ func _build_viewmodel() -> void:
 	flash_mesh.layers = 2
 	gun_root.add_child(flash_mesh)
 
-	if hand_r:
-		hand_r.add_child(gun_root)
-	else:
-		vm_cam.add_child(gun_root)
-		gun_root.position = Vector3(0.18, -0.2, -0.45)
+	hand_r.add_child(gun_root)
 	U.set_layers(op, 2)
 	U.set_layers(gun_root, 2)
 	U.set_shadows(op, false)
@@ -333,7 +462,7 @@ func _build_viewmodel() -> void:
 	flash_light.position = Vector3(0.1, -0.1, -0.6)
 	camera.add_child(flash_light)
 	select_weapon(0, true)
-	call_deferred("_calibrate_grip")
+	_vm_calibrate()
 	(func(): Fx.warm()).call_deferred()
 
 ## GUN_DECAL: "MOGGED" on both flanks of the receiver, each facing out,
@@ -373,28 +502,283 @@ func _gun_decal(g: Node3D) -> void:
 		l.rotation.y = -PI / 2 if side < 0 else PI / 2
 		g.add_child(l)
 
-## Solve the rotation that points the rifle down the camera axis while it
-## sits in the hand - the hand bone's axes are arbitrary, so guessing Euler
-## angles never works. Solved IN THE AIM POSE: the web build calibrates on the
-## first frame after the aim clip has posed the hand, and solving against the
-## rest pose instead parked the rifle a quarter-metre behind the hand.
-func _calibrate_grip() -> void:
-	_play("aim", 0.0)
-	if anim:
-		anim.advance(0.0)
-	if hand_r == null:
+## The rear sight: where the eye looks through (gun-local). A red dot's
+## reticle or a scope's lenses when the rifle has them, else the iron sights'
+## line (the front post's top), at the receiver.
+func _sight_of(g: Node3D) -> Vector3:
+	var mi := g as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		return Vector3(0.0, 0.1, 0.0)
+	var m := mi.mesh
+	var dot := AABB()
+	var glass := AABB()
+	var has_dot := false
+	var has_glass := false
+	for si in m.get_surface_count():
+		var mat := mi.get_active_material(si)
+		var nm := mat.resource_name.to_lower() if mat else ""
+		if nm.contains("reticle") or nm.contains("glass"):
+			var ab := _verts_aabb(m.surface_get_arrays(si)[Mesh.ARRAY_VERTEX])
+			if nm.contains("reticle"):
+				dot = ab
+				has_dot = true
+			else:
+				glass = ab
+				has_glass = true
+	if has_glass:
+		var c := (dot if has_dot else glass).get_center()
+		return Vector3(c.x, c.y, glass.end.z)
+	var b := m.get_aabb()
+	var top := b.get_center().y
+	for si in m.get_surface_count():
+		for v in m.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]:
+			if v.z < b.position.z + 0.12 and absf(v.x) < 0.012 and v.y > top:
+				top = v.y
+	return Vector3(0.0, top, b.get_center().z)
+
+static func _verts_aabb(vs: PackedVector3Array) -> AABB:
+	if vs.is_empty():
+		return AABB()
+	var ab := AABB(vs[0], Vector3.ZERO)
+	for v in vs:
+		ab = ab.expand(v)
+	return ab
+
+## The magazine is its own surface of the rifle mesh: lift it out into a
+## child mesh so the reload can take it out of the well and put it back.
+func _split_mag(g: Node3D) -> MeshInstance3D:
+	var mi := g as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		return null
+	var src := mi.mesh
+	var at := -1
+	for si in src.get_surface_count():
+		var mat := mi.get_active_material(si)
+		if mat == null:
+			continue
+		var tex: Texture2D = (mat as BaseMaterial3D).albedo_texture if mat is BaseMaterial3D else null
+		if mat.resource_name.to_lower().contains("mag") or (tex and tex.resource_path.to_lower().contains("_mag")):
+			at = si
+			break
+	if at < 0:
+		return null
+	var body := ArrayMesh.new()
+	var magm := ArrayMesh.new()
+	for si in src.get_surface_count():
+		var dst := magm if si == at else body
+		dst.add_surface_from_arrays(src.surface_get_primitive_type(si), src.surface_get_arrays(si))
+		dst.surface_set_material(dst.get_surface_count() - 1, mi.get_active_material(si))
+	mi.mesh = body
+	for si in body.get_surface_count():
+		mi.set_surface_override_material(si, null)
+	var mag := MeshInstance3D.new()
+	mag.name = "mag"
+	mag.mesh = magm
+	mi.add_child(mag)
+	return mag
+
+## the rifle's sky dims with the world's (main.gd fades the world sky's energy
+## between day, the store and the night)
+func _vm_sync_env() -> void:
+	if _vm_sky_mat == null or not is_inside_tree():
 		return
-	var hq := hand_r.global_basis.get_rotation_quaternion()
-	var cq := vm_cam.global_basis.get_rotation_quaternion()
-	var hs := hand_r.global_basis.get_scale().x
-	var inv := 1.0 / maxf(0.0001, hs)
-	gun_root.quaternion = hq.inverse() * cq
-	gun_root.rotate_object_local(Vector3.RIGHT, GRIP.tilt_x)
-	gun_root.rotate_object_local(Vector3.UP, GRIP.tilt_y)
-	gun_root.rotate_object_local(Vector3.BACK, GRIP.tilt_z)
-	var nudge := cq * Vector3(GRIP.x, GRIP.y, GRIP.z)
-	gun_root.position = (hq.inverse() * nudge) * inv
-	gun_root.scale = Vector3.ONE * inv * GRIP.scale
+	if _world_sky_mat == null:
+		var we := get_world_3d().environment
+		if we and we.sky and we.sky.sky_material and ("energy_multiplier" in we.sky.sky_material):
+			_world_sky_mat = we.sky.sky_material
+		else:
+			return
+	var k: float = _world_sky_mat.get(&"energy_multiplier")
+	if absf(k - _vm_sky_k) > 0.004:
+		_vm_sky_k = k
+		_vm_sky_mat.energy_multiplier = VM_SKY_ENERGY * k
+
+## The first-person arms: the Rocketbox soldier (the MILITARY outfit's own
+## model), cut down to its arms. Only the triangles skinned to the upper arms,
+## forearms, hands and fingers are kept, split into a sleeve surface (tinted
+## per outfit by dress_arms) and a glove surface; any vertex still weighted to
+## the collarbones or the spine collapses to a point behind the lens. The
+## skeleton is never animated: _arms sets the arm bones every frame and the
+## fingers are curled once, round the grip and the handguard.
+func _build_arms() -> void:
+	var ps: PackedScene = load(VM_ARMS)
+	op = ps.instantiate() as Node3D
+	op.name = "arms"
+	op.rotation.y = PI                # the soldier faces +Z; the lens looks down -Z
+	op.position = VM_ARMS_AT
+	vm_cam.add_child(op)
+	anim = op.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	if anim:
+		anim.stop()
+		anim.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
+	for n in op.find_children("*", "Skeleton3D", true, false):
+		_skel = n as Skeleton3D
+		break
+	var body: MeshInstance3D = null
+	for n in op.find_children("*", "MeshInstance3D", true, false):
+		var mi := n as MeshInstance3D
+		if mi.skin and body == null:
+			body = mi
+		else:
+			mi.visible = false        # the helmet camera, the pouches: not the arms
+	if _skel == null or body == null:
+		push_warning("player: no skinned arms in " + VM_ARMS)
+		return
+	_skel.reset_bone_poses()
+	var names := ["Bip01 L UpperArm", "Bip01 L Forearm", "Bip01 L Hand", "Bip01 R UpperArm", "Bip01 R Forearm", "Bip01 R Hand"]
+	for i in names.size():
+		var b := _skel.find_bone(names[i])
+		if b < 0:
+			push_warning("player: arms bone missing: " + names[i])
+			return
+		_arm_bone[i] = b
+		_arm_rest[i] = _skel.get_bone_global_rest(b)
+	var arm := {}                     # bone -> 1 arm, 2 hand / finger
+	for b in _skel.get_bone_count():
+		var nm := _skel.get_bone_name(b)
+		if nm.contains(" UpperArm") or nm.contains(" Forearm"):
+			arm[b] = 1
+		elif nm.contains(" Hand") or nm.contains(" Finger"):
+			arm[b] = 2
+	_arms_mesh(body, arm)
+	# hand frames at rest (skeleton space): along = wrist to middle knuckle,
+	# thumb = little-finger knuckle to index knuckle; the palm point is held
+	# object's centre, a grip's radius off the palm
+	for side in 2:
+		var lr := "L" if side == 0 else "R"
+		var h := _arm_rest[side * 3 + 2]
+		var f1 := _skel.get_bone_global_rest(_skel.find_bone("Bip01 %s Finger1" % lr)).origin
+		var f2 := _skel.get_bone_global_rest(_skel.find_bone("Bip01 %s Finger2" % lr)).origin
+		var f4 := _skel.get_bone_global_rest(_skel.find_bone("Bip01 %s Finger4" % lr)).origin
+		var a := (f2 - h.origin).normalized()
+		var t := f1 - f4
+		t = (t - a * t.dot(a)).normalized()
+		var fr := Basis(a, t, a.cross(t))
+		_frame_rest[side] = fr
+		# a x t is the palm on the left hand and the back of it on the right
+		var palm_n := a.cross(t) * (1.0 if side == 0 else -1.0)
+		var p := h.origin + (f2 - h.origin) * 0.5 + palm_n * VM_PALM_OFF
+		_palm[side] = h.basis.inverse() * (p - h.origin)
+		_rel_fh[side] = _arm_rest[side * 3 + 1].basis.inverse() * h.basis
+		# fingers curl toward the palm: about -t on the left hand, +t on the right
+		var k := -t if side == 0 else t
+		var curls: Array = VM_CURL_L if side == 0 else VM_CURL_R
+		for f in 5:
+			for j in 3:
+				var bn := "Bip01 %s Finger%d%s" % [lr, f, "" if j == 0 else str(j)]
+				var b := _skel.find_bone(bn)
+				if b < 0:
+					continue
+				var kl := (_skel.get_bone_global_rest(b).basis.inverse() * k).normalized()
+				var ang: float = curls[mini(f, 1) * 3 + j]
+				_skel.set_bone_pose_rotation(b, _skel.get_bone_rest(b).basis.get_rotation_quaternion() * Quaternion(kl, ang))
+	# the left hand as a node, for the magazine to ride in (set every frame)
+	_hl = Node3D.new()
+	_hl.name = "hand_l"
+	_skel.add_child(_hl)
+	_hl.transform = _arm_rest[2]
+	_arms_ok = true
+
+## Keep only the arm triangles of the body surface, as two surfaces over the
+## same vertices - sleeves, then gloves - and collapse every other bone.
+func _arms_mesh(mi: MeshInstance3D, arm: Dictionary) -> void:
+	var src := mi.mesh
+	var sk := mi.skin.duplicate() as Skin
+	var bind_bone := PackedInt32Array()
+	bind_bone.resize(sk.get_bind_count())
+	for i in sk.get_bind_count():
+		var b := sk.get_bind_bone(i)
+		if b < 0:
+			b = _skel.find_bone(sk.get_bind_name(i))
+		bind_bone[i] = b
+		if b >= 0 and not arm.has(b):
+			# whatever still hangs off this bone is drawn at one point, behind the lens
+			var o := _skel.get_bone_global_rest(b).affine_inverse() * VM_ARMS_HIDE
+			sk.set_bind_pose(i, Transform3D(Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO), o))
+	var si := 0
+	for i in src.get_surface_count():
+		var m := mi.get_active_material(i) as BaseMaterial3D
+		if m and m.albedo_texture and m.albedo_texture.resource_path.to_lower().contains("body"):
+			si = i
+			break
+	var arr := src.surface_get_arrays(si)
+	var bones: PackedInt32Array = arr[Mesh.ARRAY_BONES]
+	var weights: PackedFloat32Array = arr[Mesh.ARRAY_WEIGHTS]
+	var nv: int = (arr[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+	var per := bones.size() / maxi(nv, 1)
+	var cls := PackedByteArray()
+	cls.resize(nv)
+	for v in nv:
+		var best := -1
+		var bw := -1.0
+		for j in per:
+			if weights[v * per + j] > bw:
+				bw = weights[v * per + j]
+				best = bones[v * per + j]
+		var b := bind_bone[best] if best >= 0 and best < bind_bone.size() else -1
+		cls[v] = arm.get(b, 0)
+	var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+	var sleeves := PackedInt32Array()
+	var gloves := PackedInt32Array()
+	for t in idx.size() / 3:
+		var c0: int = cls[idx[t * 3]]
+		var c1: int = cls[idx[t * 3 + 1]]
+		var c2: int = cls[idx[t * 3 + 2]]
+		if c0 == 0 and c1 == 0 and c2 == 0:
+			continue
+		var dst := gloves if (c0 == 2 and c1 == 2 and c2 == 2) else sleeves
+		dst.append(idx[t * 3])
+		dst.append(idx[t * 3 + 1])
+		dst.append(idx[t * 3 + 2])
+	var flags: int = src.surface_get_format(si) & Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS
+	var mat := mi.get_active_material(si) as BaseMaterial3D
+	var out := ArrayMesh.new()
+	arr[Mesh.ARRAY_INDEX] = sleeves
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr, [], {}, flags)
+	_sleeve_mat = mat.duplicate() as BaseMaterial3D if mat else StandardMaterial3D.new()
+	_sleeve_tex = _sleeve_mat.albedo_texture
+	_sleeve_rough = _sleeve_mat.roughness
+	out.surface_set_material(0, _sleeve_mat)
+	arr[Mesh.ARRAY_INDEX] = gloves
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr, [], {}, flags)
+	out.surface_set_material(1, mat)
+	mi.mesh = out
+	mi.skin = sk
+	for i in out.get_surface_count():
+		mi.set_surface_override_material(i, null)
+	mi.custom_aabb = AABB(Vector3(-2, -1, -2), Vector3(4, 4, 4))
+
+## The outfit on the sleeves (main.gd _dress_arms). The soldier wears his
+## sleeves rolled (bare forearms in the texture), which is the MILITARY
+## outfit as it is; every other outfit rolls them down - the sleeve surface
+## becomes plain cloth: a dark suit cloth for the SUIT, the palette's middle
+## colour otherwise. The gloves never change.
+func dress_arms(skin: Dictionary) -> void:
+	if _sleeve_mat == null:
+		return
+	var id := str(skin.get("id", ""))
+	if id == "military" or (id != "suit" and not skin.has("pal")):
+		_sleeve_mat.albedo_texture = _sleeve_tex
+		_sleeve_mat.albedo_color = Color.WHITE
+		_sleeve_mat.roughness = _sleeve_rough
+		return
+	_sleeve_mat.albedo_texture = null
+	_sleeve_mat.albedo_color = VM_SUIT_CLOTH if id == "suit" else Color(str((skin.pal as Array)[1]))
+	_sleeve_mat.roughness = 0.92
+
+## The framing's inputs: each rifle's rear sight in rig space (hand_r and
+## gun_root sit at the rig's origin, square to it, so the rifle is square to
+## the lens when vm_root is), and the ready carry's rotation.
+func _vm_calibrate() -> void:
+	gun_root.transform = Transform3D.IDENTITY
+	hand_r.transform = Transform3D.IDENTITY
+	_vm_q_ads = Quaternion.IDENTITY
+	_vm_q_hip = Quaternion(Basis.from_euler(VM_HIP_ROT))
+	_vm_sight_rig.clear()
+	for i in WEAPONS.size():
+		var g: Node3D = guns.get(WEAPONS[i].id)
+		_vm_sight_rig.append(g.transform * _vm_sight[i] if g else Vector3(0.0, 0.1, 0.0))
+	_vm_ready = true
 
 func _play(name: String, blend := 0.2) -> void:
 	if anim == null or _anim_now == name or not anim.has_animation(name):
@@ -433,9 +817,19 @@ func _next_breath() -> void:
 func refresh_ammo() -> void:
 	ammo_changed.emit(mag, MAG_SIZE, WEAPONS[weapon_index].name)
 
+## Hands full (a cart, a melon, the axe) or the rifle still in the boot: the
+## arms go with it, rather than hanging in the frame holding nothing. Coming
+## back, the rifle is drawn up into the frame.
 func show_rifle(on: bool) -> void:
 	if gun_root:
 		gun_root.visible = on
+	if op:
+		op.visible = on
+	if on and not _rifle_on:
+		_draw_t = 0.0
+	if not on:
+		_mag_home()
+	_rifle_on = on
 
 func select_weapon(i: int, silent := false) -> void:
 	if i < 0 or i >= WEAPONS.size():
@@ -443,6 +837,8 @@ func select_weapon(i: int, silent := false) -> void:
 	if i != weapon_index and not silent:
 		Game.play("gun_holster", -8.0)
 		get_tree().create_timer(0.18).timeout.connect(func(): Game.play("gun_draw", -4.0))
+		_draw_t = 0.0                 # the new one comes up from below
+	_mag_home()
 	weapon_index = i
 	for id in guns:
 		guns[id].visible = (id == WEAPONS[i].id)
@@ -455,9 +851,9 @@ func try_reload() -> void:
 	reload_t = 0.0
 	_reload_stage = 0
 	Game.vo("reloading", 14.0, 0.35)
-	if anim and anim.has_animation("reload"):
-		anim.play("reload", 0.12)
-		_anim_now = "reload"
+	# the reload is procedural (_vm_reload), timed to the sounds below: the
+	# operator's reload clip is 1.6 s against the 1.9 s reload and drops the
+	# rifle out of the frame
 
 func _reload_tick(dt: float) -> void:
 	if not reloading:
@@ -468,6 +864,14 @@ func _reload_tick(dt: float) -> void:
 	var stages := [[0.08, "gun_magout"], [0.34, "gun_fumble"], [0.55, "gun_magin"], [0.8, "gun_charge"]]
 	while _reload_stage < stages.size() and reload_t >= stages[_reload_stage][0] * RELOAD_TIME:
 		Game.play(stages[_reload_stage][1], -5.0)
+		# the rifle answers the hands: a shove up as the mag seats, a jerk as
+		# the bolt is racked
+		if _reload_stage == 2:
+			_jo_v += Vector3(0.0, 0.55, 0.0)
+			_rk_rv += Vector3(0.9, 0.0, 0.0)
+		elif _reload_stage == 3:
+			_jo_v += Vector3(0.0, 0.0, 0.45)
+			_rk_rv += Vector3(-0.5, 0.0, 1.2)
 		_reload_stage += 1
 	if reload_t >= RELOAD_TIME:
 		reloading = false
@@ -504,6 +908,13 @@ func _fire() -> void:
 	_hjv.x += 0.12 * brace * randf_range(0.8, 1.2)
 	_hjv.z += randf_range(-0.22, 0.22) * brace
 	_hpv.z += 0.3 * brace
+	# the rifle itself (cosmetic, the rounds leave the lens): straight back
+	# into the shoulder, the muzzle climbing about the grip, a random twist;
+	# held heat makes a long burst climb and walk, then settle
+	var vk := lerpf(1.0, 0.45, ads_t)
+	_rk_v += Vector3(randf_range(-1.0, 1.0) * VM_KICK_V.x, VM_KICK_V.y * randf_range(0.6, 1.2), VM_KICK_V.z * randf_range(0.9, 1.1)) * vk
+	_rk_rv += Vector3(VM_KICK_RV.x * randf_range(0.85, 1.15), randf_range(-1.0, 1.0) * VM_KICK_RV.y, randf_range(-1.0, 1.0) * VM_KICK_RV.z) * vk
+	_rk_heat += 1.0
 	kick = 1.0
 	shake = maxf(shake, 0.12)
 	flash_light.light_energy = randf_range(3.4, 4.8)
@@ -781,6 +1192,9 @@ func _move(dt: float) -> void:
 		# the helmet keeps going when the boots stop: a nod and a twist
 		_hjv.x -= 0.9 * _land_amp
 		_hjv.z += randf_range(-0.45, 0.45) * _land_amp
+		# the rifle's weight carries on down: it dips, muzzle first, and comes back
+		_jo_v += Vector3(0.0, -0.75, 0.1) * _land_amp
+		_lk_v += Vector3(-1.4, 0.0, randf_range(-0.6, 0.6)) * _land_amp
 	_was_floor = is_on_floor()
 	exertion = clampf(exertion + (dt * 0.09 if sprinting else -dt * 0.06), 0.0, 1.0)
 
@@ -802,12 +1216,8 @@ func _move(dt: float) -> void:
 		if _rustle_t <= 0.0:
 			_rustle_t = randf_range(4.0, 8.0)
 			Game.play("gear_rustle", -16.0)
-	if reloading:
-		pass                     # the reload clip plays out, walking or not
-	elif speed > 0.5:
-		_play("run" if sprinting else "walk", 0.25)
-	else:
-		_play("aim", 0.25)
+	# no clip switching: the arms hold the aim pose and the walk, the sprint
+	# carry and the reload are laid over it in _vm_update
 
 ## what you are standing on: tile in the store, asphalt and paving on the lot
 ## and road, grass on the verge, gravel on the unmade ground beyond it
@@ -950,21 +1360,277 @@ func _head(dt: float, dip: float) -> void:
 
 	# the viewmodel camera rides the main one
 	vm_cam.global_transform = camera.global_transform
-	vm_cam.fov = lerpf(52.0, 38.0, ads_t)
-	# helmet framing: from up on the shell the rifle sits lower and a touch
-	# nearer; on the sights it comes back to the aim line
-	var hip := 1.0 - ads_t
-	vm_root.position = Vector3(-0.02 - ads_t * 0.05 - 0.012 * hip, -1.34 + ads_t * 0.035 - 0.05 * hip, 0.02 + 0.025 * hip + kick * 0.055)
-	# the rig about the eye: mouse sway, muzzle climb, the sprint carry (low
-	# and canted), a lag behind the landing and a little of its own bob. The
-	# rifle rides the body, not the helmet, so it holds against the head's
-	# nods and jolts and trails its bounce by a beat.
 	_vm_lag = lerpf(_vm_lag, hy + dip, clampf(dt * 11.0, 0.0, 1.0))
-	var sk := _sprint_k * _sprint_k * (3.0 - 2.0 * _sprint_k)
-	var sw := 1.0 - ads_t * 0.75
-	var hold := 0.45 * sw
-	vm_pivot.rotation = Vector3(
-		_sway.y * sw + kick * 0.045 * (1.0 - ads_t * 0.55) - sk * 0.2 - (bob_nod + _hj.x + _turn_off.x) * hold,
-		_sway.x * sw + sk * 0.32 - (bob_yaw + _hj.y + _turn_off.y) * hold,
-		_sway.x * sw * 0.6 + sk * 0.24 + _punch_side * pk * 0.016 - (bob_roll + _lean + _hj.z) * hold)
-	vm_pivot.position = Vector3(-bob_x * 0.25 * sw - sk * 0.02, -dip * 0.55 + (_vm_lag - hy - dip) * 0.8 * sw - sk * 0.03, kick * 0.012)
+	_vm_update(dt, hy, dip, bob_x, pk, Vector3(bob_nod + _hj.x + _turn_off.x,
+		bob_yaw + _hj.y + _turn_off.y, bob_roll + _lean + _hj.z))
+
+# ------------------------------------------------------------------ viewmodel motion
+
+static func _smooth(x: float) -> float:
+	x = clampf(x, 0.0, 1.0)
+	return x * x * (3.0 - 2.0 * x)
+
+## 0 -> 1 between a and b, smoothstepped
+static func _seg(u: float, a: float, b: float) -> float:
+	return _smooth((u - a) / maxf(b - a, 0.0001))
+
+## The whole rig, every frame, with no allocations. vm_root holds the base
+## framing - the rear sight at VM_HIP_AT, squared up and canted by
+## VM_HIP_ROT, eased onto the lens axis (VM_ADS_AT) on the sights - and
+## vm_pivot lays every procedural layer over it, rotating about the grip
+## (VM_PIVOT) so the muzzle climbs and the carry drops about the hands, not
+## the eye. The rifle rides the body, not the helmet: it holds against part of
+## the head's nods and jolts and bobs a beat behind it in the same step phase,
+## so the two never fight.
+func _vm_update(dt: float, hy: float, dip: float, bob_x: float, pk: float, head_rot: Vector3) -> void:
+	if not _vm_ready or op == null or not op.visible:
+		return
+	var wi := weapon_index
+	_vm_sync_env()
+	# --- base framing, hip to sights: smootherstep, rising through a small arc
+	var a := ads_t
+	var e := a * a * a * (a * (a * 6.0 - 15.0) + 10.0)
+	vm_cam.fov = lerpf(VM_FOV_HIP, VM_FOV_ADS, e)
+	var rb := Basis(_vm_q_hip.slerp(_vm_q_ads, e))
+	var at := VM_HIP_AT.lerp(VM_ADS_AT, e) + VM_ADS_ARC * sin(PI * e)
+	vm_root.transform = Transform3D(rb, at - rb * _vm_sight_rig[wi])
+	var sw := 1.0 - e * 0.75            # a braced aim soaks up most of the sway
+	var still := 1.0 - _bob_amp
+
+	# --- springs, integrated in fixed sub-steps so any frame rate feels the same
+	var steady := lerpf(1.0, 0.55, a)
+	_rk_heat *= exp(-dt * VM_HEAT_DECAY)
+	var heat := minf(_rk_heat * VM_HEAT_CLIMB, VM_HEAT_MAX) * steady
+	var rk_to_r := Vector3(heat, 0.0, 0.0)
+	var rk_to_p := Vector3(0.0, 0.0, heat * 0.35)
+	var lk_to := Vector3(clampf(-_turn_w.y * VM_LOOK_LAG, -0.07, 0.07),
+		clampf(-_turn_w.x * VM_LOOK_LAG, -0.09, 0.09),
+		clampf(_turn_w.x * VM_LOOK_ROLL, -0.07, 0.07)) * sw
+	var wd := VM_WALL_REACH
+	if _wall_ray.is_colliding():
+		wd = camera.global_position.distance_to(_wall_ray.get_collision_point())
+	var wall_to := clampf((VM_WALL_REACH - wd) / (VM_WALL_REACH - VM_WALL_MIN), 0.0, 1.0)
+	var n := clampi(ceili(dt * 240.0), 1, 24)
+	var h := dt / float(n)
+	for i in n:
+		_rk_v += ((rk_to_p - _rk_p) * 320.0 - _rk_v * 27.0) * h
+		_rk_p += _rk_v * h
+		_rk_rv += ((rk_to_r - _rk_r) * 210.0 - _rk_rv * 19.0) * h
+		_rk_r += _rk_rv * h
+		_lk_v += ((lk_to - _lk) * 95.0 - _lk_v * 13.0) * h
+		_lk += _lk_v * h
+		_jo_v += (-_jo * 170.0 - _jo_v * 15.0) * h
+		_jo += _jo_v * h
+		_wall_v += ((wall_to - _wall) * 70.0 - _wall_v * 15.0) * h
+		_wall += _wall_v * h
+
+	var rot := Vector3.ZERO
+	var pos := Vector3.ZERO
+	# --- rides the body: holds against part of the head's nods and jolts
+	rot -= head_rot * 0.45 * sw
+	pos.y += -dip * 0.55 + (_vm_lag - hy - dip) * 0.8 * sw
+	pos.x -= bob_x * 0.25 * sw
+	# --- its own bob, in the head's step phase and a beat behind it
+	var sp := _bob_sprint
+	var ph := _step_ph * PI - VM_BOB_LAG
+	var s1 := sin(ph)
+	var s2 := 0.5 - 0.5 * cos(2.0 * ph)
+	var bamp := _bob_amp * (1.0 - e * 0.8) * lerpf(1.0, 2.2, sp)
+	pos.x += s1 * VM_BOB.x * bamp
+	pos.y += (s2 - 0.5) * VM_BOB.y * bamp
+	rot.z += s1 * VM_BOB.z * bamp
+	rot.y += s1 * VM_BOB.z * 0.35 * bamp
+	# --- breathing and a slow drift when you stand; deeper when blown
+	var br := VM_BREATH * (1.0 + exertion * 1.5) * lerpf(1.0, 0.3, e) * (0.35 + 0.65 * still)
+	rot.x += sin(_breath_t) * br
+	pos.y += sin(_breath_t) * br * 0.25
+	rot.y += sin(_breath_t * 0.37 + 0.8) * br * 0.7
+	rot.z += sin(_breath_t * 0.23 + 2.1) * br * 0.5
+	# --- trails the look, and leans into a strafe
+	rot += _lk
+	var right := Vector3(cos(yaw), 0.0, -sin(yaw))
+	_strafe = lerpf(_strafe, velocity.dot(right) / SPRINT, 1.0 - exp(-dt * 6.0))
+	rot.z -= _strafe * VM_STRAFE_ROLL * sw
+	pos.x -= _strafe * 0.012 * sw
+	# --- sprint carry: low, across and canted
+	var sk := _smooth(_sprint_k)
+	rot += VM_SPRINT_ROT * sk
+	pos += VM_SPRINT_POS * sk
+	# --- recoil, the punch's flick, jolts
+	rot += _rk_r
+	rot.z += _punch_side * pk * 0.02
+	pos += _rk_p + _jo
+	# --- a wall in the way: tuck it in
+	var wk := _smooth(_wall) * (1.0 - e * 0.4)
+	rot += VM_WALL_ROT * wk
+	pos += VM_WALL_POS * wk
+	# --- the reload: the rifle is canted and lifted to the hands, the left
+	# hand goes to the magazine, down to the vest, back, then over to the handle
+	var palm_to := VM_HANDGUARD
+	var u := clampf(reload_t / RELOAD_TIME, 0.0, 1.0) if reloading else 1.0
+	if reloading:
+		var tin := _seg(u, 0.0, 0.1) * (1.0 - _seg(u, 0.84, 1.0))
+		var magw := 1.0 - _seg(u, 0.56, 0.7)
+		rot += Vector3(0.16, 0.14, -0.55) * tin * magw
+		rot += Vector3(0.06, 0.05, 0.3) * tin * (1.0 - magw)
+		pos += Vector3(-0.035, 0.035, 0.02) * tin
+		# fumbling at the vest
+		rot.z += sin(u * 70.0) * 0.012 * _seg(u, 0.24, 0.3) * (1.0 - _seg(u, 0.4, 0.46))
+		palm_to = _vm_reload_palm(u)
+	_mag_update(u)
+	# --- the draw: up from below, a touch past, settle
+	if _draw_t < 1.0:
+		_draw_t = minf(1.0, _draw_t + dt / VM_DRAW_TIME)
+	var t1 := _draw_t - 1.0
+	var dk := 1.0 - (1.0 + 2.2 * t1 * t1 * t1 + 1.2 * t1 * t1)   # 1 -> 0, easing out with overshoot
+	rot += VM_DRAW_ROT * dk
+	pos += VM_DRAW_POS * dk
+
+	var pb := Basis.from_euler(rot)
+	var piv := at + VM_PIVOT
+	vm_pivot.transform = Transform3D(pb, piv - pb * piv + pos)
+	_arms(palm_to, e, u)
+
+## where the left palm goes through the reload (gun-local), timed to the
+## sounds in _reload_tick: magout .08, fumble .34, magin .55, charge .80
+func _vm_reload_palm(u: float) -> Vector3:
+	var hg := VM_HANDGUARD
+	var grab := VM_MAG_GRAB
+	var drop := VM_MAG_GRAB + VM_MAG_DROP
+	var ch := VM_CHARGE
+	if u < 0.08:
+		return hg.lerp(grab, _seg(u, 0.0, 0.075))
+	if u < 0.16:
+		return grab.lerp(drop, _seg(u, 0.08, 0.15))
+	if u < 0.3:
+		return drop.lerp(VM_POUCH, _seg(u, 0.16, 0.28))
+	if u < 0.42:
+		return VM_POUCH + Vector3(0.0, sin(u * 40.0) * 0.015, 0.0)
+	if u < 0.55:
+		var k := _seg(u, 0.42, 0.5)
+		return VM_POUCH.lerp(drop, k).lerp(grab, _seg(u, 0.5, 0.55))
+	if u < 0.66:
+		return grab.lerp(ch, _seg(u, 0.57, 0.66))
+	if u < 0.8:
+		return ch
+	if u < 0.86:
+		return ch + Vector3(0.0, 0.0, VM_CHARGE_PULL) * _seg(u, 0.8, 0.83)
+	return (ch + Vector3(0.0, 0.0, VM_CHARGE_PULL)).lerp(hg, _seg(u, 0.86, 0.97))
+
+## the magazine: seated, sliding out of the well, or in the left hand
+func _mag_update(u: float) -> void:
+	var m: MeshInstance3D = _mags[weapon_index] if weapon_index < _mags.size() else null
+	if m == null:
+		return
+	var want := 0
+	if reloading:
+		if u >= 0.08 and u < 0.16:
+			want = 1
+		elif u >= 0.16 and u < 0.55:
+			want = 2
+	var g: Node3D = guns.get(WEAPONS[weapon_index].id)
+	if want == 2 and _hl == null:
+		want = 1                       # no hand to take it: it stays by the well
+	if want == 2 and _mag_state != 2:
+		m.reparent(_hl, true)          # it goes with the hand from here
+	elif want != 2 and _mag_state == 2:
+		m.reparent(g, false)           # back in the well (the hand is off-screen or on it)
+	_mag_state = want
+	if want == 0:
+		m.transform = Transform3D.IDENTITY
+	elif want == 1:
+		m.transform = Transform3D(Basis.IDENTITY, VM_MAG_DROP * _seg(u, 0.08, 0.15))
+
+func _mag_home() -> void:
+	for i in _mags.size():
+		var m := _mags[i]
+		if m == null:
+			continue
+		var g: Node3D = guns.get(WEAPONS[i].id)
+		if g and m.get_parent() != g:
+			m.reparent(g, false)
+		m.transform = Transform3D.IDENTITY
+	_mag_state = 0
+
+## The arms, every frame: each shoulder behind and under the lens where the
+## body would carry it, each palm on the rifle - the right round the pistol
+## grip, the left under the handguard (or on the magazine, or at the handle,
+## through a reload) - the hands turned to hold it and the elbows bent down
+## and out. The rifle does not move for the arms.
+func _arms(palm_local: Vector3, e: float, u: float) -> void:
+	if not _arms_ok:
+		return
+	var g: Node3D = guns.get(WEAPONS[weapon_index].id)
+	if g == null or not gun_root.visible:
+		return
+	var cam := vm_cam.global_transform
+	var ski := _skel.global_transform.affine_inverse()
+	var gx := g.global_transform
+	var gb := ski.basis * gx.basis.orthonormalized()     # gun axes in skeleton space
+	var pole_b := ski.basis * cam.basis
+	# right: round the grip
+	_arm_solve(1, ski * (cam * VM_SHOULDER_R_HIP.lerp(VM_SHOULDER_R_ADS, e)), ski * (gx * VM_GRIP),
+		gb * _hand_frame(VM_HAND_R_ALONG, VM_HAND_R_THUMB), pole_b * VM_POLE_R)
+	# left: cupped under the handguard; turned onto the magazine through the
+	# middle of a reload
+	var fl := _hand_frame(VM_HAND_L_ALONG, VM_HAND_L_THUMB)
+	if reloading:
+		var w := _seg(u, 0.0, 0.07) * (1.0 - _seg(u, 0.55, 0.64))
+		if w > 0.0:
+			fl = Basis(Quaternion(fl).slerp(Quaternion(_hand_frame(VM_HAND_MAG_ALONG, VM_HAND_MAG_THUMB)), w))
+	_arm_solve(0, ski * (cam * VM_SHOULDER_L_HIP.lerp(VM_SHOULDER_L_ADS, e)), ski * (gx * palm_local),
+		gb * fl, pole_b * VM_POLE_L)
+
+## an orthonormal hand frame (along, thumb side, their cross) from two
+## rough directions
+static func _hand_frame(along: Vector3, thumb: Vector3) -> Basis:
+	var a := along.normalized()
+	var t := (thumb - a * thumb.dot(a)).normalized()
+	return Basis(a, t, a.cross(t))
+
+## Two-bone IK in skeleton space for one arm (side 0 left, 1 right): the hand
+## takes frame (as a rest-relative turn) with its palm point on palm_t; the
+## wrist lands where that puts it, the elbow toward pole. The shoulder slides
+## along when the arm is short - it is behind the lens. The forearm takes half
+## the wrist's twist, as a real one does.
+func _arm_solve(side: int, s: Vector3, palm_t: Vector3, frame: Basis, pole_dir: Vector3) -> void:
+	var i := side * 3
+	var ur := _arm_rest[i]
+	var fr := _arm_rest[i + 1]
+	var hr := _arm_rest[i + 2]
+	var hb := frame * _frame_rest[side].inverse() * hr.basis
+	var w := palm_t - hb * _palm[side]
+	var la := (fr.origin - ur.origin).length()
+	var lb := (hr.origin - fr.origin).length()
+	var st := w - s
+	var d := st.length()
+	var reach := (la + lb) * 0.99
+	if d > reach:
+		s += st * ((d - reach) / d)
+		st = w - s
+		d = st.length()
+	if d < 0.0001:
+		return
+	var dir := st / d
+	d = clampf(d, absf(la - lb) + 0.001, la + lb - 0.001)
+	var pole := pole_dir - dir * pole_dir.dot(dir)
+	if pole.length_squared() < 0.000001:
+		return
+	pole = pole.normalized()
+	var x := (la * la - lb * lb + d * d) / (2.0 * d)
+	var el := s + dir * x + pole * sqrt(maxf(la * la - x * x, 0.0))
+	var ru := Basis(Quaternion((fr.origin - ur.origin).normalized(), (el - s).normalized()))
+	var ub := ru * ur.basis
+	var fd := (w - el).normalized()
+	var fb := Basis(Quaternion(ru * (hr.origin - fr.origin).normalized(), fd)) * (ru * fr.basis)
+	# half the wrist's twist into the forearm
+	var ideal := hb * _rel_fh[side].inverse()
+	var zc := fb.z - fd * fb.z.dot(fd)
+	var zt := ideal.z - fd * ideal.z.dot(fd)
+	if zc.length_squared() > 0.000001 and zt.length_squared() > 0.000001:
+		fb = Basis(fd, zc.signed_angle_to(zt, fd) * 0.5) * fb
+	_skel.set_bone_global_pose(_arm_bone[i], Transform3D(ub, s))
+	_skel.set_bone_global_pose(_arm_bone[i + 1], Transform3D(fb, el))
+	_skel.set_bone_global_pose(_arm_bone[i + 2], Transform3D(hb, w))
+	if side == 0 and _hl:
+		_hl.transform = Transform3D(hb, w)

@@ -119,7 +119,7 @@ func _build_actor() -> void:
 	foot0 = a.position.y * s
 	actor_anim = actor_model.find_child("AnimationPlayer", true, false) as AnimationPlayer
 	if actor_anim:
-		for n in ["idle", "walk", "crouch"]:
+		for n in ["idle", "walk", "crouch", "reach"]:
 			if actor_anim.has_animation(n):
 				actor_anim.get_animation(n).loop_mode = Animation.LOOP_LINEAR
 	for n in ["Foot_L", "Foot_R"]:
@@ -279,7 +279,10 @@ func _process(dt: float) -> void:
 			cam_b = Vector3(-1.9, 1.62, -5.0)
 		"reach", "lift":
 			_put_actor(-0.10, -3.05, 0, 1)
-			_clip("crouch" if id == "reach" else "idle", 0.35)
+			# a bend into the waist-high boot where the model has one (the
+			# soldier's "reach"; a squat reads wrong there), else the crouch
+			var bend := "reach" if actor_anim and actor_anim.has_animation("reach") else "crouch"
+			_clip(bend if id == "reach" else "idle", 0.35)
 			lid_a = 1.0
 			if id == "lift" and u > 0.25 and kit_cam:
 				kit_cam.visible = false                        # he has it now

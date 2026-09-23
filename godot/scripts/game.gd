@@ -44,13 +44,14 @@ const DEFAULTS := {"master": 80, "music": 45, "sfx": 85, "sens": 100, "invert": 
 const SETTINGS_VERSION := 2
 var settings := DEFAULTS.duplicate()
 
-func load_settings() -> void:
+func load_settings(apply := true) -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS_PATH)
 	var fresh: bool = int(cfg.get_value("meta", "version", 0)) < SETTINGS_VERSION
 	for k in DEFAULTS:
 		settings[k] = DEFAULTS[k] if fresh and k not in ["name", "skin"] else cfg.get_value("settings", k, DEFAULTS[k])
-	apply_settings()
+	if apply:
+		apply_settings()
 
 func save_settings() -> void:
 	var cfg := ConfigFile.new()
@@ -163,7 +164,10 @@ func _ready() -> void:
 		add_child(p)
 		_pool.append(p)
 	GunSound.warm.call_deferred()      # gunfire layers loaded before the first shot
-	load_settings.call_deferred()      # the viewport has to exist first
+	# read now, so the lobby is built in the saved outfit; apply once the
+	# viewport exists
+	load_settings(false)
+	apply_settings.call_deferred()
 	# CSS pixels are logical pixels: on a Retina screen the browser draws the
 	# web HUD at 2x. Scale the 2D layers the same way (3D is unaffected).
 	_ui_scale.call_deferred()

@@ -32,3 +32,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+----------------------------------------------------------------------
+CMU Graphics Lab Motion Capture Database, mocap.cs.cmu.edu
+The attack*, death*, fall_prone, crawl* and writhe* animations in enemy_0*.glb
+were retargeted from the CMU Graphics Lab Motion Capture Database
+(http://mocap.cs.cmu.edu), created with funding from NSF EIA-0196217, via the
+BVH conversion at github.com/una-dinosauria/cmu-mocap. Trials used: 76_01,
+13_17, 111_19 (attacks); 140_01, 90_18, 113_08 (deaths); 111_03 (fall, crawl);
+133_01, 133_02 (crawls); 140_03, 111_21, 140_04 (lying on the ground).
+Licence: the data may be used freely in research and commercial products,
+including games; the raw motion data may not be resold or redistributed as a
+motion-capture product.

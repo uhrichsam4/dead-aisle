@@ -295,15 +295,10 @@ func _on_play() -> void:
 func _dress_arms() -> void:
 	if player == null or player.op == null:
 		return
-	# the rifle hangs off the hand: its paint and the decal are not sleeves
-	for mi in player.op.find_children("*", "MeshInstance3D", true, false):
-		if player.gun_root and player.gun_root.is_ancestor_of(mi):
-			continue
-		for si in (mi as MeshInstance3D).mesh.get_surface_count():
-			(mi as MeshInstance3D).set_surface_override_material(si, null)
-	var skin: Dictionary = menu.SKINS[menu.skin_index()]
-	if skin.has("vm_pal"):
-		_apply_skin(player.op, {"pal": skin.vm_pal, "skin": skin.skin}, player.gun_root)
+	# the arms are the Rocketbox soldier's: the outfit tints its sleeve
+	# material (MILITARY wears the ACU as it is, SUIT a dark suit cloth); the
+	# gloves and the rifle never change (player.gd dress_arms)
+	player.dress_arms(menu.SKINS[menu.skin_index()])
 
 func _quit_to_menu() -> void:
 	get_tree().paused = false

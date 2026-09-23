@@ -1,6 +1,7 @@
 # Military_Male_03 -> godot/assets/skin_military.glb: the enemy pipeline
 # (build.py) plus a helmet GoPro lifted off operator.glb, Foot_L/Foot_R
-# markers and a hand-keyed "crouch" (a bend into the boot) for arrival.gd
+# markers, a hand-keyed "reach" (a bend into the boot) for arrival.gd and the
+# Rocketbox crouch_in / crouch / crouch_out and idle_look mocap
 import bpy, sys, math
 from mathutils import Matrix, Vector
 sys.argv = [sys.argv[0], '--', '__none__']
@@ -27,8 +28,29 @@ def mil_material(mat, code, part):
     nt.links.new(nm.outputs['Normal'], bsdf.inputs['Normal'])
     mat.use_backface_culling = True
 g['build_material'] = mil_material
+g['COMBAT'] = []                                # the soldier gets no CMU clips
+g['CLIPS'] = [
+    ('idle', 'idle_neutral_01', False, True),
+    ('idle_2', 'idle_neutral_02', False, True),
+    ('idle_3', 'idle_neutral_03', False, True),
+    ('idle_look', 'idle_look_around_01', False, True),
+    ('idle_look_2', 'idle_look_around_02', False, True),
+    ('idle_look_3', 'idle_look_around_03', False, True),
+    ('walk', 'walk_neutral', True, True),
+    ('walk_2', 'walk_neutral_01', True, True),
+    ('walk_3', 'walk_neutral_02', True, True),
+    ('run', 'run_neutral', True, True),
+    ('run_2', 'run_neutral_01', True, True),
+    ('run_3', 'run_slow_02', True, True),       # m_run_neutral_02 duplicates m_run_neutral
+    ('crouch_in', 'crouch_in', True, False),     # the hips' 19 cm step back is spread over the clip
+    ('crouch', 'crouch_idle', False, True),
+    ('crouch_2', ('mirror', 'crouch'), False, True),
+    ('crouch_3', 'f_crouch_idle', False, True),  # the only other crouch take
+    ('crouch_out', 'crouch_out', True, False),
+]
 
 g['build']('skin_military', 'Military_Male_03', 'm', 'sm004')
+g['write_speeds']('skin_military', g['SPEEDS']['skin_military'])
 
 sc = bpy.context.scene
 arm = bpy.data.objects['Armature']
@@ -102,7 +124,7 @@ cam.matrix_world = w
 cam.name = 'action_camera'
 print('CAM seat', tuple(round(x, 3) for x in seat), 'pieces', len(keep))
 
-# --- "crouch": the idle's first frame, bent at the waist and knees, arms out to the boot
+# --- "reach": the idle's first frame, bent at the waist and knees, arms out to the boot
 idle = bpy.data.actions['idle']
 arm.animation_data.action = idle
 arm.animation_data.action_slot = idle.slots[0]
@@ -135,7 +157,7 @@ toe_z = min((arm.matrix_world @ arm.pose.bones[n].head).z for n in ('Bip01 L Toe
 pb = arm.pose.bones['Bip01']
 pb.matrix = Matrix.Translation((0, 0, 0.005 - toe_z)) @ pb.matrix
 bpy.context.view_layer.update()
-act = bpy.data.actions.new('crouch')
+act = bpy.data.actions.new('reach')
 arm.animation_data.action = act
 for f in (1, 30):
     for pb in arm.pose.bones:

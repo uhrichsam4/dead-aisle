@@ -1,0 +1,68 @@
+{
+ "enemy_01": {
+  "attack": {
+   "hit": 0.8
+  },
+  "attack_2": {
+   "hit": 0.63
+  },
+  "attack_3": {
+   "hit": 0.77
+  }
+ },
+ "enemy_02": {
+  "attack": {
+   "hit": 0.8
+  },
+  "attack_2": {
+   "hit": 0.63
+  },
+  "attack_3": {
+   "hit": 0.77
+  }
+ },
+ "enemy_03": {
+  "attack": {
+   "hit": 0.8
+  },
+  "attack_2": {
+   "hit": 0.63
+  },
+  "attack_3": {
+   "hit": 0.77
+  }
+ },
+ "enemy_04": {
+  "attack": {
+   "hit": 0.8
+  },
+  "attack_2": {
+   "hit": 0.63
+  },
+  "attack_3": {
+   "hit": 0.77
+  }
+ },
+ "enemy_05": {
+  "attack": {
+   "hit": 0.8
+  },
+  "attack_2": {
+   "hit": 0.63
+  },
+  "attack_3": {
+   "hit": 0.77
+  }
+ },
+ "enemy_06": {
+  "attack": {
+   "hit": 0.8
+  },
+  "attack_2": {
+   "hit": 0.63
+  },
+  "attack_3": {
+   "hit": 0.77
+  }
+ }
+}
