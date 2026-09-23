@@ -74,7 +74,9 @@ func apply_settings() -> void:
 		AudioServer.set_bus_mute(i, v <= 0.0)
 	# the web renders at one pixel per CSS pixel (DPR_CAP 1) times RENDER
 	# QUALITY - half resolution per axis on a Retina screen
-	get_viewport().scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	# FSR2 (temporal AA with the upscale) below native; it cannot go above 1
+	get_viewport().scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR2 if render_scale() <= 1.0 else Viewport.SCALING_3D_MODE_BILINEAR
+	get_viewport().screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED if render_scale() <= 1.0 else Viewport.SCREEN_SPACE_AA_FXAA
 	get_viewport().scaling_3d_scale = render_scale()
 	settings_changed.emit()
 
@@ -88,6 +90,56 @@ func _setup_buses() -> void:
 			var i := AudioServer.bus_count - 1
 			AudioServer.set_bus_name(i, b)
 			AudioServer.set_bus_send(i, "Master")
+	# the ear: a low-pass and a dip on SFX that GunSound leans on after
+	# sustained fire. Both stay bypassed until they are needed.
+	var sfx := AudioServer.get_bus_index("SFX")
+	if AudioServer.get_bus_effect_count(sfx) == 0:
+		var lpf := AudioEffectLowPassFilter.new()
+		lpf.cutoff_hz = 20000.0
+		AudioServer.add_bus_effect(sfx, lpf, EAR_LPF)
+		AudioServer.add_bus_effect(sfx, AudioEffectAmplify.new(), EAR_AMP)
+		AudioServer.set_bus_effect_enabled(sfx, EAR_LPF, false)
+		AudioServer.set_bus_effect_enabled(sfx, EAR_AMP, false)
+	# the player's own gunfire rides its own bus, so the ear duck on SFX does
+	# not swallow the shots that caused it; it follows the SFX slider
+	if AudioServer.get_bus_index("Guns") == -1:
+		AudioServer.add_bus()
+		AudioServer.set_bus_name(AudioServer.bus_count - 1, "Guns")
+		AudioServer.set_bus_send(AudioServer.bus_count - 1, "Master")
+	if not settings_changed.is_connected(_sync_gun_bus):
+		settings_changed.connect(_sync_gun_bus)
+
+const EAR_LPF := 0
+const EAR_AMP := 1
+var _ear := 0.0
+
+## Keeps the Guns bus on the SFX slider (volume and mute).
+func _sync_gun_bus() -> void:
+	var s := AudioServer.get_bus_index("SFX")
+	var g := AudioServer.get_bus_index("Guns")
+	if s == -1 or g == -1:
+		return
+	AudioServer.set_bus_volume_db(g, AudioServer.get_bus_volume_db(s))
+	AudioServer.set_bus_mute(g, AudioServer.is_bus_mute(s))
+
+## 0 = clear hearing, 1 = the ears are shut down after a long burst: SFX
+## loses its top end and dips a few dB. Subtle by design.
+func set_ear_duck(k: float) -> void:
+	k = clampf(k, 0.0, 1.0)
+	if is_equal_approx(k, _ear):
+		return
+	_ear = k
+	var sfx := AudioServer.get_bus_index("SFX")
+	if AudioServer.get_bus_effect_count(sfx) < 2:
+		return
+	var on := k > 0.001
+	AudioServer.set_bus_effect_enabled(sfx, EAR_LPF, on)
+	AudioServer.set_bus_effect_enabled(sfx, EAR_AMP, on)
+	if on:
+		var lpf := AudioServer.get_bus_effect(sfx, EAR_LPF) as AudioEffectLowPassFilter
+		lpf.cutoff_hz = lerpf(20000.0, 3800.0, pow(k, 0.6))
+		var amp := AudioServer.get_bus_effect(sfx, EAR_AMP) as AudioEffectAmplify
+		amp.volume_db = -4.0 * k
 
 func _on_node_added(n: Node) -> void:
 	if n is AudioStreamPlayer and (n as AudioStreamPlayer).bus == &"Master":
@@ -110,6 +162,7 @@ func _ready() -> void:
 		p.bus = &"SFX"
 		add_child(p)
 		_pool.append(p)
+	GunSound.warm.call_deferred()      # gunfire layers loaded before the first shot
 	load_settings.call_deferred()      # the viewport has to exist first
 	# CSS pixels are logical pixels: on a Retina screen the browser draws the
 	# web HUD at 2x. Scale the 2D layers the same way (3D is unaffected).

@@ -305,76 +305,182 @@ func _apply_video() -> void:
 # ------------------------------------------------------------------ setup
 
 ## LIGHT_DAY / LIGHT_NIGHT from the web build: broad daylight everywhere
-## except inside, where it fades (dt * .55) to the dark bodycam interior
-const DAY := {"fog": Color("8fb6cf"), "fogd": 0.0099, "amb": 0.9, "ambc": Color("cfdbe4"), "sun": 2.6,
-	"sunc": Color("fff2dc"), "fill": 0.95, "fillc": Color("dfe8f2"), "sky": 1.0, "envi": 0.55}
+## except inside, where it fades (dt * .55) to the dark bodycam interior.
+## Day now leans on the HDRI for ambient (envi 1.0) with a hard warm sun, so
+## shade reads blue-grey and lit faces warm instead of one flat grey wash.
+const DAY := {"fog": Color("9fb3cc"), "fogd": 0.0042, "amb": 0.85, "ambc": Color("cfdbe4"), "sun": 3.6,
+	"sunc": Color("ffe4c2"), "fill": 0.42, "fillc": Color("b9cde8"), "sky": 1.0, "envi": 1.0,
+	"vfog": 0.0045, "vfogc": Color("d9e4f0")}
 const NIGHT := {"fog": Color("0b1014"), "fogd": 0.034, "amb": 0.38, "ambc": Color("50606f"), "sun": 1.0,
-	"sunc": Color("9fb4d8"), "fill": 0.20, "fillc": Color("8ea4c4"), "sky": 0.12, "envi": 0.12}
+	"sunc": Color("9fb4d8"), "fill": 0.20, "fillc": Color("8ea4c4"), "sky": 0.12, "envi": 0.12,
+	"vfog": 0.022, "vfogc": Color("39424c")}
+## the HDRI's sun (u .595, 48 deg up) through Godot's panorama mapping
+## (u = atan2(x, -z) / TAU): the shadow-casting light points exactly at it
+const SUN_DIR := Vector3(-0.375, 0.743, 0.554)
+const SKY_HDRI := "res://assets/cc0/kloofendal_sky/kloofendal_48d_partly_cloudy_puresky_2k.hdr"
 var env: Environment
 var sky_mat: PanoramaSkyMaterial
 var fill: DirectionalLight3D
 var light_mix := 1.0
+var _mix_applied := -1.0
 
 func _light_apply(dt: float) -> void:
 	var day := 0.0 if Game.phase == "inside" else 1.0
 	light_mix += (day - light_mix) * clampf(dt * 0.55, 0.0, 1.0)
 	var m := light_mix
+	# the action cam's metering: slow to open up in the dark (the store comes
+	# up out of the murk over ten-odd seconds); stepping out it lags the
+	# daylight fading in, so the picture blows out for a couple of seconds,
+	# then snaps down and tracks the sun quickly
+	var ae := env.get_meta(&"ae", null) as CameraAttributesPractical
+	if ae:
+		var spd := 0.15 if day < 0.5 else (0.2 if m < 0.8 else 1.2)
+		if not is_equal_approx(ae.auto_exposure_speed, spd):
+			ae.auto_exposure_speed = spd
+	# every sky write re-filters the radiance cubemap: only touch it while
+	# the fade is actually moving
+	if absf(m - _mix_applied) < 0.0005:
+		return
+	_mix_applied = m
 	sky_mat.energy_multiplier = lerpf(NIGHT.sky, DAY.sky, m)
 	env.fog_light_color = (NIGHT.fog as Color).lerp(DAY.fog, m)
 	env.fog_density = lerpf(NIGHT.fogd, DAY.fogd, m)
 	env.ambient_light_color = (NIGHT.ambc as Color).lerp(DAY.ambc, m)
 	env.ambient_light_energy = lerpf(NIGHT.amb, DAY.amb, m)
 	env.ambient_light_sky_contribution = lerpf(NIGHT.envi, DAY.envi, m)
+	env.volumetric_fog_density = lerpf(NIGHT.vfog, DAY.vfog, m)
+	env.volumetric_fog_albedo = (NIGHT.vfogc as Color).lerp(DAY.vfogc, m)
 	moon.light_energy = lerpf(NIGHT.sun, DAY.sun, m) * 0.62
 	moon.light_color = (NIGHT.sunc as Color).lerp(DAY.sunc, m)
 	fill.light_energy = lerpf(NIGHT.fill, DAY.fill, m) * 0.62
 	fill.light_color = (NIGHT.fillc as Color).lerp(DAY.fillc, m)
+	# settled, the metering opens the dark store about 2.2x (the mosque, lit
+	# brighter, about 1.3x): take that back out of the base exposure, so the
+	# settled picture is the one the lights were tuned for and only the
+	# adaptation shows
+	if ae:
+		env.tonemap_exposure = 0.92 * lerpf(0.8 if Game.act == 2 else 0.5, 1.0, sqrt(m))
 
 func _environment() -> void:
 	env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
 	sky_mat = PanoramaSkyMaterial.new()
-	sky_mat.panorama = U.tex("res://assets/tex/sky.jpg")
+	var hdri := U.tex(SKY_HDRI)
+	sky_mat.panorama = hdri if hdri else U.tex("res://assets/tex/sky.jpg")
+	sky_mat.filter = true
 	sky_mat.energy_multiplier = 1.0
 	sky.sky_material = sky_mat
+	# the fade re-filters the sky: spread that over frames instead of a spike
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
+	sky.radiance_size = Sky.RADIANCE_SIZE_256
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.7
+	env.ambient_light_energy = DAY.amb
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	# ACES to match the viewmodel's own environment (player.gd), with a white
+	# point high enough that sunlit concrete keeps its colour
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
-	env.tonemap_exposure = 1.05
+	env.tonemap_exposure = 0.92
+	env.tonemap_white = 6.0
+	env.adjustment_enabled = true
+	env.adjustment_contrast = 1.06
+	env.adjustment_saturation = 1.08
+	# soft bloom on tubes, signs and muzzle flash only; bloom (whole-image
+	# glow) is what greyed the old picture out
 	env.glow_enabled = true
-	env.glow_intensity = 0.7
-	env.glow_bloom = 0.06
-	env.glow_hdr_threshold = 1.0
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
+	env.glow_intensity = 0.55
+	env.glow_strength = 1.0
+	env.glow_bloom = 0.012
+	env.glow_hdr_threshold = 1.1
+	env.glow_hdr_scale = 2.0
+	env.glow_hdr_luminance_cap = 8.0
+	for i in 7:
+		env.set_glow_level(i, [0.0, 0.6, 1.0, 0.8, 0.5, 0.0, 0.0][i])
 	env.fog_enabled = true
-	env.fog_light_color = Color(0.2, 0.24, 0.3)
+	env.fog_light_color = DAY.fog
 	env.fog_density = DAY.fogd
 	env.fog_sky_affect = 0.0          # three.js fog never touched the backdrop
-	env.fog_aerial_perspective = 0.4
+	env.fog_aerial_perspective = 0.75 # distance takes the sky's own colour
+	env.fog_sun_scatter = 0.18
+	# low froxel haze: sun shafts through the doors outside, and the red
+	# emergency strobe hanging in the air of the dark store
+	env.volumetric_fog_enabled = true
+	env.volumetric_fog_density = DAY.vfog
+	env.volumetric_fog_albedo = DAY.vfogc
+	env.volumetric_fog_anisotropy = 0.55
+	env.volumetric_fog_length = 72.0
+	env.volumetric_fog_detail_spread = 2.0
+	env.volumetric_fog_ambient_inject = 0.15
+	env.volumetric_fog_sky_affect = 0.0
+	env.volumetric_fog_temporal_reprojection_enabled = true
 	env.ssao_enabled = true
-	env.ssao_radius = 1.2
-	env.ssao_intensity = 1.4
+	env.ssao_radius = 1.0
+	env.ssao_intensity = 1.8
+	env.ssao_power = 1.4
+	env.ssao_detail = 0.6
+	env.ssao_light_affect = 0.12
+	env.ssao_ao_channel_affect = 0.4
+	# one-bounce colour: sunlit asphalt tints the car and the store front
+	env.ssil_enabled = true
+	env.ssil_radius = 4.0
+	env.ssil_intensity = 1.0
+	env.ssil_sharpness = 0.98
+	env.ssil_normal_rejection = 1.0
+	# glossy floor tiles and car paint, kept cheap
+	env.ssr_enabled = true
+	env.ssr_max_steps = 48
+	env.ssr_fade_in = 0.15
+	env.ssr_fade_out = 2.0
+	env.ssr_depth_tolerance = 0.25
 	var we := WorldEnvironment.new()
 	we.environment = env
+	# auto exposure, metered like a GoPro but held to a narrow window: Godot
+	# exposes by scale / average luminance (the mean of max(r, g, b), linear),
+	# clamped to sensitivity * 0.00125. Measured on this scene: the lot and
+	# the lobby meter 0.33-0.43, the dark store 0.09-0.18, the mosque hall
+	# 0.24-0.5. The top of the window sits on the daylight, so outside
+	# settles exactly where it was tuned; the bottom stops the store from
+	# being lifted to daylight. Speed is set per phase in _light_apply, and
+	# the viewmodel camera keeps its own fixed exposure (player.gd).
+	var ae := CameraAttributesPractical.new()
+	ae.auto_exposure_enabled = true
+	ae.auto_exposure_min_sensitivity = 0.15 / 0.00125
+	ae.auto_exposure_max_sensitivity = 0.34 / 0.00125
+	ae.auto_exposure_scale = 0.34
+	ae.auto_exposure_speed = 0.6
+	we.camera_attributes = ae
+	env.set_meta(&"ae", ae)
 	add_child(we)
 
 	moon = DirectionalLight3D.new()
 	moon.name = "Moon"
-	moon.light_color = Color(0.72, 0.78, 0.9)
-	moon.light_energy = 0.9
+	moon.light_color = DAY.sunc
+	moon.light_energy = DAY.sun * 0.62
 	moon.shadow_enabled = true
-	moon.directional_shadow_max_distance = 90.0
+	# the sun's real 0.5 deg disc: contact-hard, soft a metre away
+	moon.light_angular_distance = 0.6
+	moon.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
+	moon.directional_shadow_split_1 = 0.06
+	moon.directional_shadow_split_2 = 0.16
+	moon.directional_shadow_split_3 = 0.4
+	moon.directional_shadow_blend_splits = true
+	moon.directional_shadow_max_distance = 110.0
+	moon.directional_shadow_fade_start = 0.85
+	moon.shadow_bias = 0.03
+	moon.shadow_normal_bias = 1.2
+	moon.shadow_blur = 1.2
 	add_child(moon)
-	moon.look_at_from_position(Vector3(-14, 18, -8), Vector3.ZERO, Vector3.UP)
-	# bounce/fill from the opposite side, no shadow: without it the whole TOPS
-	# frontage and anyone crossing the lot at you is a silhouette
+	moon.look_at_from_position(SUN_DIR * 24.0, Vector3.ZERO, Vector3.UP)
+	# cool sky fill from the opposite side, no shadow: keeps the shaded side
+	# of everyone crossing the lot from going to a silhouette
 	fill = DirectionalLight3D.new()
 	fill.name = "SunFill"
 	fill.shadow_enabled = false
+	fill.light_specular = 0.25        # a fill with a highlight gives it away
 	add_child(fill)
-	fill.look_at_from_position(Vector3(13, 11, 24), Vector3.ZERO, Vector3.UP)
+	fill.look_at_from_position(Vector3(-SUN_DIR.x * 20.0, 9.0, -SUN_DIR.z * 20.0), Vector3.ZERO, Vector3.UP)
 	# the store's coloured practicals: a blue wash at the back, green by the
 	# deli, and the EXIT glow over the doors
 	for l in [[Color("5a7fae"), 12.0, 20.0, Vector3(0, 3, -13)], [Color("6a8a5a"), 9.0, 13.0, Vector3(-17, 3, 8)],
@@ -392,7 +498,18 @@ func _environment() -> void:
 	emergency.light_energy = 1.4
 	emergency.omni_range = 24.0
 	emergency.position = Vector3(0, 3.6, 0)
+	emergency.light_volumetric_fog_energy = 1.6
 	add_child(emergency)
+
+	# FSR2 upscaling carries its own temporal AA; it needs a scale of at most
+	# 1, so supersampling (res over 100 on a 1x screen) stays bilinear
+	_upscaler()
+
+func _upscaler() -> void:
+	var vp := get_viewport()
+	var sc := Game.render_scale()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR2 if sc <= 1.0 else Viewport.SCALING_3D_MODE_BILINEAR
+	vp.scaling_3d_scale = sc
 
 func _post() -> void:
 	var layer := CanvasLayer.new()
