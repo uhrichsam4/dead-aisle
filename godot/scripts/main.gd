@@ -203,20 +203,21 @@ func _lobby_doll(idx: int) -> void:
 	if lobby_doll:
 		lobby_doll.queue_free()
 	var skin: Dictionary = menu.SKINS[idx]
-	var path := "res://assets/skin_suit.glb" if skin.id == "suit" else "res://assets/operator.glb"
+	var path := str(skin.get("model", "res://assets/skin_suit.glb" if skin.id == "suit" else "res://assets/operator.glb"))
 	var ps: PackedScene = load(path)
 	if ps == null:
 		return
 	lobby_doll = Node3D.new()
 	var model := ps.instantiate() as Node3D
-	model.rotation.y = PI
+	model.rotation.y = float(skin.get("face", PI))
 	lobby_doll.add_child(model)
 	var a := U.local_aabb(model)
 	var s := 1.78 / maxf(0.2, a.size.y)
 	model.scale *= s
 	model.position.y = -a.position.y * s
+	# the operator fetches his camera from the boot; the soldier wears his
 	var cam := model.find_child("action_camera", true, false) as Node3D
-	if cam:
+	if cam and not skin.has("model"):
 		cam.visible = false
 	if skin.has("pal"):
 		_apply_skin(model, skin)
@@ -241,10 +242,12 @@ func _lobby_doll(idx: int) -> void:
 
 ## skinApply: clothing materials ranked dark to light take the palette in
 ## order; anything that reads as skin takes the skin tone
-func _apply_skin(root: Node, skin: Dictionary) -> void:
+func _apply_skin(root: Node, skin: Dictionary, skip: Node = null) -> void:
 	var mats := []
 	var owners := []
 	for mi in root.find_children("*", "MeshInstance3D", true, false):
+		if skip and skip.is_ancestor_of(mi):
+			continue
 		var m3 := mi as MeshInstance3D
 		for si in m3.mesh.get_surface_count():
 			var m := m3.get_active_material(si)
@@ -285,7 +288,22 @@ func _on_play() -> void:
 	if menu_cam:
 		menu_cam.queue_free()
 		menu_cam = null
+	_dress_arms()
 	_start_drive()
+
+## the first-person arms wear the outfit's sleeves when it names some
+func _dress_arms() -> void:
+	if player == null or player.op == null:
+		return
+	# the rifle hangs off the hand: its paint and the decal are not sleeves
+	for mi in player.op.find_children("*", "MeshInstance3D", true, false):
+		if player.gun_root and player.gun_root.is_ancestor_of(mi):
+			continue
+		for si in (mi as MeshInstance3D).mesh.get_surface_count():
+			(mi as MeshInstance3D).set_surface_override_material(si, null)
+	var skin: Dictionary = menu.SKINS[menu.skin_index()]
+	if skin.has("vm_pal"):
+		_apply_skin(player.op, {"pal": skin.vm_pal, "skin": skin.skin}, player.gun_root)
 
 func _quit_to_menu() -> void:
 	get_tree().paused = false

@@ -4,6 +4,10 @@ Attribution: Microsoft Rocketbox
   enemy_01.glb  Male_Adult_04
   enemy_02.glb  Male_Adult_12
   enemy_03.glb  Male_Adult_18
+  enemy_04.glb  Male_Adult_17
+  enemy_05.glb  Female_Party_02
+  enemy_06.glb  Business_Female_01
+  skin_military.glb  Military_Male_03 (player skin; action camera added)
   Animations: m_/f_idle_neutral_01 (motextr_static), m_/f_walk_neutral and
   m_/f_run_neutral (motextr_xy), retargeted and made in-place.
 

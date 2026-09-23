@@ -17,6 +17,11 @@ const TXT := Color("e8e6dc")
 ## the web's SKINS: palette outfits for the operator (dark -> light) + flesh
 const SKINS := [
 	{"id": "operator", "name": "OPERATOR", "pal": ["#23262a", "#3f444a", "#6b5b43"], "skin": "#ffd9a0", "chip": "#3f444a"},
+	# a full model rather than a palette: a Rocketbox soldier with the GoPro on
+	# his helmet; `face` turns him to the camera (he faces +Z, the operator -Z)
+	# and `vm_pal` dresses the first-person arms to match
+	{"id": "military", "name": "MILITARY", "chip": "#6b705c", "model": "res://assets/skin_military.glb",
+		"face": 0.0, "vm_pal": ["#3f423a", "#6e7366", "#9a9d8e"], "skin": "#b98a66"},
 	{"id": "ranger", "name": "RANGER", "pal": ["#1b2a18", "#3c5233", "#7d7a4a"], "skin": "#e8b98a", "chip": "#3c5233"},
 	{"id": "medic", "name": "MEDIC", "pal": ["#d9dbd8", "#b5322c", "#8f9295"], "skin": "#f0c49a", "chip": "#b5322c"},
 	{"id": "nightfall", "name": "NIGHTFALL", "pal": ["#14161b", "#242a35", "#3d4756"], "skin": "#d9a97e", "chip": "#242a35"},
@@ -302,7 +307,7 @@ func _build_lobby() -> void:
 	skins.add_child(oh)
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 7)
+	row.add_theme_constant_override("separation", 5)
 	skins.add_child(row)
 	for i in SKINS.size():
 		row.add_child(_skin_card(i))
@@ -488,7 +493,7 @@ func _skin_card(i: int) -> Button:
 	var s: Dictionary = SKINS[i]
 	var b := Button.new()
 	b.focus_mode = Control.FOCUS_NONE
-	b.custom_minimum_size = Vector2(74, 58)
+	b.custom_minimum_size = Vector2(66, 58)      # ten outfits in the width the web's nine had
 	b.set_meta("i", i)
 	var v := VBoxContainer.new()
 	v.set_anchors_preset(Control.PRESET_FULL_RECT)

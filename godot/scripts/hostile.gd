@@ -8,13 +8,14 @@ const Fx := preload("res://scripts/fx.gd")
 
 signal killed(h: Node)
 
-# --- the people: assets/enemies/enemy_01..03.glb (04-06 cut at the player's
-# request). Their clips are in place; these are the speeds the feet travel at
-# 1x and scale 1
+# --- the people: assets/enemies/enemy_01..06.glb, 05 and 06 women (04-06
+# are the player's picks). Their clips are in place; these are the speeds the
+# feet travel at 1x and scale 1
 const MODELS := ["res://assets/enemies/enemy_01.glb", "res://assets/enemies/enemy_02.glb",
-	"res://assets/enemies/enemy_03.glb"]
-const WALK_V := [1.40, 1.40, 1.40]
-const RUN_V := [3.07, 3.07, 3.07]
+	"res://assets/enemies/enemy_03.glb", "res://assets/enemies/enemy_04.glb",
+	"res://assets/enemies/enemy_05.glb", "res://assets/enemies/enemy_06.glb"]
+const WALK_V := [1.40, 1.40, 1.40, 1.40, 1.30, 1.30]
+const RUN_V := [3.07, 3.07, 3.07, 3.07, 3.16, 3.16]
 const HEAD_R := 0.12          # the head's hit sphere, metres at scale 1
 
 var hp := 100.0

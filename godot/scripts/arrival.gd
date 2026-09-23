@@ -98,9 +98,14 @@ func _build_actor() -> void:
 	actor = Node3D.new()
 	actor.name = "ArrivalActor"
 	get_tree().current_scene.add_child(actor)
-	var ps: PackedScene = load("res://assets/operator.glb")
+	# the outfit's own model when it has one (the soldier), else the operator
+	var skin := {}
+	var menu = get_tree().current_scene.get("menu")
+	if menu:
+		skin = menu.SKINS[menu.skin_index()]
+	var ps: PackedScene = load(str(skin.get("model", "res://assets/operator.glb")))
 	actor_model = ps.instantiate() as Node3D
-	actor_model.rotation.y = PI
+	actor_model.rotation.y = float(skin.get("face", PI))
 	actor.add_child(actor_model)
 	U.set_shadows(actor_model, true)
 	# he walks to the boot to FETCH his camera, so it cannot already be on his helmet
