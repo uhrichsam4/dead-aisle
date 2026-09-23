@@ -1,13 +1,9 @@
-Enemy character models enemy_01.glb .. enemy_06.glb are derived from
 Microsoft Rocketbox avatars and animations (https://github.com/microsoft/Microsoft-Rocketbox).
 Attribution: Microsoft Rocketbox
 
   enemy_01.glb  Male_Adult_04
   enemy_02.glb  Male_Adult_12
   enemy_03.glb  Male_Adult_18
-  enemy_04.glb  Male_Adult_20
-  enemy_05.glb  Female_Adult_04
-  enemy_06.glb  Female_Adult_12
   Animations: m_/f_idle_neutral_01 (motextr_static), m_/f_walk_neutral and
   m_/f_run_neutral (motextr_xy), retargeted and made in-place.
 
