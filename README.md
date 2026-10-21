@@ -25,8 +25,11 @@ load. Everything else is local.
 
 ## Deploying
 
-`./build.sh` then upload `dist/` to any static host. See `deploy/README.txt`
-for EdgeOne Pages specifics.
+`./deploy.sh` builds and publishes to GitHub Pages (the `gh-pages` branch),
+live at https://uhrichsam4.github.io/dead-aisle/
+
+For any other static host, `./build.sh` then upload `dist/`. See
+`deploy/README.txt` for EdgeOne Pages specifics.
 
 ## Multiplayer
 
